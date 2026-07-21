@@ -1,0 +1,10 @@
+# Core rendering + BLE
+bleak>=0.21
+pillow>=10.0
+numpy>=1.24
+
+# Amfitrack positioning (USB dongle, amfiprot protocol).
+# Only needed for real position tracking; rendering, --dry-run and --simulate
+# work without these installed.
+amfiprot>=1.0
+amfiprot-amfitrack>=0.0.1
