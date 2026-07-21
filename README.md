@@ -127,8 +127,34 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | `--min-move MM` | Deadband; darunter gilt der Kopf als stehend (Default 0.05) |
 | `--timeout S` | Abbruch eines Durchlaufs nach S Sekunden (Default 30) |
 | `--vendor-id` / `--product-id` | USB-IDs des Amfitrack-Dongles (Default `0x0C17` / `0x0D12`) |
-| `--sensor-id` | `tx_id` des Sensor-Knotens (Default: erster gefundener) |
+| `--sensor-id` | optionaler `tx_id`-Filter unter den „Sensor"-Nodes (Default: alle) |
 | `--simulate` | Fake-Tracker (keine Hardware) zum Testen des Loops |
+
+## Debug / Diagnose
+
+Jedes dieser Flags führt eine eigenständige Prüfung aus und beendet sich danach —
+unabhängig vom Druck. Fehlt Hardware oder eine Bibliothek, kommt eine klare Meldung
+statt eines Tracebacks.
+
+| Flag | Wirkung |
+|---|---|
+| `--pos` | Gibt die **Live-Position** vom Amfitrack aus: `x/y/z` (mm) + Verfahr-Wert entlang `--advance-axis` + Spaltenindex. Zugleich Kalibrierhilfe für Achse und `--mm-per-column`. Ctrl+C beendet. |
+| `--list-nodes` | Verbindet zum USB-Dongle und listet alle Nodes (`name`/`uuid`/`tx_id`), markiert die als „Sensor" erkannten. |
+| `--scan-ble` | Scannt BLE und listet Geräte (`address` + `name`) – zum Finden der PrintheadBLE-Adresse (nutzbar mit `--address`). |
+| `--nozzle-test` | Feuert per BLE ein Testmuster (alle 164 Düsen kurz an → Einzeldüse über alle Zeilen → Blank), um die Patrone zu prüfen. |
+
+```bash
+# Live-Position anschauen (Achse/Skalierung kalibrieren):
+python main.py --pos --advance-axis y --mm-per-column 0.2
+python main.py --pos --simulate                  # ohne Hardware
+
+# Amfitrack-Nodes / BLE-Geräte auflisten:
+python main.py --list-nodes
+python main.py --scan-ble
+
+# Düsen der Patrone testen:
+python main.py --nozzle-test
+```
 
 ## BLE-Protokoll (aus README_BLE_INTERFACE.md / Firmware)
 
