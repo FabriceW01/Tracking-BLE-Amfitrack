@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from typing import Optional
 
-from .config import BleSettings, RenderSettings, TrackingSettings
+from . import patterns
+from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
 from .controller import PrintController
-from .geometry import DEVICE_NAME
+from .geometry import DEVICE_NAME, IMAGE_HEIGHT
+from .nozzle_map import parse_order
+from .rendering import render_text
 
 
 def _auto_int(value: str) -> int:
@@ -29,7 +33,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                     "column-by-column on an HP302 cartridge via the PrintheadBLE "
                     "ESP32, driven either by Amfitrack position or by a timer.")
     ap.add_argument("text", nargs="?",
-                    help="Text to print (not needed for a --pos/--scan-ble/... debug run)")
+                    help="Text to print. Alternative content sources: "
+                         "--calibrate or --pattern NAME (not needed for a "
+                         "--pos/--scan-ble/... debug run)")
 
     # --- text / render -----------------------------------------------------
     g = ap.add_argument_group("text rendering")
@@ -46,6 +52,38 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Flip vertically if the print is upside-down")
     g.add_argument("--mirror-x", action="store_true",
                    help="Reverse column order if the print is mirrored")
+
+    # --- test patterns (alternative to text) --------------------------------
+    g = ap.add_argument_group("test patterns (alternative to text)")
+    g.add_argument("--calibrate", action="store_true",
+                   help="Print a calibration ruler instead of text: a continuous "
+                        "baseline with full-height ticks every --calib-major-mm "
+                        "and short ticks every --calib-minor-mm, to measure the "
+                        "real mm/column against --mm-per-column/--dpi")
+    g.add_argument("--pattern", choices=sorted(patterns.PATTERNS),
+                   help="Print a test pattern instead of text; runs through the "
+                        "same tracking/time pipeline as text")
+    g.add_argument("--pattern-length-mm", type=float, default=200.0,
+                   help="Physical length of --calibrate/--pattern (default 200)")
+    g.add_argument("--pattern-square-mm", type=float, default=10.0,
+                   help="Column period in mm for checkerboard/v-stripes/diagonal "
+                        "(default 10)")
+    g.add_argument("--pattern-square-rows", type=int, default=20,
+                   help="Row period for checkerboard/h-stripes (default 20)")
+    g.add_argument("--calib-major-mm", type=float, default=10.0,
+                   help="Distance between full-height ruler ticks (default 10 = 1cm)")
+    g.add_argument("--calib-minor-mm", type=float, default=1.0,
+                   help="Distance between short ruler ticks (default 1 = 1mm)")
+
+    # --- nozzle mapping (correct scrambled wiring) --------------------------
+    g = ap.add_argument_group("nozzle mapping (correct scrambled wiring)")
+    g.add_argument("--nozzle-block-size", type=int,
+                   help="Size of a repeating physical nozzle block; enables "
+                        "remapping (must be given together with --nozzle-order)")
+    g.add_argument("--nozzle-order",
+                   help="Comma-separated new order within each block, e.g. "
+                        "'2,3,4,1,5' for a block size of 5 (1-indexed, must be "
+                        "a permutation)")
 
     # --- printing mode -----------------------------------------------------
     g = ap.add_argument_group("printing mode")
@@ -123,13 +161,26 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="Fire a nozzle test pattern over BLE and exit")
 
     args = ap.parse_args(argv)
-    if not _debug_mode(args) and args.text is None:
-        ap.error("the 'text' argument is required (or use a debug flag like --pos)")
+    if not _debug_mode(args):
+        n = _content_mode_count(args)
+        if n == 0:
+            ap.error("provide 'text', or --calibrate, or --pattern NAME "
+                     "(or use a debug flag like --pos)")
+        if n > 1:
+            ap.error("choose only one of: text, --calibrate, --pattern")
+    if bool(args.nozzle_block_size) != bool(args.nozzle_order):
+        ap.error("--nozzle-block-size and --nozzle-order must be given together")
+    if args.nozzle_block_size is not None and args.nozzle_block_size <= 0:
+        ap.error("--nozzle-block-size must be a positive integer")
     return args
 
 
 def _debug_mode(args: argparse.Namespace) -> bool:
     return bool(args.pos or args.list_nodes or args.scan_ble or args.nozzle_test)
+
+
+def _content_mode_count(args: argparse.Namespace) -> int:
+    return int(args.text is not None) + int(args.calibrate) + int(args.pattern is not None)
 
 
 def build_ble(args: argparse.Namespace) -> BleSettings:
@@ -153,14 +204,48 @@ def build_tracking(args: argparse.Namespace) -> TrackingSettings:
     return tracking
 
 
-def build_controller(args: argparse.Namespace) -> PrintController:
+def build_ink(args: argparse.Namespace, mm_per_column: float):
+    """Return (ink, label) from whichever content source was selected."""
+    if args.calibrate:
+        ink = patterns.ruler_pattern(
+            args.pattern_length_mm, mm_per_column,
+            major_every_mm=args.calib_major_mm, minor_every_mm=args.calib_minor_mm)
+        return ink, f"[calibrate {args.pattern_length_mm:.0f}mm]"
+    if args.pattern:
+        ink = patterns.PATTERNS[args.pattern](
+            args.pattern_length_mm, mm_per_column,
+            square_mm=args.pattern_square_mm, square_rows=args.pattern_square_rows)
+        return ink, f"[pattern {args.pattern} {args.pattern_length_mm:.0f}mm]"
     render = RenderSettings(
         text=args.text, font=args.font, render_size=args.render_size,
         threshold=args.threshold, margin=args.margin, invert=args.invert,
         flip_y=args.flip_y, mirror_x=args.mirror_x)
-    return PrintController(render, build_ble(args), build_tracking(args),
+    return render_text(render), args.text
+
+
+def build_nozzle_map(args: argparse.Namespace) -> Optional[NozzleMapSettings]:
+    if args.nozzle_block_size is None:
+        return None
+    try:
+        order = parse_order(args.nozzle_order, args.nozzle_block_size)
+    except ValueError as exc:
+        raise SystemExit(f"printhead: error: {exc}")
+    if IMAGE_HEIGHT % args.nozzle_block_size:
+        leftover = IMAGE_HEIGHT % args.nozzle_block_size
+        print(f"NOTE: {IMAGE_HEIGHT} rows is not a multiple of block size "
+              f"{args.nozzle_block_size}; the trailing {leftover} row(s) are "
+              f"left unmapped.")
+    return NozzleMapSettings(block_size=args.nozzle_block_size, order=order)
+
+
+def build_controller(args: argparse.Namespace) -> PrintController:
+    tracking = build_tracking(args)
+    ink, label = build_ink(args, tracking.mm_per_column)
+    render = RenderSettings(text=label)
+    return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
-                           dry_run=args.dry_run)
+                           dry_run=args.dry_run, ink=ink,
+                           nozzle_map=build_nozzle_map(args))
 
 
 def _run_debug(args: argparse.Namespace) -> None:
@@ -173,7 +258,7 @@ def _run_debug(args: argparse.Namespace) -> None:
     elif args.scan_ble:
         asyncio.run(diagnostics.scan_ble(build_ble(args)))
     elif args.nozzle_test:
-        asyncio.run(diagnostics.nozzle_test(build_ble(args)))
+        asyncio.run(diagnostics.nozzle_test(build_ble(args), build_nozzle_map(args)))
 
 
 def main(argv=None) -> None:
