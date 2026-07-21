@@ -28,7 +28,8 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Render text to a 164px-tall B/W image and print it "
                     "column-by-column on an HP302 cartridge via the PrintheadBLE "
                     "ESP32, driven either by Amfitrack position or by a timer.")
-    ap.add_argument("text", help="Text to print")
+    ap.add_argument("text", nargs="?",
+                    help="Text to print (not needed for a --pos/--scan-ble/... debug run)")
 
     # --- text / render -----------------------------------------------------
     g = ap.add_argument_group("text rendering")
@@ -87,7 +88,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--product-id", type=_auto_int, default=0x0D12,
                    help="Amfitrack USB product id (default 0x0D12)")
     g.add_argument("--sensor-id", type=_auto_int,
-                   help="tx_id of the sensor node (default: first found)")
+                   help="optional tx_id filter among the 'Sensor' nodes "
+                        "(default: use all)")
     g.add_argument("--simulate", action="store_true",
                    help="Use a fake tracker (no hardware) to test the loop")
 
@@ -107,20 +109,37 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Render (and optionally preview/simulate) only; no BLE")
     g.add_argument("--verbose", action="store_true")
 
-    return ap.parse_args(argv)
+    # --- debug / diagnostics (each runs a standalone check and exits) -------
+    g = ap.add_argument_group("debug / diagnostics (each runs a check and exits)")
+    mx = g.add_mutually_exclusive_group()
+    mx.add_argument("--pos", action="store_true",
+                    help="Live-print the Amfitrack position (x/y/z + advance + "
+                         "column); works with --simulate. Ctrl+C to stop")
+    mx.add_argument("--list-nodes", action="store_true",
+                    help="List the Amfitrack USB nodes (name/uuid/tx_id) and exit")
+    mx.add_argument("--scan-ble", action="store_true",
+                    help="Scan for BLE devices (address + name) and exit")
+    mx.add_argument("--nozzle-test", action="store_true",
+                    help="Fire a nozzle test pattern over BLE and exit")
+
+    args = ap.parse_args(argv)
+    if not _debug_mode(args) and args.text is None:
+        ap.error("the 'text' argument is required (or use a debug flag like --pos)")
+    return args
 
 
-def build_controller(args: argparse.Namespace) -> PrintController:
-    render = RenderSettings(
-        text=args.text, font=args.font, render_size=args.render_size,
-        threshold=args.threshold, margin=args.margin, invert=args.invert,
-        flip_y=args.flip_y, mirror_x=args.mirror_x)
+def _debug_mode(args: argparse.Namespace) -> bool:
+    return bool(args.pos or args.list_nodes or args.scan_ble or args.nozzle_test)
 
-    ble = BleSettings(
+
+def build_ble(args: argparse.Namespace) -> BleSettings:
+    return BleSettings(
         device_name=args.device_name, address=args.address,
         scan_timeout=args.scan_timeout, auto_start=args.auto_start,
         once=args.once, period=args.period, verbose=args.verbose)
 
+
+def build_tracking(args: argparse.Namespace) -> TrackingSettings:
     # --no-track forces time mode; otherwise honour --mode.
     mode = args.mode if args.track else "time"
     tracking = TrackingSettings(
@@ -131,16 +150,39 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         vendor_id=args.vendor_id, product_id=args.product_id,
         sensor_id=args.sensor_id)
     tracking.mm_per_column = tracking.resolve_mm_per_column(args.dpi)
+    return tracking
 
-    return PrintController(render, ble, tracking, simulate=args.simulate,
-                           preview=args.preview, dry_run=args.dry_run)
+
+def build_controller(args: argparse.Namespace) -> PrintController:
+    render = RenderSettings(
+        text=args.text, font=args.font, render_size=args.render_size,
+        threshold=args.threshold, margin=args.margin, invert=args.invert,
+        flip_y=args.flip_y, mirror_x=args.mirror_x)
+    return PrintController(render, build_ble(args), build_tracking(args),
+                           simulate=args.simulate, preview=args.preview,
+                           dry_run=args.dry_run)
+
+
+def _run_debug(args: argparse.Namespace) -> None:
+    """Dispatch a standalone diagnostic; each connects, reports/acts, then exits."""
+    from . import diagnostics
+    if args.pos:
+        asyncio.run(diagnostics.monitor_position(build_tracking(args), args.simulate))
+    elif args.list_nodes:
+        diagnostics.list_nodes(build_tracking(args))
+    elif args.scan_ble:
+        asyncio.run(diagnostics.scan_ble(build_ble(args)))
+    elif args.nozzle_test:
+        asyncio.run(diagnostics.nozzle_test(build_ble(args)))
 
 
 def main(argv=None) -> None:
     args = parse_args(argv)
-    controller = build_controller(args)
     try:
-        asyncio.run(controller.run())
+        if _debug_mode(args):
+            _run_debug(args)
+        else:
+            asyncio.run(build_controller(args).run())
     except KeyboardInterrupt:
         print("\nInterrupted.")
 
