@@ -73,9 +73,10 @@ class TrackingSettings:
     poll_hz: float = 200.0          # position polling rate
 
     # --- USB dongle (amfiprot) --------------------------------------------
-    vendor_id: int = 0x0C17         # Amfitech USB vendor id
-    product_id: int = 0x0D12        # sensor dongle product id
-    sensor_id: Optional[int] = None  # tx_id of the sensor node (None = first)
+    vendor_id: int = 0x0C17          # Amfitech USB vendor id
+    product_id: int = 0x0D12         # sensor dongle product id (tried first)
+    product_id_source: int = 0x0D01  # source dongle product id (fallback)
+    sensor_id: Optional[int] = None  # optional tx_id filter among "Sensor" nodes
 
     def resolve_mm_per_column(self, dpi: Optional[float]) -> float:
         """If a DPI was given on the CLI, derive mm/column from it (25.4/DPI)."""

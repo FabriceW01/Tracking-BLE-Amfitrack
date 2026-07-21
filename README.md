@@ -148,13 +148,18 @@ bis der nächste ihn überschreibt.
 ## Amfitrack-Anbindung / Hinweis zum Payload
 
 Der Zugriff erfolgt über die USB-Pakete `amfiprot` und `amfiprot_amfitrack`
-(6-DOF-Ausgabe: Position X/Y/Z + Orientierung). Die **genauen Attributnamen** der
-Positions-Payload hängen von der installierten SDK-Version ab. Sie sind an einer
-einzigen Stelle gekapselt: `AmfitrackTracker._extract_position()` in
-`printhead/tracking.py`. Dort probiert der Adapter die gängigen Varianten
-(`payload.emf.position.x/y/z`, `position_x_in_m`, …) und gibt die Position in **mm**
-zurück. Falls deine SDK die Position anders liefert (oder in Metern), diese Methode
-anpassen.
+(6-DOF-Ausgabe: Position X/Y/Z + Orientierung). `AmfitrackTracker` in
+`printhead/tracking.py` bildet das erprobte Verbindungsverhalten ab:
+
+- **Verbindung**: erst `USBConnection(vendor_id, product_id)` (Sensor-PID `0x0D12`),
+  bei Fehler Fallback auf die Source-PID `0x0D01`.
+- **Node-Auswahl**: alle Nodes, deren `node.name` „Sensor" enthält, werden als
+  `Device` angebunden (optional per `--sensor-id` auf eine `tx_id` eingegrenzt);
+  `conn.start()` erst danach.
+- **Position**: gelesen aus `payload.emf.pos_x / pos_y / pos_z` (in **mm**). Diese
+  bestätigten Namen sind in `_extract_position()` primär; einige Alternativlayouts
+  (`.position.x/y/z`, flach `.x/.y/.z`, `position_x_in_m`) bleiben als Fallback für
+  abweichende SDK-Versionen. Falls deine SDK die Position anders liefert, dort anpassen.
 
 ## Tests / Verifikation ohne Hardware
 
