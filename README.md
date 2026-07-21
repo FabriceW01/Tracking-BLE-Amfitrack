@@ -89,6 +89,11 @@ Wird der Druckkopf **zurückbewegt**, werden die schon übertragenen Spalten **n
 erneut gedruckt** (es wird ein Blank-Frame gesendet); erst wenn er wieder über die
 bisherige Front hinausfährt, kommen neue Spalten dazu.
 
+**Startpoint-Taster = Reset:** Ein Druck auf den Startpoint-Taster setzt **während des
+Drucks jederzeit** den Nullpunkt auf die **aktuelle Position** und setzt die Frontier
+zurück – der Druck beginnt also wieder bei Spalte 0, ohne dass ein neuer START-Druck
+nötig ist.
+
 ### Verdreht eingebauter Sensor
 
 Der Sensor ist so verbaut, dass die Bewegung in **Y/Z statt X/Y** stattfindet.

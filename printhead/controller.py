@@ -48,6 +48,9 @@ class _ImmediateEvent:
     async def wait(self):
         return True
 
+    def is_set(self):
+        return False
+
     def set(self):
         pass
 
@@ -149,7 +152,11 @@ class PrintController:
 
     # ------------------------------------------------- position-based pass
     async def _print_position_pass(self, ble, tracker, startpoint_event) -> None:
-        """Fire the column that matches the measured head position."""
+        """Fire the column that matches the measured head position.
+
+        A startpoint-button press during the pass re-zeros the origin at the
+        current position and resets the frontier, restarting the print from
+        column 0."""
         t = self.tracking
         mapper = AdvanceMapper(t)
         loop = asyncio.get_event_loop()
@@ -161,6 +168,9 @@ class PrintController:
             await startpoint_event.wait()
         origin = await self._wait_for_position(tracker, loop)
         mapper.set_origin(origin)
+        # Ignore any startpoint press that belonged to the setup; only presses
+        # during the loop below act as a live reset.
+        startpoint_event.clear()
         print(f"Origin set. Printing {self.width} columns @ "
               f"{t.mm_per_column:.3f} mm/col "
               f"(~{self.width * t.mm_per_column:.1f} mm wide).")
@@ -177,6 +187,24 @@ class PrintController:
 
         while True:
             now = loop.time()
+
+            # Startpoint button: re-zero the origin at the current position and
+            # reset the stored progress so printing restarts from column 0.
+            if startpoint_event.is_set():
+                startpoint_event.clear()
+                origin = await self._wait_for_position(tracker, loop)
+                mapper.set_origin(origin)      # re-zero (also clears auto-calib dir.)
+                frontier = -1
+                if firing:
+                    await ble.write_blank()
+                firing = False
+                ref_pos, ref_t = np.asarray(origin, dtype=float), loop.time()
+                t_start = ref_t                # give the restarted pass a fresh timeout
+                print("[startpoint] origin reset to current position; "
+                      "printing from column 0.")
+                await asyncio.sleep(interval)
+                continue
+
             pos = tracker.read_position()
             if pos is not None:
                 pos = np.asarray(pos, dtype=float)
