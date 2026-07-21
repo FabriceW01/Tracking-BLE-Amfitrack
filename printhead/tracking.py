@@ -88,7 +88,8 @@ class AmfitrackTracker:
     def __init__(self, settings: TrackingSettings):
         self.settings = settings
         self._conn = None
-        self._device = None
+        self._devices = []
+        self._last: Optional[np.ndarray] = None
 
     def open(self) -> None:
         # Imported lazily so the package works (dry-run / simulate) without the
@@ -96,33 +97,46 @@ class AmfitrackTracker:
         import amfiprot
         import amfiprot_amfitrack as amfitrack
 
-        conn = amfiprot.USBConnection(self.settings.vendor_id, self.settings.product_id)
+        s = self.settings
+        # Open the USB dongle: the sensor product id first, the source id as a
+        # fallback (mirrors the known-working AmfiPoseProvider).
+        try:
+            conn = amfiprot.USBConnection(s.vendor_id, s.product_id)
+        except Exception:
+            conn = amfiprot.USBConnection(s.vendor_id, s.product_id_source)
+
         nodes = conn.find_nodes()
-        if not nodes:
-            raise RuntimeError("No Amfitrack nodes found on the USB dongle.")
-        node = self._select_node(nodes)
-        self._device = amfitrack.Device(node)
+        # Attach to every node whose name contains "Sensor" (optionally narrowed
+        # to a single tx_id via --sensor-id).
+        self._devices = []
+        for node in nodes:
+            if "Sensor" not in getattr(node, "name", ""):
+                continue
+            if s.sensor_id is not None and getattr(node, "tx_id", None) != s.sensor_id:
+                continue
+            print(f"Amfitrack sensor: {node.name} {getattr(node, 'uuid', '')}")
+            self._devices.append(amfitrack.Device(node))
+
+        if not self._devices:
+            raise RuntimeError(
+                "No Amfitrack Sensor node found (no node.name containing 'Sensor').")
+
         conn.start()
         self._conn = conn
-        print(f"Amfitrack connected (node tx_id={getattr(node, 'tx_id', '?')}).")
-
-    def _select_node(self, nodes):
-        if self.settings.sensor_id is None:
-            return nodes[0]
-        for node in nodes:
-            if getattr(node, "tx_id", None) == self.settings.sensor_id:
-                return node
-        raise RuntimeError(f"Sensor id {self.settings.sensor_id} not found "
-                           f"among {[getattr(n, 'tx_id', '?') for n in nodes]}.")
 
     def read_position(self) -> Optional[np.ndarray]:
         """Return the latest ``(x, y, z)`` in mm, or ``None`` if no new sample."""
         pos = None
-        while self._device.packet_available():
-            packet = self._device.get_packet()
-            candidate = self._extract_position(packet.payload)
-            if candidate is not None:
-                pos = candidate
+        for dev in self._devices:
+            try:
+                while dev.packet_available():
+                    candidate = self._extract_position(dev.get_packet().payload)
+                    if candidate is not None:
+                        pos = candidate
+            except Exception:
+                continue
+        if pos is not None:
+            self._last = pos
         return pos
 
     # ---- single adapter point for SDK-version differences ------------------
@@ -131,22 +145,26 @@ class AmfitrackTracker:
         """
         Pull an ``(x, y, z)`` position in **mm** out of an amfiprot payload.
 
-        The exact field names depend on the installed ``amfiprot_amfitrack``
-        version, so this tries the known layouts in order. Adjust HERE if your
-        SDK exposes the position differently (or reports metres -> scale by 1000).
+        The primary layout is the confirmed-working ``payload.emf.pos_{x,y,z}``.
+        A few other layouts are tried as a fallback for differing SDK versions;
+        adjust HERE if your SDK reports the position differently.
         """
         emf = getattr(payload, "emf", payload)
 
-        # 1) nested .position with .x/.y/.z (mm)
+        # 1) confirmed working: emf.pos_x / pos_y / pos_z (mm)
+        if all(hasattr(emf, a) for a in ("pos_x", "pos_y", "pos_z")):
+            return np.array([emf.pos_x, emf.pos_y, emf.pos_z], dtype=float)
+
+        # 2) nested .position with .x/.y/.z (mm)
         pos = getattr(emf, "position", None)
         if pos is not None and hasattr(pos, "x"):
             return np.array([pos.x, pos.y, pos.z], dtype=float)
 
-        # 2) flat .x/.y/.z on the emf payload (mm)
+        # 3) flat .x/.y/.z on the emf payload (mm)
         if all(hasattr(emf, a) for a in ("x", "y", "z")):
             return np.array([emf.x, emf.y, emf.z], dtype=float)
 
-        # 3) C-SDK style names in metres -> convert to mm
+        # 4) C-SDK style names in metres -> convert to mm
         metre_names = ("position_x_in_m", "position_y_in_m", "position_z_in_m")
         if all(hasattr(emf, n) for n in metre_names):
             return np.array([getattr(emf, n) for n in metre_names], dtype=float) * 1000.0
@@ -155,12 +173,13 @@ class AmfitrackTracker:
 
     def close(self) -> None:
         if self._conn is not None:
-            try:
-                self._conn.stop()
-            except Exception:
-                pass
+            for method in ("stop", "close"):
+                try:
+                    getattr(self._conn, method)()
+                except Exception:
+                    pass
         self._conn = None
-        self._device = None
+        self._devices = []
 
 
 # ============================================================================
