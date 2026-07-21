@@ -83,6 +83,12 @@ Bei schneller Bewegung übersprungene Spalten werden automatisch nachgefüllt,
 damit keine vertikalen Streifen der Schrift verloren gehen. Steht der Kopf still,
 wird ein Blank-Frame gesendet (kein Ink-Blob).
 
+**Rückwärts-Schutz:** Der Controller merkt sich mit einer „Frontier" die höchste
+bereits gedruckte Spalte. Gedruckt wird nur beim Vorfahren über diese Front hinaus.
+Wird der Druckkopf **zurückbewegt**, werden die schon übertragenen Spalten **nicht
+erneut gedruckt** (es wird ein Blank-Frame gesendet); erst wenn er wieder über die
+bisherige Front hinausfährt, kommen neue Spalten dazu.
+
 ### Verdreht eingebauter Sensor
 
 Der Sensor ist so verbaut, dass die Bewegung in **Y/Z statt X/Y** stattfindet.
@@ -91,8 +97,8 @@ Es gibt zwei Wege, das zu behandeln:
 **1. Feste Achse (Standard)** – die Verfahrrichtung ist eine wählbare Achse:
 
 ```bash
-python main.py "Text" --advance-axis z          # Default (wegen der Verdrehung)
-python main.py "Text" --advance-axis y --axis-sign -1
+python main.py "Text" --advance-axis y          # Default (Bewegung entlang Y)
+python main.py "Text" --advance-axis z --axis-sign -1
 ```
 
 **2. Auto-Kalibrierung** – die tatsächliche Bewegungsrichtung wird beim Start aus

@@ -36,7 +36,7 @@ class AdvanceMapper:
     Maps a 3-D position (mm) to a scalar "advance" (mm along the travel axis),
     relative to an origin set at the start of a pass.
 
-    Fixed-axis mode (default): ``advance = axis_sign * (pos[axis] - origin[axis])``.
+    Fixed-axis mode (default: Y): ``advance = axis_sign * (pos[axis] - origin[axis])``.
     Auto-calibrate mode: the travel direction is learned from the first
     ``calib_distance_mm`` of motion, then ``advance = dot(pos - origin, dir)``.
     """

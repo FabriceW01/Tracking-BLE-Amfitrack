@@ -165,8 +165,11 @@ class PrintController:
               f"{t.mm_per_column:.3f} mm/col "
               f"(~{self.width * t.mm_per_column:.1f} mm wide).")
 
-        # 2) drive columns from position
-        last_col: Optional[int] = None
+        # 2) drive columns from position.
+        # ``frontier`` is the highest column index already printed. Columns are
+        # only ever printed while advancing past the frontier, so moving the head
+        # back over already-printed columns never reprints them.
+        frontier = -1
         firing = False
         ref_pos = np.asarray(origin, dtype=float)
         ref_t = loop.time()
@@ -189,18 +192,25 @@ class PrintController:
                     col = max(0, col)
 
                     if not moving:
-                        if firing:                   # head stopped -> stop firing
+                        # head stopped -> stop firing (avoid an ink blob)
+                        if firing:
                             await ble.write_blank()
-                            firing, last_col = False, None
-                    elif col != last_col:
-                        # Fill any columns skipped since the last update so a
-                        # fast feed does not drop vertical stripes of the text.
-                        if last_col is None or col <= last_col:
-                            await ble.write_column(self.frames[col])
-                        else:
-                            for c in range(last_col + 1, col + 1):
-                                await ble.write_column(self.frames[c])
-                        last_col, firing = col, True
+                            firing = False
+                    elif col > frontier:
+                        # advancing into new territory: print each new column
+                        # once, filling any columns skipped by a fast feed.
+                        start = col if frontier < 0 else frontier + 1
+                        for c in range(start, col + 1):
+                            await ble.write_column(self.frames[c])
+                        frontier = col
+                        firing = True
+                    elif col < frontier:
+                        # moving back over already-printed columns: do NOT
+                        # reprint -> blank so no ink is deposited on the return.
+                        if firing:
+                            await ble.write_blank()
+                            firing = False
+                    # col == frontier while moving: keep the leading column firing
 
             if now - t_start > t.timeout_s:
                 print("Position pass timed out.")

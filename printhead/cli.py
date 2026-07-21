@@ -58,8 +58,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # --- Amfitrack ---------------------------------------------------------
     g = ap.add_argument_group("Amfitrack positioning")
-    g.add_argument("--advance-axis", choices=("x", "y", "z"), default="z",
-                   help="Sensor axis that is the travel direction. Default z "
+    g.add_argument("--advance-axis", choices=("x", "y", "z"), default="y",
+                   help="Sensor axis that is the travel direction. Default y "
                         "because the sensor is mounted rotated (travel in Y/Z).")
     g.add_argument("--axis-sign", type=int, choices=(1, -1), default=1,
                    help="Flip the travel direction (default 1)")

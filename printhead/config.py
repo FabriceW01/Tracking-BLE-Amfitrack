@@ -50,7 +50,7 @@ class TrackingSettings:
 
     The sensor is mounted rotated (travel happens in Y/Z instead of X/Y), so the
     axis that drives column advancement is configurable. Two strategies exist:
-      * fixed axis   - use ``advance_axis`` (default ``"z"``) times ``axis_sign``.
+      * fixed axis   - use ``advance_axis`` (default ``"y"``) times ``axis_sign``.
       * auto-calibrate - measure the real direction of motion at start and
         project the position onto it (robust against any rotation).
     """
@@ -58,7 +58,7 @@ class TrackingSettings:
     mode: str = "position"          # "position" | "time"
 
     # --- axis mapping for the rotated sensor -------------------------------
-    advance_axis: str = "z"         # "x" | "y" | "z" (which axis = travel dir.)
+    advance_axis: str = "y"         # "x" | "y" | "z" (which axis = travel dir.)
     axis_sign: int = 1              # +1 or -1 (flip travel direction)
     auto_calibrate: bool = False    # derive travel direction from first motion
     calib_distance_mm: float = 5.0  # motion needed before auto-calibration locks
