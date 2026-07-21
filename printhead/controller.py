@@ -19,7 +19,8 @@ from typing import Optional
 import numpy as np
 
 from .ble_client import PrintheadBLE
-from .config import BleSettings, RenderSettings, TrackingSettings
+from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
+from .nozzle_map import remap_rows
 from .rendering import frames_from_ink, render_text, save_preview
 from .tracking import AdvanceMapper, make_tracker
 
@@ -61,7 +62,9 @@ class _ImmediateEvent:
 class PrintController:
     def __init__(self, render: RenderSettings, ble: BleSettings,
                  tracking: TrackingSettings, simulate: bool = False,
-                 preview: Optional[str] = None, dry_run: bool = False):
+                 preview: Optional[str] = None, dry_run: bool = False,
+                 ink: Optional[np.ndarray] = None,
+                 nozzle_map: Optional[NozzleMapSettings] = None):
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -69,8 +72,12 @@ class PrintController:
         self.preview = preview
         self.dry_run = dry_run
 
-        # Rendered once up front.
-        ink = render_text(render)
+        # Rendered once up front, unless the caller already built the ink
+        # (calibration ruler / test patterns bypass text rendering entirely).
+        if ink is None:
+            ink = render_text(render)
+        if nozzle_map is not None and nozzle_map.block_size:
+            ink = remap_rows(ink, nozzle_map.block_size, nozzle_map.order)
         self.frames = frames_from_ink(ink)
         self.width = len(self.frames)
         self._ink = ink

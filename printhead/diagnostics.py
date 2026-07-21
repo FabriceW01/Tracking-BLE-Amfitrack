@@ -11,12 +11,14 @@ with a friendly message when the hardware or a vendor library is missing.
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 
 import numpy as np
 
 from .ble_client import PrintheadBLE
-from .config import BleSettings, TrackingSettings
+from .config import BleSettings, NozzleMapSettings, TrackingSettings
 from .geometry import IMAGE_HEIGHT
+from .nozzle_map import remap_rows
 from .rendering import frames_from_ink
 from .tracking import _AXIS_INDEX, make_tracker
 
@@ -129,11 +131,19 @@ async def scan_ble(ble: BleSettings) -> None:
 # ============================================================================
 # --nozzle-test : fire a diagnostic pattern on the cartridge
 # ============================================================================
-async def nozzle_test(ble: BleSettings, on_seconds: float = 2.0,
-                      sweep_step: float = 0.02) -> None:
-    """All nozzles on briefly, then a single nozzle swept down all 164 rows."""
-    all_on = frames_from_ink(np.ones((IMAGE_HEIGHT, 1), dtype=bool))[0]
-    sweep = frames_from_ink(np.eye(IMAGE_HEIGHT, dtype=bool))   # 164 single-nozzle frames
+async def nozzle_test(ble: BleSettings, nozzle_map: Optional[NozzleMapSettings] = None,
+                      on_seconds: float = 2.0, sweep_step: float = 0.02) -> None:
+    """All nozzles on briefly, then a single nozzle swept down all 164 rows.
+
+    If ``nozzle_map`` is given, it is applied first, so the sweep lets you
+    visually confirm a block remap fixes the physical firing order."""
+    all_on_ink = np.ones((IMAGE_HEIGHT, 1), dtype=bool)
+    sweep_ink = np.eye(IMAGE_HEIGHT, dtype=bool)      # 164 single-nozzle frames
+    if nozzle_map is not None and nozzle_map.block_size:
+        all_on_ink = remap_rows(all_on_ink, nozzle_map.block_size, nozzle_map.order)
+        sweep_ink = remap_rows(sweep_ink, nozzle_map.block_size, nozzle_map.order)
+    all_on = frames_from_ink(all_on_ink)[0]
+    sweep = frames_from_ink(sweep_ink)
 
     try:
         async with PrintheadBLE(ble) as client:

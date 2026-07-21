@@ -135,6 +135,78 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | `--sensor-id` | optionaler `tx_id`-Filter unter den „Sensor"-Nodes (Default: alle) |
 | `--simulate` | Fake-Tracker (keine Hardware) zum Testen des Loops |
 
+## Kalibrierung & Testmuster
+
+`--calibrate` und `--pattern` sind Alternativen zu `text`: Statt Schrift wird ein
+generiertes Muster gedruckt. Beides läuft durch **dieselbe** Pipeline wie normaler
+Text – Positions- oder Zeit-Modus, Tracking, `--simulate`, `--dry-run` und
+`--preview` funktionieren identisch.
+
+### `--calibrate` – Kalibrier-Lineal
+
+Druckt eine durchgängige Basislinie mit Strichen über die **volle Höhe** alle 1 cm
+und **kurzen** Strichen alle 1 mm – wie ein Lineal. Damit lässt sich `mm_per_column`
+bzw. `--dpi` exakt einstellen: Muster drucken, echten Abstand zwischen zwei
+1-cm-Strichen nachmessen, `--mm-per-column` entsprechend korrigieren.
+
+```bash
+python main.py --calibrate --pattern-length-mm 200 --mm-per-column 0.2 --preview lineal.png
+```
+
+| Option | Bedeutung |
+|---|---|
+| `--pattern-length-mm` | Physische Länge des Musters in mm (Default 200) |
+| `--calib-major-mm` | Abstand der vollen Striche (Default 10 = 1 cm) |
+| `--calib-minor-mm` | Abstand der kurzen Striche (Default 1 = 1 mm) |
+
+### `--pattern NAME` – Testmuster-Presets
+
+| Preset | Zweck |
+|---|---|
+| `checkerboard` | Schachbrett – deckt Zeilen-/Spalten-Vertauschungen und Ausrichtungsfehler auf |
+| `h-stripes` | Volle Zeilenbänder – jede Düse feuert durchgängig über die ganze Länge, eine tote Düse zeigt sich als durchgehende Lücke |
+| `v-stripes` | Volle Spaltenbänder – prüft Spalten-/Trackingtiming; ungleiche Streifenbreite = ungleichmäßiger Vorschub |
+| `diagonal` | Wiederkehrende Diagonale – eine vertauschte Düsenzeile zeigt sich sofort als Knick (siehe Düsen-Mapping unten) |
+| `solid` | Vollfläche – prüft Ink-Deckung/Banding |
+
+```bash
+python main.py --pattern checkerboard --pattern-square-mm 10 --pattern-square-rows 20
+python main.py --pattern diagonal --mode position --preview diag.png
+```
+
+| Option | Bedeutung |
+|---|---|
+| `--pattern-length-mm` | Physische Länge des Musters in mm (Default 200) |
+| `--pattern-square-mm` | Kachel-/Streifenbreite in mm (checkerboard, v-stripes, diagonal-Periode) |
+| `--pattern-square-rows` | Kachel-/Streifenhöhe in Zeilen (checkerboard, h-stripes) |
+
+## Düsen-Mapping
+
+Falls die physischen Düsen in Blöcken fester Größe verdrahtet sind, deren
+Reihenfolge nicht der tatsächlichen (vertikalen) Position entspricht, korrigiert
+`--nozzle-block-size` + `--nozzle-order` das vor dem Senden: Die Bildzeilen werden
+in Blöcken der angegebenen Größe gemäß der neuen Reihenfolge umsortiert.
+
+`--nozzle-order` ist **1-indiziert** und gibt pro Block-Slot an, welche
+ursprüngliche Position dort landen soll. Beispiel: Block-Standardreihenfolge
+`1,2,3,4,5` wird zu `2,3,4,1,5` → Slot 1 bekommt, was ursprünglich Düse 2 war,
+Slot 2 bekommt Düse 3, Slot 3 bekommt Düse 4, Slot 4 bekommt Düse 1, Slot 5 bleibt.
+Das Muster wiederholt sich für alle 164 Zeilen; passt die Blockgröße nicht exakt
+(z. B. 164 nicht durch 5 teilbar), bleibt der letzte unvollständige Block
+unverändert (eine Meldung weist darauf hin).
+
+```bash
+python main.py "Test" --nozzle-block-size 5 --nozzle-order 2,3,4,1,5
+```
+
+**Verifikation ohne echten Druck:** `--nozzle-test` wendet dasselbe Mapping auf den
+Düsen-Sweep an, sodass man die korrigierte Reihenfolge direkt an der Patrone sehen
+kann:
+
+```bash
+python main.py --nozzle-test --nozzle-block-size 5 --nozzle-order 2,3,4,1,5
+```
+
 ## Debug / Diagnose
 
 Jedes dieser Flags führt eine eigenständige Prüfung aus und beendet sich danach —
@@ -146,7 +218,7 @@ statt eines Tracebacks.
 | `--pos` | Gibt die **Live-Position** vom Amfitrack aus: `x/y/z` (mm) + Verfahr-Wert entlang `--advance-axis` + Spaltenindex. Zugleich Kalibrierhilfe für Achse und `--mm-per-column`. Ctrl+C beendet. |
 | `--list-nodes` | Verbindet zum USB-Dongle und listet alle Nodes (`name`/`uuid`/`tx_id`), markiert die als „Sensor" erkannten. |
 | `--scan-ble` | Scannt BLE und listet Geräte (`address` + `name`) – zum Finden der PrintheadBLE-Adresse (nutzbar mit `--address`). |
-| `--nozzle-test` | Feuert per BLE ein Testmuster (alle 164 Düsen kurz an → Einzeldüse über alle Zeilen → Blank), um die Patrone zu prüfen. |
+| `--nozzle-test` | Feuert per BLE ein Testmuster (alle 164 Düsen kurz an → Einzeldüse über alle Zeilen → Blank), um die Patrone zu prüfen. Berücksichtigt `--nozzle-block-size`/`--nozzle-order`, falls gesetzt. |
 
 ```bash
 # Live-Position anschauen (Achse/Skalierung kalibrieren):

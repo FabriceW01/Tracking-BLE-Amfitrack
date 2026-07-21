@@ -10,7 +10,7 @@ these from ``argparse`` and hands them to the ``PrintController``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 
 @dataclass
@@ -83,3 +83,15 @@ class TrackingSettings:
         if dpi:
             return 25.4 / dpi
         return self.mm_per_column
+
+
+@dataclass
+class NozzleMapSettings:
+    """
+    Corrects for physically-scrambled nozzle wiring: the printhead's nozzles are
+    wired in repeating blocks of ``block_size``, and ``order`` gives the source
+    row (0-indexed) within the block for each output row -- reorders ink rows in
+    repeating blocks before framing so the printed image comes out correct.
+    """
+    block_size: Optional[int] = None
+    order: Optional[List[int]] = None
