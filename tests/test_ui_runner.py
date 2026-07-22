@@ -48,6 +48,62 @@ def test_command_process_streams_and_exits():
     assert any("Dry run" in ln for ln in lines), joined
 
 
+def _start_long_running(on_line, on_exit):
+    """Start a continuous (simulated) position stream for stop() tests."""
+    return CommandProcess(
+        ["--pos", "--pos-json", "--simulate"], on_line, on_exit)
+
+
+def test_stop_terminates_running_process():
+    exited = {}
+
+    async def on_line(line):
+        pass
+
+    async def on_exit(code):
+        exited["code"] = code
+
+    async def run():
+        proc = _start_long_running(on_line, on_exit)
+        await proc.start()
+        await asyncio.sleep(0.6)               # let it stream a bit
+        assert proc.running
+        await proc.stop()
+        assert not proc.running
+        for _ in range(60):
+            if "code" in exited:
+                break
+            await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+    assert "code" in exited, "on_exit should fire after stop()"
+
+
+def test_stop_falls_back_when_signal_unsupported():
+    """Reproduce the Windows 'Unsupported signal: 2' path: send_signal raising
+    ValueError must be caught and fall back to terminate() without crashing."""
+    async def on_line(line):
+        pass
+
+    async def run():
+        proc = _start_long_running(on_line, None)
+        await proc.start()
+        await asyncio.sleep(0.4)
+
+        def boom(_sig):
+            raise ValueError("Unsupported signal: 2")   # what Windows raises
+        proc._proc.send_signal = boom                   # type: ignore[attr-defined]
+
+        await proc.stop()                                # must not raise
+        assert not proc.running
+
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     test_command_process_streams_and_exits()
     print("OK: ui runner streams output and reports exit code.")
+    test_stop_terminates_running_process()
+    print("OK: stop() terminates a running process.")
+    test_stop_falls_back_when_signal_unsupported()
+    print("OK: stop() falls back when send_signal is unsupported (Windows).")

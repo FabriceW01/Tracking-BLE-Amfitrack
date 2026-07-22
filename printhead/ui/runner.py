@@ -68,17 +68,34 @@ class CommandProcess:
                 await self._on_exit(code)
 
     async def stop(self) -> None:
-        """Ask the child to stop (SIGINT so --pos / passes exit cleanly)."""
-        if self._proc is None or self._proc.returncode is not None:
+        """Stop the child process, cross-platform.
+
+        On POSIX we send SIGINT so the child exits cleanly (blanks the printhead,
+        closes the tracker). Windows cannot deliver SIGINT to a child via
+        ``send_signal`` (raises ``ValueError: Unsupported signal``), so there we
+        terminate instead; the ``except`` also covers that as a fallback.
+        """
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
             return
         try:
-            self._proc.send_signal(signal.SIGINT)
-        except ProcessLookupError:
-            return
+            if os.name == "nt":
+                proc.terminate()
+            else:
+                proc.send_signal(signal.SIGINT)
+        except (ProcessLookupError, ValueError, OSError):
+            try:
+                proc.terminate()
+            except (ProcessLookupError, OSError):
+                return
         try:
-            await asyncio.wait_for(self._proc.wait(), timeout=3.0)
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
         except asyncio.TimeoutError:
             try:
-                self._proc.kill()
-            except ProcessLookupError:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                await proc.wait()
+            except Exception:
                 pass
