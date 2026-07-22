@@ -131,6 +131,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--simulate", action="store_true",
                    help="Use a fake tracker (no hardware) to test the loop")
 
+    # --- timing / profiling ------------------------------------------------
+    g = ap.add_argument_group("timing / profiling (position mode)")
+    g.add_argument("--profile", action="store_true",
+                   help="Instrument the position pass: log head speed, demanded "
+                        "vs. sustained BLE column rate and write latency, and a "
+                        "verdict on whether columns kept up with the head")
+    g.add_argument("--profile-csv",
+                   help="Also write a per-column timing log to this CSV path")
+
     # --- BLE / run ---------------------------------------------------------
     g = ap.add_argument_group("BLE / run")
     g.add_argument("--device-name", default=DEVICE_NAME,
@@ -159,6 +168,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="Scan for BLE devices (address + name) and exit")
     mx.add_argument("--nozzle-test", action="store_true",
                     help="Fire a nozzle test pattern over BLE and exit")
+    mx.add_argument("--ble-benchmark", action="store_true",
+                    help="Measure BLE column throughput + round-trip latency "
+                         "(the ceiling that makes printing speed-dependent) and exit")
 
     args = ap.parse_args(argv)
     if not _debug_mode(args):
@@ -176,7 +188,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def _debug_mode(args: argparse.Namespace) -> bool:
-    return bool(args.pos or args.list_nodes or args.scan_ble or args.nozzle_test)
+    return bool(args.pos or args.list_nodes or args.scan_ble or args.nozzle_test
+                or args.ble_benchmark)
 
 
 def _content_mode_count(args: argparse.Namespace) -> int:
@@ -245,7 +258,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,
-                           nozzle_map=build_nozzle_map(args))
+                           nozzle_map=build_nozzle_map(args),
+                           profile=args.profile, profile_csv=args.profile_csv)
 
 
 def _run_debug(args: argparse.Namespace) -> None:
@@ -259,6 +273,8 @@ def _run_debug(args: argparse.Namespace) -> None:
         asyncio.run(diagnostics.scan_ble(build_ble(args)))
     elif args.nozzle_test:
         asyncio.run(diagnostics.nozzle_test(build_ble(args), build_nozzle_map(args)))
+    elif args.ble_benchmark:
+        asyncio.run(diagnostics.ble_benchmark(build_ble(args), build_tracking(args)))
 
 
 def main(argv=None) -> None:

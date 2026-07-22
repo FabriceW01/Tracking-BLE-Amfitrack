@@ -17,7 +17,7 @@ import numpy as np
 
 from .ble_client import PrintheadBLE
 from .config import BleSettings, NozzleMapSettings, TrackingSettings
-from .geometry import IMAGE_HEIGHT
+from .geometry import BLANK_FRAME, IMAGE_HEIGHT
 from .nozzle_map import remap_rows
 from .rendering import frames_from_ink
 from .tracking import _AXIS_INDEX, make_tracker
@@ -159,3 +159,54 @@ async def nozzle_test(ble: BleSettings, nozzle_map: Optional[NozzleMapSettings] 
         print("Nozzle test done.")
     except Exception as exc:
         print(f"Nozzle test failed (BLE): {exc}")
+
+
+# ============================================================================
+# --ble-benchmark : measure the BLE column throughput / latency ceiling
+# ============================================================================
+async def ble_benchmark(ble: BleSettings, tracking: TrackingSettings,
+                        n_fast: int = 400, n_probe: int = 60) -> None:
+    """
+    Measure how fast columns can actually be pushed over BLE. This is the ceiling
+    that makes position printing speed-dependent: if the head crosses columns
+    faster than this, they lag no matter how good the position is.
+
+      * throughput: ``n_fast`` write-without-response frames as fast as possible.
+      * latency:    ``n_probe`` write-*with-response* frames -> true GATT
+        round-trip (~ the connection interval), i.e. real delivery latency.
+
+    Blank frames are used so nothing is actually printed.
+    """
+    loop = asyncio.get_event_loop()
+    mmpc = tracking.mm_per_column
+    try:
+        async with PrintheadBLE(ble) as client:
+            print(f"Throughput: sending {n_fast} frames (no response) ...")
+            t0 = loop.time()
+            for _ in range(n_fast):
+                await client.write_column(BLANK_FRAME)
+            dt = loop.time() - t0
+            thr = n_fast / dt if dt > 0 else 0.0
+
+            print(f"Latency: {n_probe} frames (with response) ...")
+            lat = []
+            for _ in range(n_probe):
+                t = loop.time()
+                await client.write_column(BLANK_FRAME, response=True)
+                lat.append((loop.time() - t) * 1000.0)
+            await client.write_blank()
+
+            lat.sort()
+            avg = sum(lat) / len(lat)
+            p95 = lat[min(len(lat) - 1, int(0.95 * len(lat)))]
+            max_speed = thr * mmpc
+
+            print("---- BLE benchmark ----")
+            print(f"  no-response throughput : {thr:.0f} cols/s "
+                  f"({1000.0 / thr:.1f} ms/col)" if thr else "  throughput: n/a")
+            print(f"  with-response latency  : avg {avg:.1f} ms  "
+                  f"p95 {p95:.1f} ms  max {lat[-1]:.1f} ms")
+            print(f"  => at {mmpc:.3f} mm/col, columns keep up to ~{max_speed:.1f} "
+                  f"mm/s. Above that, position printing will lag / depend on speed.")
+    except Exception as exc:
+        print(f"BLE benchmark failed: {exc}")
