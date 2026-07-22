@@ -162,6 +162,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     mx.add_argument("--pos", action="store_true",
                     help="Live-print the Amfitrack position (x/y/z + advance + "
                          "column); works with --simulate. Ctrl+C to stop")
+    g.add_argument("--pos-json", action="store_true",
+                   help="With --pos: emit one JSON object per sample (newline "
+                        "terminated) instead of the live line (used by the web UI)")
     mx.add_argument("--list-nodes", action="store_true",
                     help="List the Amfitrack USB nodes (name/uuid/tx_id) and exit")
     mx.add_argument("--scan-ble", action="store_true",
@@ -266,7 +269,8 @@ def _run_debug(args: argparse.Namespace) -> None:
     """Dispatch a standalone diagnostic; each connects, reports/acts, then exits."""
     from . import diagnostics
     if args.pos:
-        asyncio.run(diagnostics.monitor_position(build_tracking(args), args.simulate))
+        asyncio.run(diagnostics.monitor_position(
+            build_tracking(args), args.simulate, ndjson=args.pos_json))
     elif args.list_nodes:
         diagnostics.list_nodes(build_tracking(args))
     elif args.scan_ble:

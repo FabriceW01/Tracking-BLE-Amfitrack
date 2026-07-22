@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Printhead Control</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --line:#2a3240;
+    --txt:#e6edf3; --muted:#8b98a9; --accent:#2dd4bf; --accent2:#38bdf8;
+    --warn:#f59e0b; --bad:#f87171; --good:#34d399; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#12303044,transparent),var(--bg);
+    color:var(--txt);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  a{color:var(--accent2)}
+  .wrap{max-width:1240px;margin:0 auto;padding:18px 20px 60px}
+  header.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
+  .brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:18px}
+  .brand .dot{width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 14px var(--accent)}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
+    background:var(--panel);border:1px solid var(--line);font-size:12px;color:var(--muted)}
+  .pill .status-dot{width:9px;height:9px;border-radius:50%;background:var(--bad)}
+  .pill.on .status-dot{background:var(--good);box-shadow:0 0 10px var(--good)}
+  .toggle{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:10px;
+    background:var(--panel);border:1px solid var(--line);cursor:pointer;user-select:none;font-size:13px}
+  .toggle input{accent-color:var(--accent)}
+
+  .grid{display:grid;grid-template-columns:1.15fr .85fr;gap:16px}
+  @media(max-width:980px){.grid{grid-template-columns:1fr}}
+  .card{background:linear-gradient(180deg,var(--panel),#12161d);border:1px solid var(--line);
+    border-radius:14px;padding:16px;box-shadow:0 8px 30px #0006}
+  .card h2{margin:0 0 12px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+
+  /* hero position */
+  .hero{margin-bottom:16px}
+  .hero-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .hero-head h2{margin:0}
+  .live-badge{font-size:11px;color:var(--muted)}
+  .live-badge b{color:var(--good)}
+  .readout{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+  @media(max-width:760px){.readout{grid-template-columns:repeat(2,1fr)}}
+  .metric{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .metric .k{font-size:11px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
+  .metric .v{font-family:var(--mono);font-size:26px;font-weight:600;margin-top:4px}
+  .metric .u{font-size:12px;color:var(--muted);margin-left:4px}
+  .metric.accent .v{color:var(--accent)}
+  .spark{margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
+  canvas{width:100%;height:90px;display:block}
+  .sensor-ctl{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-top:14px}
+
+  /* tabs + forms */
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+  .tab{padding:8px 14px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);
+    color:var(--muted);cursor:pointer;font-size:13px}
+  .tab.active{color:var(--txt);border-color:var(--accent);background:#12332f}
+  .panel{display:none}
+  .panel.active{display:block}
+  .row{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+  @media(max-width:560px){.row{grid-template-columns:1fr}}
+  .field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+  .field label{font-size:12px;color:var(--muted)}
+  input,select{background:#0e131a;border:1px solid var(--line);color:var(--txt);border-radius:9px;
+    padding:9px 10px;font-size:13px;font-family:inherit;width:100%}
+  input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px #2dd4bf22}
+  .check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);cursor:pointer}
+  .check input{width:auto;accent-color:var(--accent)}
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg label{flex:1;text-align:center;min-width:80px}
+  .seg label span{display:block;padding:8px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);cursor:pointer;font-size:13px}
+  .seg input{display:none}
+  .seg input:checked + span{border-color:var(--accent);background:#12332f;color:var(--txt)}
+  .hint{font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:10px}
+
+  .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border-radius:10px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--txt);cursor:pointer;font-size:13px;font-weight:600}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:linear-gradient(180deg,#2dd4bf,#14b8a6);color:#04201c;border:none}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.danger{border-color:#7f1d1d;color:#fca5a5}
+  .btn.ghost{background:transparent}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+
+  .cmd{font-family:var(--mono);font-size:12.5px;background:#0a0e14;border:1px solid var(--line);
+    border-radius:10px;padding:11px 12px;color:var(--accent);white-space:pre-wrap;word-break:break-all;margin-bottom:12px}
+  .diag{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+
+  .console{background:#080b10;border:1px solid var(--line);border-radius:12px;height:340px;overflow:auto;
+    padding:12px;font-family:var(--mono);font-size:12.5px;line-height:1.5}
+  .console .l{white-space:pre-wrap;word-break:break-word}
+  .console .l.cmd{color:var(--accent)}
+  .console .l.sensor{color:var(--muted)}
+  .console .l.err{color:var(--bad)}
+  .console .l.done{color:var(--warn)}
+  .conhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand"><span class="dot"></span> Printhead Control</div>
+    <div class="spacer"></div>
+    <div id="sensorPill" class="pill"><span class="status-dot"></span><span id="sensorPillText">sensor offline</span></div>
+    <label class="toggle"><input type="checkbox" id="gSimulate"> Simulate (no hardware)</label>
+    <label class="toggle"><input type="checkbox" id="gDryRun"> Dry-run</label>
+  </header>
+
+  <!-- LIVE POSITION -->
+  <section class="card hero">
+    <div class="hero-head">
+      <h2>Live sensor position</h2>
+      <span class="live-badge" id="liveBadge">not connected</span>
+      <div class="spacer"></div>
+      <div class="sensor-ctl">
+        <button class="btn primary" id="btnSensor">Connect sensor</button>
+      </div>
+    </div>
+    <div class="readout">
+      <div class="metric"><div class="k">X</div><div class="v"><span id="posX">–</span><span class="u">mm</span></div></div>
+      <div class="metric"><div class="k">Y</div><div class="v"><span id="posY">–</span><span class="u">mm</span></div></div>
+      <div class="metric"><div class="k">Z</div><div class="v"><span id="posZ">–</span><span class="u">mm</span></div></div>
+      <div class="metric accent"><div class="k">Advance</div><div class="v"><span id="posAdv">–</span><span class="u">mm</span></div></div>
+      <div class="metric accent"><div class="k">Column · speed</div><div class="v"><span id="posCol">–</span><span class="u" id="posVel"></span></div></div>
+    </div>
+    <div class="spark"><canvas id="spark" width="1100" height="90"></canvas></div>
+  </section>
+
+  <div class="grid">
+    <!-- CONFIG -->
+    <section class="card">
+      <div class="tabs" id="tabs">
+        <div class="tab active" data-t="print">Print</div>
+        <div class="tab" data-t="tracking">Tracking &amp; scale</div>
+        <div class="tab" data-t="nozzle">Nozzle map</div>
+        <div class="tab" data-t="ble">BLE &amp; profiling</div>
+        <div class="tab" data-t="diag">Diagnostics</div>
+      </div>
+
+      <!-- PRINT -->
+      <div class="panel active" data-p="print">
+        <div class="seg" style="margin-bottom:12px">
+          <label><input type="radio" name="src" value="text" checked><span>Text</span></label>
+          <label><input type="radio" name="src" value="calibrate"><span>Calibration ruler</span></label>
+          <label><input type="radio" name="src" value="pattern"><span>Test pattern</span></label>
+        </div>
+        <div class="field" id="f_text"><label>Text to print</label><input id="text" value="Hallo"></div>
+        <div class="field" id="f_pattern" style="display:none"><label>Pattern</label>
+          <select id="pattern"><option>checkerboard</option><option>h-stripes</option><option>v-stripes</option><option selected>diagonal</option><option>solid</option></select></div>
+        <div class="row">
+          <div class="field"><label>Render size (px)</label><input id="render_size" type="number" value="220"></div>
+          <div class="field"><label>Threshold 0–255</label><input id="threshold" type="number" value="128"></div>
+        </div>
+        <div class="field"><label>Font path (.ttf, optional)</label><input id="font" placeholder="default"></div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="invert"> Invert</label>
+          <label class="check"><input type="checkbox" id="flip_y"> Flip Y</label>
+          <label class="check"><input type="checkbox" id="mirror_x"> Mirror X</label>
+          <div class="field"><label>Margin (px)</label><input id="margin" type="number" value="0"></div>
+        </div>
+        <div class="row" id="patternKnobs">
+          <div class="field"><label>Length (mm)</label><input id="pattern_length_mm" type="number" value="200"></div>
+          <div class="field"><label>Square (mm)</label><input id="pattern_square_mm" type="number" value="10"></div>
+          <div class="field"><label>Square (rows)</label><input id="pattern_square_rows" type="number" value="20"></div>
+          <div class="field"><label>Ruler major / minor (mm)</label>
+            <div style="display:flex;gap:8px"><input id="calib_major_mm" type="number" value="10"><input id="calib_minor_mm" type="number" value="1"></div></div>
+        </div>
+      </div>
+
+      <!-- TRACKING -->
+      <div class="panel" data-p="tracking">
+        <div class="row">
+          <div class="field"><label>Mode</label><select id="mode"><option value="position">position (closed loop)</option><option value="time">time</option></select></div>
+          <div class="field"><label>Period (s, time mode)</label><input id="period" type="number" step="0.005" value="0.03"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Advance axis</label><select id="advance_axis"><option>x</option><option selected>y</option><option>z</option></select></div>
+          <div class="field"><label>Axis sign</label><select id="axis_sign"><option value="1">+1</option><option value="-1">−1</option></select></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>mm per column</label><input id="mm_per_column" type="number" step="0.01" value="0.2"></div>
+          <div class="field"><label>DPI (overrides mm/col)</label><input id="dpi" type="number" placeholder="–"></div>
+        </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="auto_calibrate"> Auto-calibrate direction</label>
+          <div class="field"><label>Calib distance (mm)</label><input id="calib_distance" type="number" value="5"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Origin</label><select id="origin"><option>button</option><option>startpoint</option></select></div>
+          <div class="field"><label>Min move (mm)</label><input id="min_move" type="number" step="0.01" value="0.05"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Timeout (s)</label><input id="timeout" type="number" value="30"></div>
+          <div class="field"><label>Sensor tx_id (optional)</label><input id="sensor_id" placeholder="all"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>USB vendor id</label><input id="vendor_id" value="0x0C17"></div>
+          <div class="field"><label>USB product id</label><input id="product_id" value="0x0D12"></div>
+        </div>
+        <label class="check"><input type="checkbox" id="no_track"> Disable tracking (force time mode)</label>
+      </div>
+
+      <!-- NOZZLE MAP -->
+      <div class="panel" data-p="nozzle">
+        <div class="hint">Correct scrambled nozzle wiring. Give the block size and a 1-indexed permutation, e.g. block 5 → <code>2,3,4,1,5</code>. Leave empty to disable.</div>
+        <div class="row">
+          <div class="field"><label>Block size</label><input id="nozzle_block_size" type="number" placeholder="off"></div>
+          <div class="field"><label>New order (comma list)</label><input id="nozzle_order" placeholder="2,3,4,1,5"></div>
+        </div>
+      </div>
+
+      <!-- BLE + PROFILING -->
+      <div class="panel" data-p="ble">
+        <div class="row">
+          <div class="field"><label>Device name</label><input id="device_name" value="PrintheadBLE"></div>
+          <div class="field"><label>Address (skip scan)</label><input id="address" placeholder="optional MAC/UUID"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Scan timeout (s)</label><input id="scan_timeout" type="number" value="10"></div>
+        </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="auto_start"> Auto-start (skip button)</label>
+          <label class="check"><input type="checkbox" id="once"> Once (single pass)</label>
+        </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="profile"> Profile timing</label>
+          <div class="field"><label>Profile CSV path (optional)</label><input id="profile_csv" placeholder="timing.csv"></div>
+        </div>
+      </div>
+
+      <!-- DIAGNOSTICS -->
+      <div class="panel" data-p="diag">
+        <div class="hint">Each runs a standalone check and exits. Output appears in the console. Toggle <b>Simulate</b> up top to test without hardware.</div>
+        <div class="diag">
+          <button class="btn" onclick="runDiag('--list-nodes')">List Amfitrack nodes</button>
+          <button class="btn" onclick="runDiag('--scan-ble')">Scan BLE devices</button>
+          <button class="btn" onclick="runDiag('--nozzle-test')">Nozzle test</button>
+          <button class="btn" onclick="runDiag('--ble-benchmark')">BLE benchmark</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- RUN + CONSOLE -->
+    <section class="card">
+      <h2>Command</h2>
+      <div class="cmd" id="cmdPreview">python main.py …</div>
+      <div class="btnrow" style="margin-bottom:16px">
+        <button class="btn primary" id="btnRun">▶ Run</button>
+        <button class="btn danger" id="btnStop" disabled>■ Stop</button>
+        <span class="spacer"></span>
+        <span class="pill" id="runPill"><span class="status-dot"></span><span id="runPillText">idle</span></span>
+      </div>
+      <div class="conhead">
+        <h2 style="margin:0">Console</h2>
+        <button class="btn ghost" onclick="clearLog()">clear</button>
+      </div>
+      <div class="console" id="console"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const val = id => ($(id) ? String($(id).value).trim() : "");
+const chk = id => ($(id) ? $(id).checked : false);
+
+/* ---------- tabs ---------- */
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');
+  document.querySelector(`.panel[data-p="${t.dataset.t}"]`).classList.add('active');
+});
+
+/* ---------- content-source switching ---------- */
+function src(){return document.querySelector('input[name=src]:checked').value;}
+function updateSrc(){
+  $('f_text').style.display = src()==='text' ? '' : 'none';
+  $('f_pattern').style.display = src()==='pattern' ? '' : 'none';
+  $('patternKnobs').style.display = src()==='text' ? 'none' : '';
+  buildPreview();
+}
+document.querySelectorAll('input[name=src]').forEach(r=>r.onchange=updateSrc);
+
+/* ---------- argv builders ---------- */
+function pushIf(a,cond,flag,v){ if(cond){ a.push(flag); if(v!==undefined && v!=="") a.push(String(v)); } }
+
+function trackingArgs(a){
+  if(chk('no_track')) a.push('--no-track');
+  else pushIf(a, val('mode')!=='position', '--mode', val('mode'));
+  pushIf(a, val('advance_axis')!=='y', '--advance-axis', val('advance_axis'));
+  pushIf(a, val('axis_sign')!=='1', '--axis-sign', val('axis_sign'));
+  pushIf(a, chk('auto_calibrate'), '--auto-calibrate');
+  pushIf(a, chk('auto_calibrate') && val('calib_distance')!=='5', '--calib-distance', val('calib_distance'));
+  if(val('dpi')) { a.push('--dpi', val('dpi')); }
+  else pushIf(a, val('mm_per_column')!=='0.2', '--mm-per-column', val('mm_per_column'));
+  pushIf(a, val('origin')!=='button', '--origin', val('origin'));
+  pushIf(a, val('min_move')!=='0.05', '--min-move', val('min_move'));
+  pushIf(a, val('timeout')!=='30', '--timeout', val('timeout'));
+  pushIf(a, val('vendor_id')!=='0x0C17', '--vendor-id', val('vendor_id'));
+  pushIf(a, val('product_id')!=='0x0D12', '--product-id', val('product_id'));
+  pushIf(a, !!val('sensor_id'), '--sensor-id', val('sensor_id'));
+}
+function nozzleArgs(a){
+  if(val('nozzle_block_size') && val('nozzle_order')){
+    a.push('--nozzle-block-size', val('nozzle_block_size'), '--nozzle-order', val('nozzle_order'));
+  }
+}
+function renderArgs(a){
+  if(src()==='calibrate'){ a.push('--calibrate');
+    pushIf(a, val('calib_major_mm')!=='10','--calib-major-mm',val('calib_major_mm'));
+    pushIf(a, val('calib_minor_mm')!=='1','--calib-minor-mm',val('calib_minor_mm'));
+    pushIf(a, val('pattern_length_mm')!=='200','--pattern-length-mm',val('pattern_length_mm'));
+  } else if(src()==='pattern'){ a.push('--pattern', val('pattern'));
+    pushIf(a, val('pattern_length_mm')!=='200','--pattern-length-mm',val('pattern_length_mm'));
+    pushIf(a, val('pattern_square_mm')!=='10','--pattern-square-mm',val('pattern_square_mm'));
+    pushIf(a, val('pattern_square_rows')!=='20','--pattern-square-rows',val('pattern_square_rows'));
+  } else {
+    a.push(val('text') || 'Text');
+    pushIf(a, !!val('font'), '--font', val('font'));
+    pushIf(a, val('render_size')!=='220','--render-size',val('render_size'));
+    pushIf(a, val('threshold')!=='128','--threshold',val('threshold'));
+    pushIf(a, val('margin')!=='0','--margin',val('margin'));
+    pushIf(a, chk('invert'),'--invert');
+    pushIf(a, chk('flip_y'),'--flip-y');
+    pushIf(a, chk('mirror_x'),'--mirror-x');
+  }
+}
+function bleArgs(a){
+  pushIf(a, val('device_name')!=='PrintheadBLE','--device-name',val('device_name'));
+  pushIf(a, !!val('address'),'--address',val('address'));
+  pushIf(a, val('scan_timeout')!=='10','--scan-timeout',val('scan_timeout'));
+  pushIf(a, chk('auto_start'),'--auto-start');
+  pushIf(a, chk('once'),'--once');
+  pushIf(a, chk('profile'),'--profile');
+  pushIf(a, chk('profile') && !!val('profile_csv'),'--profile-csv',val('profile_csv'));
+  pushIf(a, val('period')!=='0.03' && (chk('no_track')||val('mode')==='time'),'--period',val('period'));
+}
+function globalArgs(a){ pushIf(a, chk('gSimulate'),'--simulate'); pushIf(a, chk('gDryRun'),'--dry-run'); }
+
+function printArgs(){
+  const a=[]; renderArgs(a); trackingArgs(a); nozzleArgs(a); bleArgs(a); globalArgs(a); return a;
+}
+function diagArgs(flag){
+  const a=[flag];
+  if(flag==='--list-nodes'||flag==='--ble-benchmark'){ trackingArgs(a); }
+  if(flag==='--scan-ble'){ pushIf(a, val('scan_timeout')!=='10','--scan-timeout',val('scan_timeout')); }
+  if(flag==='--nozzle-test'){ nozzleArgs(a); pushIf(a, val('device_name')!=='PrintheadBLE','--device-name',val('device_name')); pushIf(a, !!val('address'),'--address',val('address')); }
+  globalArgs(a); return a;
+}
+function sensorArgs(){
+  const a=[];
+  pushIf(a, chk('gSimulate'),'--simulate');
+  pushIf(a, val('advance_axis')!=='y','--advance-axis',val('advance_axis'));
+  pushIf(a, val('axis_sign')!=='1','--axis-sign',val('axis_sign'));
+  if(val('dpi')) a.push('--dpi', val('dpi')); else pushIf(a, val('mm_per_column')!=='0.2','--mm-per-column',val('mm_per_column'));
+  pushIf(a, val('vendor_id')!=='0x0C17','--vendor-id',val('vendor_id'));
+  pushIf(a, val('product_id')!=='0x0D12','--product-id',val('product_id'));
+  pushIf(a, !!val('sensor_id'),'--sensor-id',val('sensor_id'));
+  return a;
+}
+function buildPreview(){ $('cmdPreview').textContent = 'python main.py ' + printArgs().join(' '); }
+document.querySelectorAll('input,select').forEach(el=>el.addEventListener('input',buildPreview));
+
+/* ---------- console ---------- */
+const con=$('console');
+function log(line, cls){ const d=document.createElement('div'); d.className='l'+(cls?' '+cls:''); d.textContent=line; con.appendChild(d); con.scrollTop=con.scrollHeight; }
+function clearLog(){ con.innerHTML=''; }
+
+/* ---------- run / stop ---------- */
+async function post(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
+async function runArgs(args){ const r=await post('/api/run',{args}); if(!r.ok) log('! '+r.error,'err'); }
+$('btnRun').onclick=()=>runArgs(printArgs());
+$('btnStop').onclick=()=>post('/api/stop');
+function runDiag(flag){ runArgs(diagArgs(flag)); }
+
+/* ---------- sensor stream ---------- */
+let sensorOn=false;
+$('btnSensor').onclick=async()=>{
+  if(sensorOn){ await post('/api/sensor/stop'); }
+  else { const r=await post('/api/sensor/start',{args:sensorArgs()}); if(!r.ok) log('! '+r.error,'err'); }
+};
+function setSensor(on){
+  sensorOn=on;
+  $('btnSensor').textContent=on?'Disconnect sensor':'Connect sensor';
+  $('btnSensor').classList.toggle('danger',on);
+  $('sensorPill').classList.toggle('on',on);
+  $('sensorPillText').textContent=on?'sensor live':'sensor offline';
+  $('liveBadge').innerHTML=on?'<b>● streaming</b>':'not connected';
+  if(!on){ ['posX','posY','posZ','posAdv','posCol'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
+}
+
+/* ---------- sparkline ---------- */
+const cv=$('spark'), cx=cv.getContext('2d'); let hist=[]; let lastT=null,lastAdv=null;
+function draw(){
+  const w=cv.width,h=cv.height; cx.clearRect(0,0,w,h);
+  if(hist.length<2) return;
+  const lo=Math.min(...hist), hi=Math.max(...hist), span=(hi-lo)||1;
+  cx.beginPath();
+  hist.forEach((v,i)=>{ const x=i/(hist.length-1)*w, y=h-8-((v-lo)/span)*(h-16); i?cx.lineTo(x,y):cx.moveTo(x,y); });
+  cx.strokeStyle='#2dd4bf'; cx.lineWidth=2; cx.stroke();
+  cx.lineTo(w,h); cx.lineTo(0,h); cx.closePath(); cx.fillStyle='#2dd4bf14'; cx.fill();
+}
+function onPosition(o){
+  $('posX').textContent=o.x.toFixed(2); $('posY').textContent=o.y.toFixed(2); $('posZ').textContent=o.z.toFixed(2);
+  $('posAdv').textContent=o.advance.toFixed(2); $('posCol').textContent=o.col;
+  const now=performance.now()/1000;
+  if(lastT!==null){ const dt=now-lastT; if(dt>0){ const v=Math.abs(o.advance-lastAdv)/dt; $('posVel').textContent=' col · '+v.toFixed(1)+' mm/s'; } }
+  lastT=now; lastAdv=o.advance;
+  hist.push(o.advance); if(hist.length>240) hist.shift(); draw();
+}
+
+/* ---------- run state ---------- */
+function setRun(running,cmd){
+  $('btnRun').disabled=running; $('btnStop').disabled=!running;
+  $('runPill').classList.toggle('on',running);
+  $('runPillText').textContent=running?'running':'idle';
+}
+
+/* ---------- websocket ---------- */
+let ws;
+function connect(){
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+  ws.onmessage=ev=>{
+    const m=JSON.parse(ev.data);
+    if(m.type==='log') log((m.stream==='action'&&m.line.startsWith('$')?'':'')+m.line, m.stream==='sensor'?'sensor':(m.line.startsWith('$')?'cmd':''));
+    else if(m.type==='position') onPosition(m);
+    else if(m.type==='sensor_event'){ if(m.event==='error') log('sensor: '+m.message,'err'); if(m.event==='connected') setSensor(true); }
+    else if(m.type==='sensor_stopped') setSensor(false);
+    else if(m.type==='action_done') log('— finished (exit '+m.code+') —','done');
+    else if(m.type==='status'){ setRun(m.action_running,m.action_cmd); setSensor(m.sensor_running); }
+  };
+  ws.onclose=()=>{ setTimeout(connect,1200); };
+}
+connect(); updateSrc(); buildPreview(); draw();
+</script>
+</body>
+</html>
