@@ -11,6 +11,7 @@ with a friendly message when the hardware or a vendor library is missing.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Optional
 
 import numpy as np
@@ -27,20 +28,30 @@ from .tracking import _AXIS_INDEX, make_tracker
 # --pos : live Amfitrack position readout
 # ============================================================================
 async def monitor_position(tracking: TrackingSettings, simulate: bool,
-                           hz: float = 15.0) -> None:
+                           hz: float = 15.0, ndjson: bool = False) -> None:
     """Continuously print the sensor position (x/y/z), the travel-axis value and
-    the resulting column, until Ctrl+C. Doubles as an axis / mm-per-column aid."""
+    the resulting column, until Ctrl+C. Doubles as an axis / mm-per-column aid.
+
+    ``ndjson=True`` prints one newline-terminated JSON object per sample instead
+    of the live single-line readout, so tools (the web UI) can parse the stream."""
     tracker = make_tracker(tracking, simulate)
     try:
         tracker.open()
     except Exception as exc:
-        print(f"Cannot open Amfitrack tracker: {exc}")
+        if ndjson:
+            print(json.dumps({"event": "error", "message": str(exc)}), flush=True)
+        else:
+            print(f"Cannot open Amfitrack tracker: {exc}")
         return
 
     axis = _AXIS_INDEX[tracking.advance_axis]
     origin = None
-    print(f"Live Amfitrack position (axis '{tracking.advance_axis}', "
-          f"{tracking.mm_per_column:.3f} mm/col). Ctrl+C to stop.")
+    if ndjson:
+        print(json.dumps({"event": "connected", "axis": tracking.advance_axis,
+                          "mm_per_column": tracking.mm_per_column}), flush=True)
+    else:
+        print(f"Live Amfitrack position (axis '{tracking.advance_axis}', "
+              f"{tracking.mm_per_column:.3f} mm/col). Ctrl+C to stop.")
     try:
         while True:
             pos = tracker.read_position()
@@ -49,16 +60,27 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                     origin = pos.copy()
                 advance = tracking.axis_sign * float(pos[axis] - origin[axis])
                 col = int(round(advance / tracking.mm_per_column))
-                print(f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
-                      f"advance={advance:9.2f} mm  |  col={col:5d}",
-                      end="\r", flush=True)
+                if ndjson:
+                    print(json.dumps({
+                        "event": "position",
+                        "x": round(float(pos[0]), 3), "y": round(float(pos[1]), 3),
+                        "z": round(float(pos[2]), 3),
+                        "advance": round(advance, 3), "col": col}), flush=True)
+                else:
+                    print(f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
+                          f"advance={advance:9.2f} mm  |  col={col:5d}",
+                          end="\r", flush=True)
             await asyncio.sleep(1.0 / hz)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
-        print()                       # leave the live line intact
+        if not ndjson:
+            print()                   # leave the live line intact
         tracker.close()
-        print("Stopped position monitor.")
+        if ndjson:
+            print(json.dumps({"event": "stopped"}), flush=True)
+        else:
+            print("Stopped position monitor.")
 
 
 # ============================================================================

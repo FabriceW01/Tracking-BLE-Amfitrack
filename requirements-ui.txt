@@ -1,0 +1,4 @@
+# Web UI (optional) -- on top of requirements.txt
+# Run with: python -m printhead.ui
+fastapi>=0.110
+uvicorn[standard]>=0.27

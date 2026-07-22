@@ -53,6 +53,30 @@ python main.py "Hallo" --mode time --period 0.03
 
 ---
 
+## Web-UI
+
+Statt der Kommandozeile gibt es eine grafische Oberfläche im Browser, die **alle
+CLI-Funktionen** bedient und – sobald verbunden – **die Sensorposition dauerhaft
+live anzeigt** (X/Y/Z, Advance, Spalte, Geschwindigkeit + Sparkline).
+
+```bash
+pip install -r requirements-ui.txt
+python -m printhead.ui            # öffnet http://127.0.0.1:8000 im Browser
+```
+
+Die UI ist ein kleiner lokaler Server (FastAPI): sie baut aus den Formularfeldern
+den passenden `main.py`-Befehl (mit Live-Vorschau des Befehls), führt ihn aus und
+streamt die Ausgabe live in eine Konsole. Alles ist in Tabs organisiert – **Print**
+(Text/Kalibrier-Lineal/Testmuster + Render-Optionen), **Tracking & Scale**,
+**Nozzle map**, **BLE & Profiling** und **Diagnostics** (list-nodes, scan-ble,
+nozzle-test, ble-benchmark). Die Schalter **Simulate** und **Dry-run** oben gelten
+global – so lässt sich die komplette UI auch **ohne Hardware** ausprobieren
+(„Connect sensor" bei aktivem Simulate zeigt eine simulierte Live-Position).
+
+Optionen: `python -m printhead.ui --host 0.0.0.0 --port 8080 --no-browser`.
+
+---
+
 ## Texteinstellungen
 
 Alle Optionen des ursprünglichen Skripts bleiben erhalten:
