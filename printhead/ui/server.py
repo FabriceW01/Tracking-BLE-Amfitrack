@@ -17,17 +17,20 @@ their stdout is broadcast to every connected browser over the WebSocket.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from .runner import CommandProcess
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+PREVIEW_PATH = Path(tempfile.gettempdir()) / "printhead_ui_preview.png"
 
 
 class RunRequest(BaseModel):
@@ -95,6 +98,33 @@ class Hub:
             await self.action.stop()
         await self._status_broadcast()
         return {"ok": True}
+
+    # -- preview ------------------------------------------------------------
+    async def run_preview(self, args: List[str]) -> dict:
+        """Render the image to a PNG (dry-run, no BLE) and report when it's ready.
+        The generated file is served by GET /api/preview.png."""
+        try:
+            PREVIEW_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        full = [*args, "--dry-run", "--preview", str(PREVIEW_PATH)]
+        done = asyncio.Event()
+
+        async def on_line(line: str) -> None:
+            await self.broadcast({"type": "log", "stream": "action", "line": line})
+
+        async def on_exit(code: int) -> None:
+            done.set()
+
+        proc = CommandProcess(full, on_line, on_exit)
+        await self.broadcast({"type": "log", "stream": "action",
+                              "line": f"$ {proc.command_str()}"})
+        await proc.start()
+        try:
+            await asyncio.wait_for(done.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            await proc.stop()
+        return {"ok": PREVIEW_PATH.exists()}
 
     # -- sensor stream ------------------------------------------------------
     async def start_sensor(self, extra: List[str]) -> dict:
@@ -170,6 +200,19 @@ async def run(req: RunRequest) -> dict:
 @app.post("/api/stop")
 async def stop() -> dict:
     return await hub.stop_action()
+
+
+@app.post("/api/preview")
+async def preview(req: RunRequest) -> dict:
+    return await hub.run_preview(req.args)
+
+
+@app.get("/api/preview.png")
+async def preview_png():
+    if not PREVIEW_PATH.exists():
+        raise HTTPException(status_code=404, detail="no preview generated yet")
+    return FileResponse(str(PREVIEW_PATH), media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/sensor/start")

@@ -8,10 +8,10 @@ becomes one 21-byte BLE frame.
 
 Frame format
 ------------
-Each frame is 21 bytes = 168 nozzle bits, LSB-first: bit ``p`` (byte ``p // 8``,
-bit ``p % 8``) fires nozzle ``p``. A set bit = nozzle active = black pixel.
-Only nozzles ``FIRST_NOZZLE..LAST_NOZZLE`` are connected, so image row ``y``
-maps to nozzle ``p = FIRST_NOZZLE + y``.
+Each frame is 19 bytes = 152 nozzle bits, LSB-first: bit ``j`` (byte ``j // 8``,
+bit ``j % 8``) is image row ``j`` = ``FIRST_NOZZLE + j``. A set bit = nozzle
+active = black pixel. The firmware maps frame bit ``j`` to physical nozzle
+``NOZZLE_OFFSET + j`` (see ``geometry.py``).
 """
 
 from __future__ import annotations
@@ -114,9 +114,9 @@ def frames_from_ink(ink: np.ndarray) -> list[bytes]:
     Turn a ``(IMAGE_HEIGHT, W)`` boolean mask into a list of ``W`` 21-byte frames.
 
     Vectorised with ``numpy.packbits`` instead of a per-pixel Python loop: build a
-    ``(W, NUM_NOZZLES)`` bit matrix, place the 164 image rows at nozzle offset
-    ``FIRST_NOZZLE``, then pack LSB-first. This is bit-for-bit identical to setting
-    ``frame[p // 8] |= 1 << (p % 8)`` for every fired nozzle ``p``.
+    ``(W, NUM_NOZZLES)`` bit matrix, place the ``IMAGE_HEIGHT`` image rows at bit
+    offset ``FIRST_NOZZLE``, then pack LSB-first. This is bit-for-bit identical to
+    setting ``frame[j // 8] |= 1 << (j % 8)`` for every fired row ``j``.
     """
     h, w = ink.shape
     if h != IMAGE_HEIGHT:

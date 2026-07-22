@@ -95,6 +95,10 @@
   .console .l.err{color:var(--bad)}
   .console .l.done{color:var(--warn)}
   .conhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .preview-box{background:#f6f7f9;border:1px solid var(--line);border-radius:12px;padding:10px;
+    overflow:auto;max-height:360px}
+  .preview-box img{display:block;height:152px;width:auto;max-width:none;image-rendering:pixelated;
+    image-rendering:crisp-edges}
 </style>
 </head>
 <body>
@@ -248,9 +252,15 @@
       <div class="cmd" id="cmdPreview">python main.py …</div>
       <div class="btnrow" style="margin-bottom:16px">
         <button class="btn primary" id="btnRun">▶ Run</button>
+        <button class="btn" id="btnPreview">👁 Preview</button>
         <button class="btn danger" id="btnStop" disabled>■ Stop</button>
         <span class="spacer"></span>
         <span class="pill" id="runPill"><span class="status-dot"></span><span id="runPillText">idle</span></span>
+      </div>
+      <div id="previewWrap" style="display:none;margin-bottom:16px">
+        <div class="conhead"><h2 style="margin:0">Preview <span id="previewDim" class="live-badge"></span></h2>
+          <button class="btn ghost" onclick="$('previewWrap').style.display='none'">hide</button></div>
+        <div class="preview-box"><img id="previewImg" alt="print preview"></div>
       </div>
       <div class="conhead">
         <h2 style="margin:0">Console</h2>
@@ -361,6 +371,12 @@ function sensorArgs(){
   pushIf(a, !!val('sensor_id'),'--sensor-id',val('sensor_id'));
   return a;
 }
+function previewArgs(){
+  const a=[]; renderArgs(a); nozzleArgs(a);
+  if(val('dpi')) a.push('--dpi',val('dpi'));
+  else pushIf(a, val('mm_per_column')!=='0.2','--mm-per-column',val('mm_per_column'));
+  return a;
+}
 function buildPreview(){ $('cmdPreview').textContent = 'python main.py ' + printArgs().join(' '); }
 document.querySelectorAll('input,select').forEach(el=>el.addEventListener('input',buildPreview));
 
@@ -375,6 +391,17 @@ async function runArgs(args){ const r=await post('/api/run',{args}); if(!r.ok) l
 $('btnRun').onclick=()=>runArgs(printArgs());
 $('btnStop').onclick=()=>post('/api/stop');
 function runDiag(flag){ runArgs(diagArgs(flag)); }
+$('btnPreview').onclick=async()=>{
+  const btn=$('btnPreview'); btn.disabled=true; btn.textContent='… rendering';
+  const r=await post('/api/preview',{args:previewArgs()});
+  btn.disabled=false; btn.textContent='👁 Preview';
+  if(r && r.ok){
+    const img=$('previewImg');
+    img.onload=()=>{ $('previewDim').textContent=img.naturalWidth+'×'+img.naturalHeight+' px'; };
+    img.src='/api/preview.png?t='+Date.now();
+    $('previewWrap').style.display='';
+  } else { log('! preview failed (see console)','err'); }
+};
 
 /* ---------- sensor stream ---------- */
 let sensorOn=false;
