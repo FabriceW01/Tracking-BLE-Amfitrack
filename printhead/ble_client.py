@@ -89,8 +89,10 @@ class PrintheadBLE:
                 print(f"(startpoint notify unavailable: {exc})")
 
     # --------------------------------------------------------------- write
-    async def write_column(self, frame: bytes) -> None:
-        await self._client.write_gatt_char(NOZZLE_UUID, frame, response=False)
+    async def write_column(self, frame: bytes, response: bool = False) -> None:
+        # response=True waits for the GATT write response -> its round-trip time
+        # is a proxy for real delivery latency (used by --ble-benchmark).
+        await self._client.write_gatt_char(NOZZLE_UUID, frame, response=response)
 
     async def write_blank(self) -> None:
         await self._client.write_gatt_char(NOZZLE_UUID, BLANK_FRAME, response=False)

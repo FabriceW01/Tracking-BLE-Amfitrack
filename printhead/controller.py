@@ -64,13 +64,16 @@ class PrintController:
                  tracking: TrackingSettings, simulate: bool = False,
                  preview: Optional[str] = None, dry_run: bool = False,
                  ink: Optional[np.ndarray] = None,
-                 nozzle_map: Optional[NozzleMapSettings] = None):
+                 nozzle_map: Optional[NozzleMapSettings] = None,
+                 profile: bool = False, profile_csv: Optional[str] = None):
         self.render = render
         self.ble = ble
         self.tracking = tracking
         self.simulate = simulate
         self.preview = preview
         self.dry_run = dry_run
+        self.profile = profile
+        self.profile_csv = profile_csv
 
         # Rendered once up front, unless the caller already built the ink
         # (calibration ruler / test patterns bypass text rendering entirely).
@@ -182,6 +185,13 @@ class PrintController:
               f"{t.mm_per_column:.3f} mm/col "
               f"(~{self.width * t.mm_per_column:.1f} mm wide).")
 
+        # Optional real-time timing profiler (see printhead/profiling.py).
+        profiler = None
+        if self.profile:
+            from .profiling import PassProfiler
+            profiler = PassProfiler(t.mm_per_column, csv_path=self.profile_csv)
+            profiler.start()
+
         # 2) drive columns from position.
         # ``frontier`` is the highest column index already printed. Columns are
         # only ever printed while advancing past the frontier, so moving the head
@@ -191,6 +201,8 @@ class PrintController:
         ref_pos = np.asarray(origin, dtype=float)
         ref_t = loop.time()
         t_start = ref_t
+        prev_adv = None
+        prev_t = None
 
         while True:
             now = loop.time()
@@ -221,6 +233,12 @@ class PrintController:
 
                 adv = mapper.advance(pos)            # None while auto-calibrating
                 if adv is not None:
+                    # Along-travel speed (mm/s) for the profiler.
+                    speed = None
+                    if prev_adv is not None and now > prev_t:
+                        speed = abs(adv - prev_adv) / (now - prev_t)
+                    prev_adv, prev_t = adv, now
+
                     col = int(round(adv / t.mm_per_column))
                     if col >= self.width:
                         break                        # reached the end of the text
@@ -236,7 +254,12 @@ class PrintController:
                         # once, filling any columns skipped by a fast feed.
                         start = col if frontier < 0 else frontier + 1
                         for c in range(start, col + 1):
-                            await ble.write_column(self.frames[c])
+                            if profiler is None:
+                                await ble.write_column(self.frames[c])
+                            else:
+                                tw = loop.time()
+                                await ble.write_column(self.frames[c])
+                                profiler.record_write(c, adv, loop.time() - tw, speed)
                         frontier = col
                         firing = True
                     elif col < frontier:
@@ -252,6 +275,8 @@ class PrintController:
                 break
             await asyncio.sleep(interval)
 
+        if profiler is not None:
+            profiler.finish()
         await ble.write_blank()
         print("Finished pass; sent blank frame.")
 

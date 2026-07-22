@@ -219,6 +219,7 @@ statt eines Tracebacks.
 | `--list-nodes` | Verbindet zum USB-Dongle und listet alle Nodes (`name`/`uuid`/`tx_id`), markiert die als „Sensor" erkannten. |
 | `--scan-ble` | Scannt BLE und listet Geräte (`address` + `name`) – zum Finden der PrintheadBLE-Adresse (nutzbar mit `--address`). |
 | `--nozzle-test` | Feuert per BLE ein Testmuster (alle 164 Düsen kurz an → Einzeldüse über alle Zeilen → Blank), um die Patrone zu prüfen. Berücksichtigt `--nozzle-block-size`/`--nozzle-order`, falls gesetzt. |
+| `--ble-benchmark` | Misst den **BLE-Durchsatz** (Frames/s ohne Response) und die **Round-Trip-Latenz** (Frames mit Response) – die Obergrenze, ab der der Druck geschwindigkeitsabhängig wird. |
 
 ```bash
 # Live-Position anschauen (Achse/Skalierung kalibrieren):
@@ -232,6 +233,44 @@ python main.py --scan-ble
 # Düsen der Patrone testen:
 python main.py --nozzle-test
 ```
+
+## Echtzeit / Timing debuggen
+
+Im Positions-Modus wird zwar die *richtige* Spalte aus der Position gewählt, aber
+jede Spalte muss noch über BLE **gesendet und von der Firmware verarbeitet** werden.
+Genau das ist begrenzt (BLE-Connection-Intervall ~7,5–30 ms, gepufferte
+Writes-ohne-Response). Bewegt sich der Kopf schneller, als Spalten geliefert werden
+können, **hinken die Spalten der realen Position hinterher** → der Druck wird
+geschwindigkeitsabhängig. Zwei Werkzeuge machen das messbar:
+
+**1. `--ble-benchmark`** – misst die Obergrenze der BLE-Strecke:
+
+```bash
+python main.py --ble-benchmark --mm-per-column 0.2
+```
+
+Ausgabe: erreichter Durchsatz (Spalten/s), Round-Trip-Latenz (avg/p95/max) und
+daraus die **maximale Kopfgeschwindigkeit**, bis zu der Spalten noch mithalten
+(`Durchsatz × mm_per_column`). Darüber verzerrt der Druck geschwindigkeitsabhängig.
+
+**2. `--profile`** – instrumentiert einen echten Positions-Durchlauf:
+
+```bash
+python main.py "Test" --profile
+python main.py "Test" --profile --profile-csv timing.csv   # zusätzlich CSV-Log
+```
+
+Live werden Kopfgeschwindigkeit, **geforderte** vs. **erreichte** Spaltenrate und die
+BLE-Write-Latenz ausgegeben (`load > 1.0` = BLE kommt nicht hinterher). Am Ende ein
+Fazit inkl. „bis ~X mm/s halten die Spalten mit". Das `--profile-csv` schreibt pro
+Spalte `t, column, advance, write_latency, speed` für die Offline-Analyse.
+
+> Hinweis: Ohne per-Frame-Rückmeldung der Firmware lässt sich nicht *beweisen*, dass
+> eine Spalte physisch rechtzeitig gedruckt wurde; Write-Latenz (`--profile`) und
+> Round-Trip mit Response (`--ble-benchmark`) sind die bestmöglichen Proxys. Wenn der
+> Druck weiterhin von der Geschwindigkeit abhängt, zeigen diese Werte, ob die
+> BLE-Strecke das Nadelöhr ist – dann helfen kürzeres Connection-Intervall, größere
+> MTU/mehr Nozzle-Bytes pro Write, größeres `--mm-per-column` oder langsamer verfahren.
 
 ## BLE-Protokoll (aus README_BLE_INTERFACE.md / Firmware)
 
