@@ -114,6 +114,7 @@
       <span class="live-badge" id="liveBadge">not connected</span>
       <div class="spacer"></div>
       <div class="sensor-ctl">
+        <button class="btn" id="btnRefresh" title="Reload the stream with the current axis / scale settings">↻ Refresh</button>
         <button class="btn primary" id="btnSensor">Connect sensor</button>
       </div>
     </div>
@@ -381,6 +382,12 @@ $('btnSensor').onclick=async()=>{
   if(sensorOn){ await post('/api/sensor/stop'); }
   else { const r=await post('/api/sensor/start',{args:sensorArgs()}); if(!r.ok) log('! '+r.error,'err'); }
 };
+// Reload the stream with the current settings (e.g. after changing advance axis).
+$('btnRefresh').onclick=async()=>{
+  resetSpark();
+  const r=await post('/api/sensor/restart',{args:sensorArgs()});
+  if(!r.ok) log('! '+r.error,'err');
+};
 function setSensor(on){
   sensorOn=on;
   $('btnSensor').textContent=on?'Disconnect sensor':'Connect sensor';
@@ -393,6 +400,7 @@ function setSensor(on){
 
 /* ---------- sparkline ---------- */
 const cv=$('spark'), cx=cv.getContext('2d'); let hist=[]; let lastT=null,lastAdv=null;
+function resetSpark(){ hist=[]; lastT=null; lastAdv=null; draw(); }
 function draw(){
   const w=cv.width,h=cv.height; cx.clearRect(0,0,w,h);
   if(hist.length<2) return;
@@ -426,7 +434,7 @@ function connect(){
     const m=JSON.parse(ev.data);
     if(m.type==='log') log((m.stream==='action'&&m.line.startsWith('$')?'':'')+m.line, m.stream==='sensor'?'sensor':(m.line.startsWith('$')?'cmd':''));
     else if(m.type==='position') onPosition(m);
-    else if(m.type==='sensor_event'){ if(m.event==='error') log('sensor: '+m.message,'err'); if(m.event==='connected') setSensor(true); }
+    else if(m.type==='sensor_event'){ if(m.event==='error') log('sensor: '+m.message,'err'); if(m.event==='connected'){ resetSpark(); setSensor(true); } }
     else if(m.type==='sensor_stopped') setSensor(false);
     else if(m.type==='action_done') log('— finished (exit '+m.code+') —','done');
     else if(m.type==='status'){ setRun(m.action_running,m.action_cmd); setSensor(m.sensor_running); }

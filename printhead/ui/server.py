@@ -101,8 +101,12 @@ class Hub:
         if self.sensor and self.sensor.running:
             return {"ok": False, "error": "sensor stream already running"}
         args = ["--pos", "--pos-json", *extra]
+        proc_box: dict = {}
 
         async def on_line(line: str) -> None:
+            # A superseded (refreshed) process must not push stale samples.
+            if self.sensor is not proc_box.get("p"):
+                return
             try:
                 obj = json.loads(line)
             except (json.JSONDecodeError, ValueError):
@@ -115,19 +119,33 @@ class Hub:
                 await self.broadcast({"type": "sensor_event", **obj})
 
         async def on_exit(code: int) -> None:
-            await self.broadcast({"type": "sensor_stopped", "code": code})
-            await self._status_broadcast()
+            # Only report "stopped" if this is still the active stream, so a
+            # refresh (stop old + start new) does not clobber the new stream.
+            if self.sensor is proc_box.get("p"):
+                await self.broadcast({"type": "sensor_stopped", "code": code})
+                await self._status_broadcast()
 
-        self.sensor = CommandProcess(args, on_line, on_exit)
-        await self.sensor.start()
+        proc = CommandProcess(args, on_line, on_exit)
+        proc_box["p"] = proc
+        self.sensor = proc
+        await proc.start()
         await self._status_broadcast()
-        return {"ok": True, "cmd": self.sensor.command_str()}
+        return {"ok": True, "cmd": proc.command_str()}
 
     async def stop_sensor(self) -> dict:
         if self.sensor:
             await self.sensor.stop()
         await self._status_broadcast()
         return {"ok": True}
+
+    async def restart_sensor(self, extra: List[str]) -> dict:
+        """Stop the current stream (if any) and start a fresh one with new args,
+        so a changed advance axis / scale takes effect immediately."""
+        old = self.sensor
+        self.sensor = None                 # detach so the old on_exit stays quiet
+        if old is not None:
+            await old.stop()
+        return await self.start_sensor(extra)
 
 
 hub = Hub()
@@ -162,6 +180,11 @@ async def sensor_start(req: RunRequest) -> dict:
 @app.post("/api/sensor/stop")
 async def sensor_stop() -> dict:
     return await hub.stop_sensor()
+
+
+@app.post("/api/sensor/restart")
+async def sensor_restart(req: RunRequest) -> dict:
+    return await hub.restart_sensor(req.args)
 
 
 @app.websocket("/ws")
