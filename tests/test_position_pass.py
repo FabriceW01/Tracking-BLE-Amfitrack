@@ -51,7 +51,7 @@ class ScriptedTracker:
 def _controller():
     render = RenderSettings(text="reverse test")
     ble = BleSettings()
-    trk = TrackingSettings(advance_axis="y", mm_per_column=0.2, min_move_mm=0.01,
+    trk = TrackingSettings(advance_axis="y", mm_per_column=0.2, min_move_mm=0.01, smooth_ms=0.0,
                            poll_hz=1000.0, timeout_s=5.0)
     return PrintController(render, ble, trk), trk.mm_per_column
 
@@ -126,7 +126,7 @@ def _run_pass(ctrl, event):
 
 def test_startpoint_reset_restarts_from_zero():
     render = RenderSettings(text="Hi")
-    trk = TrackingSettings(advance_axis="y", mm_per_column=0.2, min_move_mm=0.01,
+    trk = TrackingSettings(advance_axis="y", mm_per_column=0.2, min_move_mm=0.01, smooth_ms=0.0,
                            poll_hz=1000.0, timeout_s=10.0)
     ctrl = PrintController(render, BleSettings(), trk)
     assert ctrl.width > 50, "test text should render wide enough for a mid-pass reset"

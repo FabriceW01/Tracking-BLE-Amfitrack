@@ -153,6 +153,7 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | Option | Bedeutung |
 |---|---|
 | `--origin button\|startpoint` | Was den Nullpunkt setzt (START-Taster oder Startpoint-Charakteristik) |
+| `--smooth-ms MS` | Tiefpass-Zeitkonstante (ms) gegen das verrauschte Amfitrack-Signal; `0` = aus, größer = glatter aber mehr Nachlauf (Default 12). Reduziert unregelmäßige Linien/Lücken. |
 | `--min-move MM` | Deadband; darunter gilt der Kopf als stehend (Default 0.05) |
 | `--timeout S` | Abbruch eines Durchlaufs nach S Sekunden (Default 30) |
 | `--vendor-id` / `--product-id` | USB-IDs des Amfitrack-Dongles (Default `0x0C17` / `0x0D12`) |
