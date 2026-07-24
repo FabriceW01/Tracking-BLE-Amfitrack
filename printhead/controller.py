@@ -20,6 +20,7 @@ import numpy as np
 
 from .ble_client import PrintheadBLE
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
+from .geometry import BLANK_FRAME
 from .nozzle_map import remap_rows
 from .rendering import frames_from_ink, render_text, save_preview
 from .tracking import AdvanceMapper, make_tracker
@@ -65,7 +66,8 @@ class PrintController:
                  preview: Optional[str] = None, dry_run: bool = False,
                  ink: Optional[np.ndarray] = None,
                  nozzle_map: Optional[NozzleMapSettings] = None,
-                 profile: bool = False, profile_csv: Optional[str] = None):
+                 profile: bool = False, profile_csv: Optional[str] = None,
+                 record: Optional[str] = None):
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -74,6 +76,7 @@ class PrintController:
         self.dry_run = dry_run
         self.profile = profile
         self.profile_csv = profile_csv
+        self.record = record
 
         # Rendered once up front, unless the caller already built the ink
         # (calibration ruler / test patterns bypass text rendering entirely).
@@ -192,6 +195,12 @@ class PrintController:
             profiler = PassProfiler(t.mm_per_column, csv_path=self.profile_csv)
             profiler.start()
 
+        # Optional send recorder: reconstruct what is actually deposited on paper.
+        recorder = None
+        if self.record:
+            from .recording import SendRecorder
+            recorder = SendRecorder(t.mm_per_column)
+
         # 2) drive columns from position.
         # ``frontier`` is the highest column index already printed. Columns are
         # only ever printed while advancing past the frontier, so moving the head
@@ -248,18 +257,20 @@ class PrintController:
                         # head stopped -> stop firing (avoid an ink blob)
                         if firing:
                             await ble.write_blank()
+                            if recorder is not None:
+                                recorder.record(adv, BLANK_FRAME)
                             firing = False
                     elif col > frontier:
                         # advancing into new territory: print each new column
                         # once, filling any columns skipped by a fast feed.
                         start = col if frontier < 0 else frontier + 1
                         for c in range(start, col + 1):
-                            if profiler is None:
-                                await ble.write_column(self.frames[c])
-                            else:
-                                tw = loop.time()
-                                await ble.write_column(self.frames[c])
+                            tw = loop.time()
+                            await ble.write_column(self.frames[c])
+                            if profiler is not None:
                                 profiler.record_write(c, adv, loop.time() - tw, speed)
+                            if recorder is not None:
+                                recorder.record(adv, self.frames[c])
                         frontier = col
                         firing = True
                     elif col < frontier:
@@ -267,6 +278,8 @@ class PrintController:
                         # reprint -> blank so no ink is deposited on the return.
                         if firing:
                             await ble.write_blank()
+                            if recorder is not None:
+                                recorder.record(adv, BLANK_FRAME)
                             firing = False
                     # col == frontier while moving: keep the leading column firing
 
@@ -277,6 +290,11 @@ class PrintController:
 
         if profiler is not None:
             profiler.finish()
+        if recorder is not None:
+            if recorder.render(self.record, self._ink):
+                print(f"Reconstruction of what was sent -> {self.record}")
+            else:
+                print("Nothing was recorded (no columns sent).")
         await ble.write_blank()
         print("Finished pass; sent blank frame.")
 

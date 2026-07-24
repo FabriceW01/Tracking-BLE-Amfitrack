@@ -97,7 +97,7 @@
   .conhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
   .preview-box{background:#f6f7f9;border:1px solid var(--line);border-radius:12px;padding:10px;
     overflow:auto;max-height:360px}
-  .preview-box img{display:block;height:152px;width:auto;max-width:none;image-rendering:pixelated;
+  .preview-box img{display:block;height:auto;width:auto;max-width:none;image-rendering:pixelated;
     image-rendering:crisp-edges}
 </style>
 </head>
@@ -253,6 +253,7 @@
       <div class="btnrow" style="margin-bottom:16px">
         <button class="btn primary" id="btnRun">▶ Run</button>
         <button class="btn" id="btnPreview">👁 Preview</button>
+        <button class="btn" id="btnRecord" title="Print and reconstruct what was actually sent over BLE, mapped to head position">🎞 Record</button>
         <button class="btn danger" id="btnStop" disabled>■ Stop</button>
         <span class="spacer"></span>
         <span class="pill" id="runPill"><span class="status-dot"></span><span id="runPillText">idle</span></span>
@@ -396,12 +397,23 @@ $('btnPreview').onclick=async()=>{
   const r=await post('/api/preview',{args:previewArgs()});
   btn.disabled=false; btn.textContent='👁 Preview';
   if(r && r.ok){
-    const img=$('previewImg');
-    img.onload=()=>{ $('previewDim').textContent=img.naturalWidth+'×'+img.naturalHeight+' px'; };
-    img.src='/api/preview.png?t='+Date.now();
-    $('previewWrap').style.display='';
+    showImage('/api/preview.png','preview');
   } else { log('! preview failed (see console)','err'); }
 };
+let pendingRecord=false;
+$('btnRecord').onclick=async()=>{
+  const r=await post('/api/record',{args:printArgs()});
+  if(r && r.ok){ pendingRecord=true; log('recording… run the pass (press START, or use Auto-start/Simulate)','done'); }
+  else { log('! '+(r&&r.error||'record failed'),'err'); }
+};
+function showImage(url,kind){
+  const img=$('previewImg');
+  img.onload=()=>{ $('previewDim').textContent = kind==='record'
+    ? 'reconstruction · '+img.naturalWidth+'×'+img.naturalHeight+' px'
+    : img.naturalWidth+'×'+img.naturalHeight+' px'; };
+  img.src=url+'?t='+Date.now();
+  $('previewWrap').style.display='';
+}
 
 /* ---------- sensor stream ---------- */
 let sensorOn=false;
@@ -463,7 +475,8 @@ function connect(){
     else if(m.type==='position') onPosition(m);
     else if(m.type==='sensor_event'){ if(m.event==='error') log('sensor: '+m.message,'err'); if(m.event==='connected'){ resetSpark(); setSensor(true); } }
     else if(m.type==='sensor_stopped') setSensor(false);
-    else if(m.type==='action_done') log('— finished (exit '+m.code+') —','done');
+    else if(m.type==='action_done'){ log('— finished (exit '+m.code+') —','done');
+      if(pendingRecord){ pendingRecord=false; setTimeout(()=>showImage('/api/record.png','record'),400); } }
     else if(m.type==='status'){ setRun(m.action_running,m.action_cmd); setSensor(m.sensor_running); }
   };
   ws.onclose=()=>{ setTimeout(connect,1200); };
