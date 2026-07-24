@@ -289,6 +289,24 @@ BLE-Write-Latenz ausgegeben (`load > 1.0` = BLE kommt nicht hinterher). Am Ende 
 Fazit inkl. „bis ~X mm/s halten die Spalten mit". Das `--profile-csv` schreibt pro
 Spalte `t, column, advance, write_latency, speed` für die Offline-Analyse.
 
+**3. `--record BILD.png`** – rekonstruiert, was **tatsächlich aufs Papier geht**:
+jeder gesendete Frame wird mit der Kopfposition aufgezeichnet und danach als Bild
+gespeichert, das die Frames auf ihre reale Position mappt (die Firmware druckt den
+zuletzt empfangenen Frame, bis der nächste kommt – ein Frame belegt also die Strecke
+von seiner Sende-Position bis zur nächsten). Oben das beabsichtigte Bild, unten das
+gesendete – so werden Stauchung/Verlust sichtbar, wenn bei schneller Bewegung mehrere
+Spalten an *einer* Position zusammenfallen.
+
+```bash
+python main.py "Test" --record recon.png
+python main.py "Test" --simulate --mode position --dry-run --record recon.png  # ohne Hardware
+```
+
+In der Web-UI gibt es dafür den **🎞 Record**-Button (zeigt das Vergleichsbild direkt an).
+Hinweis: `--record` erfasst, was der Client sendet und *wo* – nicht, was auf dem Funkweg
+evtl. verloren geht. Ist die Rekonstruktion sauber, liegt ein verbleibendes Problem an
+BLE-Paketverlust/Firmware; ist sie schon gestaucht, liegt es am Sende-/Positionstiming.
+
 > Hinweis: Ohne per-Frame-Rückmeldung der Firmware lässt sich nicht *beweisen*, dass
 > eine Spalte physisch rechtzeitig gedruckt wurde; Write-Latenz (`--profile`) und
 > Round-Trip mit Response (`--ble-benchmark`) sind die bestmöglichen Proxys. Wenn der

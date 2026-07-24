@@ -139,6 +139,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "verdict on whether columns kept up with the head")
     g.add_argument("--profile-csv",
                    help="Also write a per-column timing log to this CSV path")
+    g.add_argument("--record",
+                   help="Reconstruct what is actually deposited on paper: record "
+                        "every sent frame + head position and save a PNG (intended "
+                        "vs. sent-mapped-to-position) to this path after the pass")
 
     # --- BLE / run ---------------------------------------------------------
     g = ap.add_argument_group("BLE / run")
@@ -262,7 +266,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,
                            nozzle_map=build_nozzle_map(args),
-                           profile=args.profile, profile_csv=args.profile_csv)
+                           profile=args.profile, profile_csv=args.profile_csv,
+                           record=args.record)
 
 
 def _run_debug(args: argparse.Namespace) -> None:

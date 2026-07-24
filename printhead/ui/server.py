@@ -31,6 +31,7 @@ from .runner import CommandProcess
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PREVIEW_PATH = Path(tempfile.gettempdir()) / "printhead_ui_preview.png"
+RECORD_PATH = Path(tempfile.gettempdir()) / "printhead_ui_record.png"
 
 
 class RunRequest(BaseModel):
@@ -98,6 +99,14 @@ class Hub:
             await self.action.stop()
         await self._status_broadcast()
         return {"ok": True}
+
+    async def run_record(self, args: List[str]) -> dict:
+        """Run a print pass that also reconstructs what was sent (--record)."""
+        try:
+            RECORD_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        return await self.run_action([*args, "--record", str(RECORD_PATH)])
 
     # -- preview ------------------------------------------------------------
     async def run_preview(self, args: List[str]) -> dict:
@@ -212,6 +221,19 @@ async def preview_png():
     if not PREVIEW_PATH.exists():
         raise HTTPException(status_code=404, detail="no preview generated yet")
     return FileResponse(str(PREVIEW_PATH), media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/record")
+async def record(req: RunRequest) -> dict:
+    return await hub.run_record(req.args)
+
+
+@app.get("/api/record.png")
+async def record_png():
+    if not RECORD_PATH.exists():
+        raise HTTPException(status_code=404, detail="no recording yet")
+    return FileResponse(str(RECORD_PATH), media_type="image/png",
                         headers={"Cache-Control": "no-store"})
 
 
