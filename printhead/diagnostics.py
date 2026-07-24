@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Optional
 
 import numpy as np
@@ -21,7 +22,7 @@ from .config import BleSettings, NozzleMapSettings, TrackingSettings
 from .geometry import BLANK_FRAME, IMAGE_HEIGHT
 from .nozzle_map import remap_rows
 from .rendering import frames_from_ink
-from .tracking import _AXIS_INDEX, make_tracker
+from .tracking import _AXIS_INDEX, PositionFilter, make_tracker
 
 
 # ============================================================================
@@ -46,6 +47,7 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
 
     axis = _AXIS_INDEX[tracking.advance_axis]
     origin = None
+    pos_filter = PositionFilter(tracking.smooth_ms / 1000.0)
     if ndjson:
         print(json.dumps({"event": "connected", "axis": tracking.advance_axis,
                           "mm_per_column": tracking.mm_per_column}), flush=True)
@@ -56,6 +58,7 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
         while True:
             pos = tracker.read_position()
             if pos is not None:
+                pos = pos_filter.update(pos, time.monotonic())
                 if origin is None:
                     origin = pos.copy()
                 advance = tracking.axis_sign * float(pos[axis] - origin[axis])

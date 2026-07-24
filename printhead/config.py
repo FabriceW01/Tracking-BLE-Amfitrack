@@ -68,6 +68,8 @@ class TrackingSettings:
 
     # --- run behaviour -----------------------------------------------------
     origin: str = "button"          # "button" | "startpoint" (what zeroes pos.)
+    smooth_ms: float = 12.0         # low-pass time constant for the noisy position
+                                    # (0 = off); larger = smoother but more lag
     min_move_mm: float = 0.05       # deadband: below this, treat head as stopped
     timeout_s: float = 30.0         # give up a pass after this long with no end
     poll_hz: float = 200.0          # position polling rate

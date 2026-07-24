@@ -23,7 +23,7 @@ from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSett
 from .geometry import BLANK_FRAME
 from .nozzle_map import remap_rows
 from .rendering import frames_from_ink, render_text, save_preview
-from .tracking import AdvanceMapper, make_tracker
+from .tracking import AdvanceMapper, PositionFilter, make_tracker
 
 # How long the head may sit still (having accumulated < min_move_mm) before we
 # stop firing its column. Tolerates slow feed while preventing a stationary blob.
@@ -172,6 +172,7 @@ class PrintController:
         column 0."""
         t = self.tracking
         mapper = AdvanceMapper(t)
+        pos_filter = PositionFilter(t.smooth_ms / 1000.0)
         loop = asyncio.get_event_loop()
         interval = 1.0 / t.poll_hz
 
@@ -179,7 +180,8 @@ class PrintController:
         if t.origin == "startpoint":
             print("Waiting for startpoint signal to zero position ...")
             await startpoint_event.wait()
-        origin = await self._wait_for_position(tracker, loop)
+        origin = pos_filter.update(await self._wait_for_position(tracker, loop),
+                                   loop.time())
         mapper.set_origin(origin)
         # Ignore any startpoint press that belonged to the setup; only presses
         # during the loop below act as a live reset.
@@ -220,7 +222,9 @@ class PrintController:
             # reset the stored progress so printing restarts from column 0.
             if startpoint_event.is_set():
                 startpoint_event.clear()
-                origin = await self._wait_for_position(tracker, loop)
+                pos_filter.reset()
+                origin = pos_filter.update(
+                    await self._wait_for_position(tracker, loop), loop.time())
                 mapper.set_origin(origin)      # re-zero (also clears auto-calib dir.)
                 frontier = -1
                 if firing:
@@ -235,7 +239,7 @@ class PrintController:
 
             pos = tracker.read_position()
             if pos is not None:
-                pos = np.asarray(pos, dtype=float)
+                pos = pos_filter.update(pos, now)   # low-pass the noisy signal
                 if np.linalg.norm(pos - ref_pos) >= t.min_move_mm:
                     ref_pos, ref_t = pos, now        # accumulated real movement
                 moving = (now - ref_t) <= _STALL_GRACE_S

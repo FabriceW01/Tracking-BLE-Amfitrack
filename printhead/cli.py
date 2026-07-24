@@ -116,6 +116,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--origin", choices=("button", "startpoint"), default="button",
                    help="What zeroes the position: START press or the startpoint "
                         "characteristic (default button)")
+    g.add_argument("--smooth-ms", type=float, default=12.0,
+                   help="Low-pass time constant (ms) for the noisy Amfitrack "
+                        "position; 0 = off, larger = smoother but more lag "
+                        "(default 12)")
     g.add_argument("--min-move", type=float, default=0.05,
                    help="Deadband in mm; below this the head counts as stopped "
                         "(default 0.05)")
@@ -218,6 +222,7 @@ def build_tracking(args: argparse.Namespace) -> TrackingSettings:
         advance_axis=args.advance_axis, axis_sign=args.axis_sign,
         auto_calibrate=args.auto_calibrate, calib_distance_mm=args.calib_distance,
         origin=args.origin, min_move_mm=args.min_move, timeout_s=args.timeout,
+        smooth_ms=args.smooth_ms,
         vendor_id=args.vendor_id, product_id=args.product_id,
         sensor_id=args.sensor_id)
     tracking.mm_per_column = tracking.resolve_mm_per_column(args.dpi)

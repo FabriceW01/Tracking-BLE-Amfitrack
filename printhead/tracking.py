@@ -29,6 +29,44 @@ _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 
 
 # ============================================================================
+# Position low-pass filter
+# ============================================================================
+class PositionFilter:
+    """
+    First-order low-pass (EMA) on the 3-D position, parameterised by a time
+    constant so it is independent of the polling rate.
+
+    The Amfitrack signal is noisy; unfiltered it makes the derived column jump
+    around, which trips the "stopped"/"reversed" checks and leaves irregular gaps
+    and uneven line widths in the print. Smoothing the position first fixes that.
+    Larger ``tau_s`` = smoother but more lag (a roughly constant position offset).
+    """
+
+    def __init__(self, tau_s: float):
+        self.tau = float(tau_s)
+        self._state = None
+        self._t = None
+
+    def reset(self) -> None:
+        self._state = None
+        self._t = None
+
+    def update(self, pos, t):
+        pos = np.asarray(pos, dtype=float)
+        if self.tau <= 0.0 or self._state is None:
+            self._state = pos.copy()
+            self._t = t
+            return self._state
+        dt = t - self._t
+        self._t = t
+        if dt <= 0.0:
+            return self._state
+        alpha = dt / (self.tau + dt)
+        self._state = self._state + alpha * (pos - self._state)
+        return self._state
+
+
+# ============================================================================
 # Position -> travel distance
 # ============================================================================
 class AdvanceMapper:
