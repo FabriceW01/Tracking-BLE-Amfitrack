@@ -28,7 +28,7 @@ def test_decode_roundtrips_a_frame():
         assert col[row] and col.sum() == 1, row
 
 
-def test_burst_collapses_to_latest_frame():
+def test_burst_is_laid_out_side_by_side():
     r = SendRecorder(mm_per_column=0.2)
     fa = _frame_with_row(0)
     fb = _frame_with_row(1)
@@ -40,12 +40,36 @@ def test_burst_collapses_to_latest_frame():
     r.record(2.0, fc)
 
     recon = r.reconstruct()
-    # At the burst position the LATEST frame (fb, row 1) wins; fa (row 0) is lost.
-    assert recon[1, 5] and not recon[0, 5]
-    # fb spans until fc's position.
-    assert recon[1, 9] and not recon[1, 10]
-    # fc from x=10 on.
+    # The firmware queues both burst columns: neither is lost, fb spills to x=6.
+    assert recon[0, 5] and not recon[1, 5]
+    assert recon[1, 6] and not recon[0, 6]
+    # Each column occupies exactly one slot -- no smearing across the gap.
+    assert not recon[:, 7:10].any()
     assert recon[2, 10]
+
+
+def test_undersampled_feed_leaves_gaps():
+    # Client only managed a column every 3rd position: the firmware prints each
+    # once, so the gaps in between stay empty instead of being smeared over.
+    r = SendRecorder(mm_per_column=0.2)
+    for c in range(0, 12, 3):
+        r.record(c * 0.2, _frame_with_row(c))
+    recon = r.reconstruct()
+    for c in range(0, 12, 3):
+        assert recon[c, c], c
+    assert not recon[:, 1:3].any()
+    assert not recon[:, 4:6].any()
+
+
+def test_blank_consumes_a_slot_without_ink():
+    r = SendRecorder(mm_per_column=0.2)
+    r.record(0.0, _frame_with_row(0))
+    r.record(0.0, bytes(len(_frame_with_row(0))))    # blank, same position
+    r.record(0.0, _frame_with_row(1))
+    recon = r.reconstruct()
+    assert recon[0, 0]
+    assert not recon[:, 1].any()                     # the blank's slot
+    assert recon[1, 2]
 
 
 def test_clean_stream_matches_intended():

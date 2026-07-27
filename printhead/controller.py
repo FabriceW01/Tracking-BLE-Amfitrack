@@ -40,6 +40,9 @@ class _NullPrinthead:
     async def write_column(self, frame):
         self.column_writes += 1
 
+    async def write_columns(self, frames):
+        self.column_writes += len(list(frames))
+
     async def write_blank(self):
         self.blank_writes += 1
 
@@ -268,11 +271,17 @@ class PrintController:
                         # advancing into new territory: print each new column
                         # once, filling any columns skipped by a fast feed.
                         start = col if frontier < 0 else frontier + 1
-                        for c in range(start, col + 1):
-                            tw = loop.time()
-                            await ble.write_column(self.frames[c])
+                        cols = list(range(start, col + 1))
+                        tw = loop.time()
+                        # One write per MTU-worth of columns: the firmware queues
+                        # them and prints them in order, so this is equivalent to
+                        # writing them one at a time but no longer depends on the
+                        # connection interval carrying that many packets.
+                        await ble.write_columns([self.frames[c] for c in cols])
+                        per_col = (loop.time() - tw) / len(cols)
+                        for c in cols:
                             if profiler is not None:
-                                profiler.record_write(c, adv, loop.time() - tw, speed)
+                                profiler.record_write(c, adv, per_col, speed)
                             if recorder is not None:
                                 recorder.record(adv, self.frames[c])
                         frontier = col

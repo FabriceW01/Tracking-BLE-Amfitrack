@@ -159,6 +159,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Start immediately without waiting for the button")
     g.add_argument("--once", action="store_true",
                    help="Exit after one print (default: keep listening)")
+    g.add_argument("--batch-cols", type=int, default=0, metavar="N",
+                   help="Columns per BLE write (default 0 = derive from the "
+                        "negotiated MTU). Use 1 for firmware without batching")
     g.add_argument("--preview", help="Save a PNG preview of the rendered image")
     g.add_argument("--dry-run", action="store_true",
                    help="Render (and optionally preview/simulate) only; no BLE")
@@ -211,7 +214,8 @@ def build_ble(args: argparse.Namespace) -> BleSettings:
     return BleSettings(
         device_name=args.device_name, address=args.address,
         scan_timeout=args.scan_timeout, auto_start=args.auto_start,
-        once=args.once, period=args.period, verbose=args.verbose)
+        once=args.once, period=args.period, verbose=args.verbose,
+        batch_cols=args.batch_cols)
 
 
 def build_tracking(args: argparse.Namespace) -> TrackingSettings:

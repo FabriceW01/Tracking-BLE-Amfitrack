@@ -197,6 +197,9 @@
         </div>
         <div class="row">
           <div class="field"><label>Timeout (s)</label><input id="timeout" type="number" value="30"></div>
+          <div class="field"><label>Smoothing (ms)</label><input id="smooth_ms" type="number" step="1" value="12" title="Low-pass time constant for the Amfitrack position. 0 disables it."></div>
+        </div>
+        <div class="row">
           <div class="field"><label>Sensor tx_id (optional)</label><input id="sensor_id" placeholder="all"></div>
         </div>
         <div class="row">
@@ -223,6 +226,7 @@
         </div>
         <div class="row">
           <div class="field"><label>Scan timeout (s)</label><input id="scan_timeout" type="number" value="10"></div>
+          <div class="field"><label>Columns per write</label><input id="batch_cols" type="number" min="0" value="0" title="0 = derive from the negotiated MTU. Use 1 for firmware without column batching."></div>
         </div>
         <div class="row">
           <label class="check"><input type="checkbox" id="auto_start"> Auto-start (skip button)</label>
@@ -310,6 +314,7 @@ function trackingArgs(a){
   pushIf(a, val('origin')!=='button', '--origin', val('origin'));
   pushIf(a, val('min_move')!=='0.05', '--min-move', val('min_move'));
   pushIf(a, val('timeout')!=='30', '--timeout', val('timeout'));
+  pushIf(a, val('smooth_ms')!=='12', '--smooth-ms', val('smooth_ms'));
   pushIf(a, val('vendor_id')!=='0x0C17', '--vendor-id', val('vendor_id'));
   pushIf(a, val('product_id')!=='0x0D12', '--product-id', val('product_id'));
   pushIf(a, !!val('sensor_id'), '--sensor-id', val('sensor_id'));
@@ -343,6 +348,7 @@ function bleArgs(a){
   pushIf(a, val('device_name')!=='PrintheadBLE','--device-name',val('device_name'));
   pushIf(a, !!val('address'),'--address',val('address'));
   pushIf(a, val('scan_timeout')!=='10','--scan-timeout',val('scan_timeout'));
+  pushIf(a, val('batch_cols')!=='0','--batch-cols',val('batch_cols'));
   pushIf(a, chk('auto_start'),'--auto-start');
   pushIf(a, chk('once'),'--once');
   pushIf(a, chk('profile'),'--profile');

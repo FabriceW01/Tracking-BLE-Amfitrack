@@ -36,6 +36,9 @@ class BleSettings:
     once: bool = False              # exit after a single pass
     period: float = 0.03            # seconds per column (time-based mode only)
     verbose: bool = False
+    # Columns packed into a single BLE write. 0 = derive it from the negotiated
+    # MTU. 1 restores one-column-per-write for firmware that predates batching.
+    batch_cols: int = 0
 
 
 @dataclass
