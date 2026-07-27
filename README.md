@@ -321,14 +321,21 @@ BLE-Paketverlust/Firmware; ist sie schon gestaucht, liegt es am Sende-/Positions
 |---|---|
 | Device name | `PrintheadBLE` |
 | Service | `d0567401-5a22-c59f-5243-8c0fa18e257b` |
-| Nozzle char | `41a9348e-2f6b-8db1-934d-743c6f17649a` (Write/WriteNoRsp, 21 Bytes) |
+| Nozzle char | `41a9348e-2f6b-8db1-934d-743c6f17649a` (Write/WriteNoRsp, Vielfaches von 19 Bytes) |
 | Start btn | `b473a21f-6e58-6380-2647-abd7cd4a904e` (Read/Notify, 1 Byte 0/1) |
 | Startpoint | `cc1087f5-1d92-6ca4-b84f-3e5880e6713d` (Read/Notify, 1 Byte 0/1) |
 
-Jeder Frame = 21 Bytes = 168 Nozzle-Bits, LSB-first: Bit `p` (Byte `p//8`, Bit `p%8`)
-feuert Nozzle `p`. Physisch verbunden sind nur Nozzles 2..165 → 164 Zeilen. Bildzeile
-`y` ↦ Nozzle `p = 2 + y`. Die Firmware druckt stets den *zuletzt* empfangenen Frame,
-bis der nächste ihn überschreibt.
+Eine Spalte = 19 Bytes = 152 Nozzle-Bits, LSB-first: Bit `j` (Byte `j//8`, Bit `j%8`).
+Die Firmware paddt oben und unten je ein Nullbyte auf das alte 21-Byte-Layout, d. h.
+Frame-Bit `j` feuert physisch Nozzle `j + 8`; Bildzeile `y` ↦ Bit `j = y`.
+
+**Mehrere Spalten pro Write:** ein Write darf beliebig viele Spalten hintereinander
+tragen (jedes Vielfache von 19 Bytes, max. 32). Die Firmware stellt sie in eine
+Warteschlange und druckt **jede genau einmal, in Reihenfolge**, für eine begrenzte
+Anzahl Schüsse. Wie viele Spalten pro Write gehen, ergibt sich aus der ausgehandelten
+MTU (`--batch-cols`, Default `0` = automatisch; die Firmware fordert MTU 247 an → 12
+Spalten). `--batch-cols 1` erzwingt eine Spalte pro Write für ältere Firmware **ohne**
+Spalten-Queue — diese verwirft längere Writes kommentarlos.
 
 ## Amfitrack-Anbindung / Hinweis zum Payload
 
@@ -350,8 +357,15 @@ Der Zugriff erfolgt über die USB-Pakete `amfiprot` und `amfiprot_amfitrack`
 
 ```bash
 python tests/test_frames.py          # Protokoll-Äquivalenz der Frame-Erzeugung
+python tests/test_batching.py        # Spalten-Batching (Bytestrom bleibt identisch)
 python main.py "Hi" --simulate --mode position --dry-run   # Positions-Loop
 python -m printhead --help
+```
+
+Alle Tests am Stück:
+
+```bash
+for t in tests/test_*.py; do python "$t" >/dev/null && echo "PASS $t" || echo "FAIL $t"; done
 ```
 
 ## Abhängigkeiten

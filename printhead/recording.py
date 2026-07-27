@@ -6,14 +6,20 @@ Records every nozzle frame actually written over BLE during a position pass,
 together with the head position at that moment, and reconstructs an image of
 what physically ends up on paper.
 
-This is the key difference between the clean nozzle-test and a real print: the
-firmware prints the *latest* frame it received until the next one arrives, so a
-frame is deposited across the physical span from where it was sent until the next
-frame is sent. If the head moves faster than columns can be sent (or columns are
-gap-filled in a burst at one position), several columns collapse onto the same
-spot -> horizontal detail is lost. The reconstruction makes that visible: it maps
-each sent frame to the head position it was sent at, exactly as the printhead
-sees it, and stacks it against the intended image for comparison.
+This models what the firmware does with the columns it is handed: it queues them
+and prints each one exactly once, in order, for a bounded number of fires. So a
+frame occupies one column slot starting at the position it was sent from -- it is
+neither smeared across the gap to the next frame nor overwritten by a column sent
+right behind it.
+
+What the reconstruction therefore exposes is what the *client* got wrong:
+  * columns the client never sent (head fed faster than columns were emitted)
+    show up as gaps;
+  * columns sent from the same spot in a gap-fill burst are laid out side by side,
+    so a burst appears shifted relative to where the head actually was;
+  * a blank consumes a slot and deposits nothing.
+
+It is stacked against the intended image for comparison.
 """
 
 from __future__ import annotations
@@ -48,27 +54,32 @@ class SendRecorder:
 
     # ------------------------------------------------------------- reconstruct
     def reconstruct(self, min_width: int = 0) -> np.ndarray:
-        """Position-mapped image of what was actually deposited: each sent frame
-        painted from the head position it was sent at until the next frame's
-        position ("latest frame wins"). Bursts sent at one position collapse."""
+        """Position-mapped image of what was actually deposited.
+
+        The firmware queues the columns it receives and prints each exactly once,
+        so every sent frame gets its own slot starting at the position it was sent
+        from. Frames sent from the same position (a gap-fill burst) are laid out
+        consecutively rather than overwriting each other."""
         if not self.events:
             return np.zeros((IMAGE_HEIGHT, max(1, min_width)), dtype=bool)
         mmpc = self.mm_per_column
         xs = [int(round(a / mmpc)) for a, _ in self.events]
         off = -min(0, min(xs))                       # shift so the first x >= 0
         xs = [x + off for x in xs]
-        width = max(max(xs) + 1, min_width)
+
+        # Lay the queue out: a slot is never reused, so a burst spills to the right.
+        slots = []
+        next_x = 0
+        for x in xs:
+            x = max(x, next_x)
+            slots.append(x)
+            next_x = x + 1
+        width = max(max(slots) + 1, min_width)
 
         recon = np.zeros((IMAGE_HEIGHT, width), dtype=bool)
-        for k, (_, frame) in enumerate(self.events):
-            xa = xs[k]
-            xb = xs[k + 1] if k + 1 < len(xs) else xa + 1
-            if xb <= xa:                             # superseded within a burst
-                continue
-            xa = max(0, min(width, xa))
-            xb = max(0, min(width, xb))
-            if xb > xa:
-                recon[:, xa:xb] = _decode(frame)[:, None]
+        for (_, frame), x in zip(self.events, slots):
+            if x < width:
+                recon[:, x] = _decode(frame)         # a blank simply deposits nothing
         return recon
 
     # ------------------------------------------------------------------ render

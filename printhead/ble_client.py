@@ -3,12 +3,17 @@ BLE transport to the PrintheadBLE ESP32
 =======================================
 
 Thin async wrapper around ``bleak`` that hides connection/scan handling and the
-nozzle write characteristic. The firmware always reprints the *latest* frame it
-received, so both print strategies boil down to "write the right 21-byte frame
-at the right moment":
+nozzle write characteristic. The firmware queues every column it receives and
+prints them in order, so both print strategies boil down to "hand over the right
+columns in the right order":
   * time-based   -> :meth:`stream_time` writes one column every ``period`` s;
-  * position-based -> the controller calls :meth:`write_column` whenever the
-    measured position crosses into a new column.
+  * position-based -> the controller calls :meth:`write_columns` whenever the
+    measured position crosses into new columns.
+
+A single write may carry several columns back to back (any multiple of
+``ROW_BYTES``). How many fit follows from the negotiated ATT MTU, which the
+firmware asks to raise to 247 -- worth doing because writes are only delivered on
+connection events, so one column per packet caps the achievable column rate.
 """
 
 from __future__ import annotations
@@ -20,9 +25,13 @@ from .config import BleSettings
 from .geometry import (
     BLANK_FRAME,
     NOZZLE_UUID,
+    ROW_BYTES,
     START_BTN_UUID,
     STARTPOINT_UUID,
 )
+
+# The firmware rejects a write carrying more columns than this.
+MAX_BATCH_COLS = 32
 
 
 class PrintheadBLE:
@@ -31,6 +40,7 @@ class PrintheadBLE:
     def __init__(self, settings: BleSettings):
         self.settings = settings
         self._client: Optional[BleakClient] = None
+        self.batch_cols = max(1, settings.batch_cols)   # refined once connected
 
     # ------------------------------------------------------------------ scan
     async def find_target(self):
@@ -53,10 +63,27 @@ class PrintheadBLE:
         target = await self.find_target()
         self._client = BleakClient(target)
         await self._client.connect()
+        self._resolve_batch_size()
         print("Connected.")
         # Make sure the printhead starts blank.
         await self.write_blank()
         return self
+
+    def _resolve_batch_size(self) -> None:
+        """Pick how many columns go into one write, from the negotiated MTU."""
+        if self.settings.batch_cols:
+            self.batch_cols = min(max(1, self.settings.batch_cols), MAX_BATCH_COLS)
+            print(f"Batching {self.batch_cols} column(s) per write (fixed).")
+            return
+        try:
+            mtu = int(self._client.mtu_size)
+        except Exception:
+            mtu = 0                       # backend cannot report it -> stay safe
+        # 3 bytes of ATT write header.
+        fits = (mtu - 3) // ROW_BYTES if mtu > 3 else 1
+        self.batch_cols = max(1, min(fits, MAX_BATCH_COLS))
+        print(f"Negotiated MTU {mtu or 'unknown'} -> batching "
+              f"{self.batch_cols} column(s) per write.")
 
     async def __aexit__(self, exc_type, exc, tb):
         if self._client is not None:
@@ -93,6 +120,23 @@ class PrintheadBLE:
         # response=True waits for the GATT write response -> its round-trip time
         # is a proxy for real delivery latency (used by --ble-benchmark).
         await self._client.write_gatt_char(NOZZLE_UUID, frame, response=response)
+
+    async def write_columns(self, frames) -> None:
+        """
+        Hand over several columns, packed into as few writes as the MTU allows.
+
+        The firmware queues them in the order they appear, so this is exactly
+        equivalent to writing them one by one -- only it no longer depends on the
+        connection interval being short enough to carry that many packets.
+        """
+        frames = list(frames)
+        if not frames:
+            return
+        step = self.batch_cols
+        for i in range(0, len(frames), step):
+            chunk = frames[i:i + step]
+            payload = chunk[0] if len(chunk) == 1 else b"".join(chunk)
+            await self._client.write_gatt_char(NOZZLE_UUID, payload, response=False)
 
     async def write_blank(self) -> None:
         await self._client.write_gatt_char(NOZZLE_UUID, BLANK_FRAME, response=False)
