@@ -93,6 +93,13 @@ def test_empty_write_is_a_noop():
     assert ble._client.writes == []
 
 
+def test_write_pattern_sends_a_single_plain_frame():
+    ble = _ble(mtu=247)                       # batches 12 -- must not apply here
+    pattern = bytes([0xAB]) * ROW_BYTES
+    asyncio.run(ble.write_pattern(pattern))
+    assert ble._client.writes == [pattern]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
