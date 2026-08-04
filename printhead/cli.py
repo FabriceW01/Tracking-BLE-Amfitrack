@@ -123,6 +123,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--min-move", type=float, default=0.05,
                    help="Deadband in mm; below this the head counts as stopped "
                         "(default 0.05)")
+    g.add_argument("--poll-hz", type=float, default=200.0,
+                   help="Position polling rate. A column crossing can only be "
+                        "noticed once per poll, so this bounds how precisely a "
+                        "column is placed: at 200 Hz and 20 mm/s that is 0.1 mm "
+                        "= half a column (default 200)")
     g.add_argument("--timeout", type=float, default=30.0,
                    help="Abort a position pass after this many seconds (default 30)")
     g.add_argument("--vendor-id", type=_auto_int, default=0x0C17,
@@ -226,7 +231,7 @@ def build_tracking(args: argparse.Namespace) -> TrackingSettings:
         advance_axis=args.advance_axis, axis_sign=args.axis_sign,
         auto_calibrate=args.auto_calibrate, calib_distance_mm=args.calib_distance,
         origin=args.origin, min_move_mm=args.min_move, timeout_s=args.timeout,
-        smooth_ms=args.smooth_ms,
+        smooth_ms=args.smooth_ms, poll_hz=args.poll_hz,
         vendor_id=args.vendor_id, product_id=args.product_id,
         sensor_id=args.sensor_id)
     tracking.mm_per_column = tracking.resolve_mm_per_column(args.dpi)

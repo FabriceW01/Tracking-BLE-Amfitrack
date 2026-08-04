@@ -155,6 +155,7 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | `--origin button\|startpoint` | Was den Nullpunkt setzt (START-Taster oder Startpoint-Charakteristik) |
 | `--smooth-ms MS` | Tiefpass-Zeitkonstante (ms) gegen das verrauschte Amfitrack-Signal; `0` = aus, größer = glatter aber mehr Nachlauf (Default 12). Reduziert unregelmäßige Linien/Lücken. |
 | `--min-move MM` | Deadband; darunter gilt der Kopf als stehend (Default 0.05) |
+| `--poll-hz HZ` | Abtastrate der Position (Default 200). Ein Spaltenübergang kann nur einmal pro Abtastung bemerkt werden, das begrenzt also, wie genau eine Column platziert wird: bei 200 Hz und 20 mm/s sind das 0.1 mm = eine halbe Column. Mit `--profile-csv` messbar — die Abstände zwischen den Schreibzeitpunkten sind auf die effektive Schleifenperiode quantisiert. |
 | `--timeout S` | Abbruch eines Durchlaufs nach S Sekunden (Default 30) |
 | `--vendor-id` / `--product-id` | USB-IDs des Amfitrack-Dongles (Default `0x0C17` / `0x0D12`) |
 | `--sensor-id` | optionaler `tx_id`-Filter unter den „Sensor"-Nodes (Default: alle) |
