@@ -45,11 +45,19 @@ python main.py "Hallo" --dry-run --preview vorschau.png
 python main.py "Hallo"
 
 # Positions-Loop ohne Hardware testen:
-python main.py "Hallo" --simulate --mode position --dry-run
+python main.py "Hallo" --simulate --mode line --dry-run
 
 # Klassisch zeitbasiert (wie das Ursprungsskript):
 python main.py "Hallo" --mode time --period 0.03
 ```
+
+**Experimentell: `--mode page`** — freihändiges 2D-Drucken (Wagen frei über die
+Seite bewegen, nicht nur eine Richtung). Braucht eine vorher erstellte
+`PageCalibration` (`printhead/calibration.py`, `--page-calibration PATH`) — dafür
+gibt es noch **keinen** CLI-Befehl, der Kanten abfährt und speichert (kommt mit
+der Kalibrierungs-UI). Bisher nur an synthetischen Daten getestet, noch nicht an
+echter Hardware. Details: `README_BLE_INTERFACE.md` im Firmware-Repo (Abschnitt
+"Page Mode").
 
 ---
 
@@ -197,7 +205,7 @@ python main.py --calibrate --pattern-length-mm 200 --mm-per-column 0.2 --preview
 
 ```bash
 python main.py --pattern checkerboard --pattern-square-mm 10 --pattern-square-rows 20
-python main.py --pattern diagonal --mode position --preview diag.png
+python main.py --pattern diagonal --mode line --preview diag.png
 ```
 
 | Option | Bedeutung |
@@ -301,7 +309,7 @@ Spalten an *einer* Position zusammenfallen.
 
 ```bash
 python main.py "Test" --record recon.png
-python main.py "Test" --simulate --mode position --dry-run --record recon.png  # ohne Hardware
+python main.py "Test" --simulate --mode line --dry-run --record recon.png  # ohne Hardware
 ```
 
 In der Web-UI gibt es dafür den **🎞 Record**-Button (zeigt das Vergleichsbild direkt an).
@@ -359,7 +367,7 @@ Der Zugriff erfolgt über die USB-Pakete `amfiprot` und `amfiprot_amfitrack`
 ```bash
 python tests/test_frames.py          # Protokoll-Äquivalenz der Frame-Erzeugung
 python tests/test_batching.py        # Spalten-Batching (Bytestrom bleibt identisch)
-python main.py "Hi" --simulate --mode position --dry-run   # Positions-Loop
+python main.py "Hi" --simulate --mode line --dry-run   # Positions-Loop
 python -m printhead --help
 ```
 

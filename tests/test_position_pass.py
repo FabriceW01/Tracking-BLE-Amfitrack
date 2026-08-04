@@ -70,7 +70,7 @@ def test_no_reprint_on_reverse():
     tracker = ScriptedTracker(origin + fwd1 + back + fwd2 + end)
 
     rec = _NullPrinthead()
-    asyncio.run(ctrl._print_position_pass(rec, tracker, _ImmediateEvent()))
+    asyncio.run(ctrl._print_line_pass(rec, tracker, _ImmediateEvent()))
 
     # Columns 0..30 must be printed exactly once each -> 31 writes total.
     assert rec.column_writes == 31, f"expected 31 writes, got {rec.column_writes}"
@@ -120,7 +120,7 @@ class FireOnce:
 
 def _run_pass(ctrl, event):
     rec = _NullPrinthead()
-    asyncio.run(ctrl._print_position_pass(rec, RampTracker(), event))
+    asyncio.run(ctrl._print_line_pass(rec, RampTracker(), event))
     return rec
 
 

@@ -176,7 +176,7 @@
       <!-- TRACKING -->
       <div class="panel" data-p="tracking">
         <div class="row">
-          <div class="field"><label>Mode</label><select id="mode"><option value="position">position (closed loop)</option><option value="time">time</option></select></div>
+          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="time">time</option></select></div>
           <div class="field"><label>Period (s, time mode)</label><input id="period" type="number" step="0.005" value="0.03"></div>
         </div>
         <div class="row">
@@ -307,7 +307,7 @@ function pushIf(a,cond,flag,v){ if(cond){ a.push(flag); if(v!==undefined && v!==
 
 function trackingArgs(a){
   if(chk('no_track')) a.push('--no-track');
-  else pushIf(a, val('mode')!=='position', '--mode', val('mode'));
+  else pushIf(a, val('mode')!=='line', '--mode', val('mode'));
   pushIf(a, val('advance_axis')!=='y', '--advance-axis', val('advance_axis'));
   pushIf(a, val('axis_sign')!=='1', '--axis-sign', val('axis_sign'));
   pushIf(a, chk('auto_calibrate'), '--auto-calibrate');

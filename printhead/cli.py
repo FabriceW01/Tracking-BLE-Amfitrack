@@ -87,13 +87,18 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # --- printing mode -----------------------------------------------------
     g = ap.add_argument_group("printing mode")
-    g.add_argument("--mode", choices=("position", "time"), default="position",
-                   help="position = Amfitrack closed loop (default); "
+    g.add_argument("--mode", choices=("line", "page", "time"), default="line",
+                   help="line = 1D Amfitrack closed loop (default); "
+                        "page = freehand 2D closed loop, needs --page-calibration; "
                         "time = stream one column every --period seconds")
     g.add_argument("--no-track", dest="track", action="store_false",
                    help="Disable tracking (forces time mode)")
     g.add_argument("--period", type=float, default=0.03,
                    help="Seconds per column in time mode (default 0.03)")
+    g.add_argument("--dose-hold-s", type=float, default=None,
+                   help="Page mode: seconds a nozzle must continuously hold a "
+                        "pixel before it counts as printed (default: "
+                        "coverage.DEFAULT_DOSE_HOLD_S, an untuned first guess)")
 
     # --- Amfitrack ---------------------------------------------------------
     g = ap.add_argument_group("Amfitrack positioning")
@@ -208,6 +213,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--nozzle-block-size and --nozzle-order must be given together")
     if args.nozzle_block_size is not None and args.nozzle_block_size <= 0:
         ap.error("--nozzle-block-size must be a positive integer")
+    if not _debug_mode(args) and args.track and args.mode == "page" and not args.page_calibration:
+        ap.error("--mode page requires --page-calibration PATH (trace the page "
+                 "edges with calibration.calibrate_page() first, then save())")
     return args
 
 
@@ -277,16 +285,34 @@ def build_nozzle_map(args: argparse.Namespace) -> Optional[NozzleMapSettings]:
     return NozzleMapSettings(block_size=args.nozzle_block_size, order=order)
 
 
+def build_page_calibration(args: argparse.Namespace):
+    """Load the PageCalibration named by --page-calibration, or None if it
+    was not given (only --mode page requires it -- see parse_args)."""
+    if not args.page_calibration:
+        return None
+    from .calibration import PageCalibration
+    try:
+        return PageCalibration.load(args.page_calibration)
+    except Exception as exc:
+        raise SystemExit(f"printhead: error: cannot load page calibration "
+                         f"'{args.page_calibration}': {exc}")
+
+
 def build_controller(args: argparse.Namespace) -> PrintController:
     tracking = build_tracking(args)
     ink, label = build_ink(args, tracking.mm_per_column)
     render = RenderSettings(text=label)
+    kwargs = {}
+    if args.dose_hold_s is not None:
+        kwargs["dose_hold_s"] = args.dose_hold_s
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,
                            nozzle_map=build_nozzle_map(args),
                            profile=args.profile, profile_csv=args.profile_csv,
-                           record=args.record)
+                           record=args.record,
+                           page_calibration=build_page_calibration(args),
+                           **kwargs)
 
 
 def _run_debug(args: argparse.Namespace) -> None:
