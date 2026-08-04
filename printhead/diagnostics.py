@@ -63,9 +63,9 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                     origin = pos.copy()
                 advance = tracking.axis_sign * float(pos[axis] - origin[axis])
                 col = int(round(advance / tracking.mm_per_column))
-                # quat (qx,qy,qz,qw) is speculative -- see AmfitrackTracker._extract_pose
-                # -- included only when the connected hardware/SDK actually reports it, so
-                # this line looks exactly as before on setups that don't.
+                # quat (qx,qy,qz,qw) -- see AmfitrackTracker._extract_pose -- is
+                # included only when the connected hardware/SDK actually reports it,
+                # so this line looks exactly as before on setups that don't.
                 if ndjson:
                     event = {
                         "event": "position",

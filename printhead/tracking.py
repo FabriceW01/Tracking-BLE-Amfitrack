@@ -174,9 +174,9 @@ class AmfitrackTracker:
         part was absent from every packet drained this call.
 
         ``quaternion`` is ``(qx, qy, qz, qw)`` orientation, or ``None`` if the
-        connected SDK/firmware never reports it -- see ``_extract_pose``: this
-        is speculative support pending confirmation on real hardware (use
-        ``--pos`` to check), not yet relied on anywhere in the print pipeline.
+        connected SDK/firmware never reports it -- see ``_extract_pose``. This
+        field has been confirmed on real hardware (same ``payload.emf.quat_*``
+        access path), but is not yet relied on anywhere in the print pipeline.
         """
         return self._read_latest()
 
@@ -211,16 +211,13 @@ class AmfitrackTracker:
         fallback for differing SDK versions; adjust HERE if your SDK reports
         the position differently.
 
-        Quaternion support (``payload.emf.quat_{x,y,z,w}``) is speculative:
-        nothing in this codebase has read it before, but a reference
-        implementation of this same SDK (the ``AmfiPoseProvider`` this class's
-        connection logic already mirrors, see ``open()``) reads exactly those
-        four fields off the identical ``payload.emf`` object this reads
-        position from -- so it is very likely already being transmitted and
-        simply never extracted here. Surfaced via ``read_pose()`` /
-        ``--pos`` so this can be confirmed on real hardware before the
-        freehand page-mode work (which would use it for cart-orientation
-        correction, if it turns out clean enough) builds on it.
+        Quaternion support (``payload.emf.quat_{x,y,z,w}``) is confirmed
+        working on real hardware: the identical ``payload.emf`` object this
+        reads position from also carries ``quat_x/y/z/w``, verified against a
+        reference implementation of this same SDK (the ``AmfiPoseProvider``
+        this class's connection logic already mirrors, see ``open()``).
+        Surfaced via ``read_pose()`` / ``--pos``; usable for freehand
+        page-mode cart-orientation correction.
         """
         emf = getattr(payload, "emf", payload)
         pos = None

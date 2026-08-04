@@ -7,13 +7,15 @@ change to the existing 1D line-mode pipeline):
   * ``rendering.pack_nozzle_bits`` -- single-column frame packer, factored out
     of ``frames_from_ink`` for the coverage engine to reuse.
   * ``AmfitrackTracker._extract_pose`` -- position extraction unchanged,
-    speculative quaternion extraction added alongside it.
+    quaternion extraction added alongside it (confirmed working on real
+    hardware).
   * ``ui.server._try_parse_json`` -- JSON-vs-log dispatch shared between the
     sensor stream and print-action handlers.
 
 Run with:  python tests/test_freehand_prep.py
 """
 
+import math
 import os
 import sys
 
@@ -21,13 +23,24 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from printhead.geometry import IMAGE_HEIGHT                          # noqa: E402
+from printhead.geometry import (                                     # noqa: E402
+    IMAGE_HEIGHT, NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES,
+)
 from printhead.rendering import frames_from_ink, pack_nozzle_bits    # noqa: E402
 from printhead.tracking import (                                     # noqa: E402
     AmfitrackTracker, SimulatedTracker, waypoints_path,
 )
 from printhead.config import TrackingSettings                        # noqa: E402
 from printhead.ui.server import _try_parse_json                      # noqa: E402
+
+
+# =================================================================== geometry
+def test_nozzle_pitch_matches_measured_bar_width():
+    # User measurement: 152 nozzles span a 15mm-wide bar edge-to-edge, i.e.
+    # 151 gaps between 152 nozzle centres.
+    assert NOZZLE_BAR_WIDTH_MM == 15.0
+    assert NUM_NOZZLES == 152
+    assert math.isclose(NOZZLE_PITCH_MM * (NUM_NOZZLES - 1), NOZZLE_BAR_WIDTH_MM)
 
 
 # ============================================================== waypoints_path
