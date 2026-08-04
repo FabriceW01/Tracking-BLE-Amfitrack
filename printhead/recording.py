@@ -105,6 +105,34 @@ class SendRecorder:
         return True
 
 
+def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str) -> bool:
+    """
+    Write a PNG comparing the intended page-mode image to what
+    ``CoverageEngine`` actually covered. Returns False if nothing was
+    printed.
+
+    Unlike :meth:`SendRecorder.reconstruct` (line mode), there is nothing to
+    reconstruct here: ``printed`` already IS a true-position record of what
+    got inked, built live by ``CoverageEngine.step()`` sample by sample,
+    rather than modelled after the fact from a send log against an assumed
+    queue-slot layout. A third MISSED panel (ink wanted but never printed)
+    is included since that is the whole open question after a freehand pass
+    -- did the cart cover everything, and if not, where.
+    """
+    printed = np.asarray(printed, dtype=bool)
+    ink = np.asarray(ink, dtype=bool)
+    if not printed.any():
+        return False
+    missed = ink & ~printed
+    panels = [
+        ("INTENDED", ink),
+        (f"COVERED ({int(printed.sum())}/{int(ink.sum())} ink pixels)", printed),
+        (f"MISSED ({int(missed.sum())} ink pixels)", missed),
+    ]
+    _save_panels(panels, path, ink.shape[1])
+    return True
+
+
 def _save_panels(panels, path: str, width: int) -> None:
     label_h = 18
     gap = 12

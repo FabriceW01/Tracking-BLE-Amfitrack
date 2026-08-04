@@ -146,17 +146,24 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Use a fake tracker (no hardware) to test the loop")
 
     # --- timing / profiling ------------------------------------------------
-    g = ap.add_argument_group("timing / profiling (position mode)")
+    g = ap.add_argument_group("timing / profiling (line/page mode)")
     g.add_argument("--profile", action="store_true",
-                   help="Instrument the position pass: log head speed, demanded "
-                        "vs. sustained BLE column rate and write latency, and a "
-                        "verdict on whether columns kept up with the head")
+                   help="Instrument the pass: line mode logs head speed, demanded "
+                        "vs. sustained BLE column rate and write latency; page mode "
+                        "logs the pattern-update rate against --ble-write-ceiling. "
+                        "Either way, ends in a verdict on whether BLE kept up")
     g.add_argument("--profile-csv",
-                   help="Also write a per-column timing log to this CSV path")
+                   help="Also write a per-write timing log to this CSV path")
+    g.add_argument("--ble-write-ceiling", type=float, default=None,
+                   help="Page mode --profile only: known BLE write-without-response "
+                        "ceiling (writes/s) to compare the pattern-update rate "
+                        "against (default: an untuned guess -- measure the real "
+                        "number for your hardware with --ble-benchmark)")
     g.add_argument("--record",
-                   help="Reconstruct what is actually deposited on paper: record "
-                        "every sent frame + head position and save a PNG (intended "
-                        "vs. sent-mapped-to-position) to this path after the pass")
+                   help="Reconstruct what is actually deposited on paper: line mode "
+                        "records every sent frame + head position and compares "
+                        "intended-vs-sent; page mode saves the coverage engine's "
+                        "printed mask directly (intended/covered/missed). PNG")
 
     # --- BLE / run ---------------------------------------------------------
     g = ap.add_argument_group("BLE / run")
@@ -305,6 +312,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
     kwargs = {}
     if args.dose_hold_s is not None:
         kwargs["dose_hold_s"] = args.dose_hold_s
+    if args.ble_write_ceiling is not None:
+        kwargs["ble_write_ceiling"] = args.ble_write_ceiling
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,

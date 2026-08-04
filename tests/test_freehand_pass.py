@@ -7,9 +7,11 @@ Run with:  python tests/test_freehand_pass.py
 """
 
 import asyncio
+import io
 import os
 import sys
 import tempfile
+from contextlib import redirect_stdout
 
 import numpy as np
 
@@ -53,14 +55,16 @@ def _identity_calibration():
                            e_row=np.array([0.0, 1.0, 0.0]))
 
 
-def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0):
+def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
+                profile=False, profile_csv=None, record=None):
     render = RenderSettings(text="freehand test")
     ble = BleSettings()
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
                            poll_hz=poll_hz, timeout_s=timeout_s)
     return PrintController(render, ble, trk, ink=ink,
                            page_calibration=_identity_calibration(),
-                           dose_hold_s=dose_hold_s)
+                           dose_hold_s=dose_hold_s, profile=profile,
+                           profile_csv=profile_csv, record=record)
 
 
 def _sweep_positions(n_cols, samples_per_col=12):
@@ -146,6 +150,45 @@ def test_freehand_pass_requires_a_page_calibration():
     raise AssertionError("expected RuntimeError without a page calibration")
 
 
+# ===================================================== --profile / --record
+def test_freehand_pass_with_profile_prints_a_page_mode_report():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, profile=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    report = out.getvalue()
+    assert "page-mode timing profile" in report, report
+    assert "pattern updates sent" in report, report
+
+
+def test_freehand_pass_with_profile_csv_writes_the_page_schema():
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "profile.csv")
+        ctrl = _controller(ink, timeout_s=5.0, profile=True, profile_csv=csv_path)
+        tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+        with open(csv_path) as fh:
+            header = fh.readline().strip()
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s"
+
+
+def test_freehand_pass_with_record_writes_a_coverage_png():
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        png_path = os.path.join(tmp, "coverage.png")
+        ctrl = _controller(ink, timeout_s=5.0, record=png_path)
+        tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+        assert os.path.exists(png_path)
+        assert "Coverage reconstruction" in out.getvalue()
+
+
 # ==================================================== dry-run simulation path
 def test_dry_run_freehand_pass_runs_without_crashing():
     ink = np.ones((10, 3), dtype=bool)
@@ -175,6 +218,13 @@ def test_cli_no_track_bypasses_the_page_calibration_requirement():
     # (which is about the *effective* mode) must not fire here.
     args = cli.parse_args(["Hi", "--dry-run", "--mode", "page", "--no-track"])
     assert args.page_calibration is None
+
+
+def test_cli_ble_write_ceiling_defaults_to_none_and_parses():
+    args = cli.parse_args(["Hi", "--dry-run"])
+    assert args.ble_write_ceiling is None
+    args = cli.parse_args(["Hi", "--dry-run", "--ble-write-ceiling", "150"])
+    assert args.ble_write_ceiling == 150.0
 
 
 def test_build_page_calibration_loads_a_saved_file():

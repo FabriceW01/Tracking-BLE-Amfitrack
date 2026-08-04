@@ -29,6 +29,7 @@ from .coverage import DEFAULT_DOSE_HOLD_S, CoverageEngine
 from .geometry import BLANK_FRAME, NUM_NOZZLES
 from .nozzle_map import remap_rows
 from .pattern_sender import PatternSender
+from .profiling import DEFAULT_BLE_WRITE_CEILING_PER_S
 from .rendering import frames_from_ink, render_text, save_preview
 from .tracking import AdvanceMapper, PageMapper, PositionFilter, make_tracker
 
@@ -83,7 +84,8 @@ class PrintController:
                  profile: bool = False, profile_csv: Optional[str] = None,
                  record: Optional[str] = None,
                  page_calibration: Optional[PageCalibration] = None,
-                 dose_hold_s: float = DEFAULT_DOSE_HOLD_S):
+                 dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
+                 ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S):
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -95,6 +97,7 @@ class PrintController:
         self.record = record
         self.page_calibration = page_calibration
         self.dose_hold_s = dose_hold_s
+        self.ble_write_ceiling = ble_write_ceiling
 
         # Rendered once up front, unless the caller already built the ink
         # (calibration ruler / test patterns bypass text rendering entirely).
@@ -392,11 +395,20 @@ class PrintController:
         loop = asyncio.get_event_loop()
         interval = 1.0 / t.poll_hz
 
+        # Optional real-time timing profiler (see printhead/profiling.py).
+        profiler = None
+        if self.profile:
+            from .profiling import PassProfiler
+            profiler = PassProfiler(t.mm_per_column, csv_path=self.profile_csv,
+                                    mode="page", ble_write_ceiling=self.ble_write_ceiling)
+            profiler.start()
+
         print(f"Printing freehand: {self.width} columns x {self.height} rows, "
               f"dose_hold={self.dose_hold_s * 1000:.0f} ms. Move the cart over "
               f"the calibrated page.")
 
         t_start = loop.time()
+        prev_u, prev_v, prev_t = None, None, None
         try:
             while True:
                 now = loop.time()
@@ -404,9 +416,18 @@ class PrintController:
                 if pos is not None:
                     pos = pos_filter.update(pos, now)   # low-pass the noisy signal
                     u_mm, v_mm, _z_mm = mapper.project(pos)
+
+                    speed = None
+                    if prev_u is not None and now > prev_t:
+                        speed = ((u_mm - prev_u) ** 2 + (v_mm - prev_v) ** 2) ** 0.5 \
+                            / (now - prev_t)
+                    prev_u, prev_v, prev_t = u_mm, v_mm, now
+
                     pattern, changed = coverage.step(u_mm, v_mm, now)
                     if changed:
                         sender.send(pattern)
+                        if profiler is not None:
+                            profiler.record_page_sample(u_mm, v_mm, speed)
 
                 if coverage.done:
                     print("Page fully covered.")
@@ -418,6 +439,16 @@ class PrintController:
         finally:
             await sender.close()
         await ble.write_blank()
+
+        if profiler is not None:
+            profiler.finish()
+        if self.record:
+            from .recording import render_coverage
+            if render_coverage(coverage.printed, coverage.ink, self.record):
+                print(f"Coverage reconstruction -> {self.record}")
+            else:
+                print("Nothing was recorded (nothing printed).")
+
         covered = int(coverage.printed.sum())
         total = int(coverage.ink.sum())
         print(f"Finished pass; sent blank frame. Covered {covered}/{total} ink pixels.")

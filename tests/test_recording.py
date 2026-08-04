@@ -11,9 +11,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from printhead.geometry import IMAGE_HEIGHT                 # noqa: E402
-from printhead.recording import SendRecorder, _decode       # noqa: E402
-from printhead.rendering import frames_from_ink             # noqa: E402
+from printhead.geometry import IMAGE_HEIGHT                          # noqa: E402
+from printhead.recording import SendRecorder, _decode, render_coverage  # noqa: E402
+from printhead.rendering import frames_from_ink                      # noqa: E402
 
 
 def _frame_with_row(row):
@@ -100,6 +100,34 @@ def test_render_writes_png_and_empty_is_false():
         w, h = Image.open(path).size
         # two stacked panels (intended + sent) + labels -> taller than one panel
         assert h > IMAGE_HEIGHT and w >= 5
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+# ============================================================= render_coverage
+def test_render_coverage_returns_false_for_nothing_printed():
+    ink = np.ones((10, 5), dtype=bool)
+    printed = np.zeros((10, 5), dtype=bool)
+    assert render_coverage(printed, ink, "/tmp/should_not_exist_coverage.png") is False
+
+
+def test_render_coverage_writes_a_taller_than_line_mode_png():
+    # A page-mode image can be taller than IMAGE_HEIGHT (152) -- unlike
+    # SendRecorder, render_coverage must not assume that cap.
+    h, w = 200, 6
+    ink = np.zeros((h, w), dtype=bool)
+    ink[5:15, 1:4] = True
+    printed = np.zeros((h, w), dtype=bool)
+    printed[5:15, 1:3] = True                     # column 3 missed on purpose
+
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_test.png")
+    try:
+        assert render_coverage(printed, ink, path) is True
+        from PIL import Image
+        pw, ph = Image.open(path).size
+        # three stacked panels (intended + covered + missed) + labels
+        assert ph > 3 * h and pw >= w
     finally:
         if os.path.exists(path):
             os.remove(path)
