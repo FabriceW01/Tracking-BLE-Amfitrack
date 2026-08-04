@@ -8,6 +8,7 @@ Run with:  python tests/test_freehand_pass.py
 
 import asyncio
 import io
+import json
 import os
 import sys
 import tempfile
@@ -56,7 +57,7 @@ def _identity_calibration():
 
 
 def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
-                profile=False, profile_csv=None, record=None):
+                profile=False, profile_csv=None, record=None, progress_json=False):
     render = RenderSettings(text="freehand test")
     ble = BleSettings()
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
@@ -64,7 +65,8 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
     return PrintController(render, ble, trk, ink=ink,
                            page_calibration=_identity_calibration(),
                            dose_hold_s=dose_hold_s, profile=profile,
-                           profile_csv=profile_csv, record=record)
+                           profile_csv=profile_csv, record=record,
+                           progress_json=progress_json)
 
 
 def _sweep_positions(n_cols, samples_per_col=12):
@@ -148,6 +150,86 @@ def test_freehand_pass_requires_a_page_calibration():
     except RuntimeError:
         return
     raise AssertionError("expected RuntimeError without a page calibration")
+
+
+# ============================================================ --progress-json
+def _ndjson_events(output: str):
+    events = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def test_progress_json_emits_start_sample_and_done_events():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, progress_json=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    events = _ndjson_events(out.getvalue())
+
+    assert events[0] == {"event": "coverage_start", "width": 5, "height": 30}
+    samples = [e for e in events if e.get("event") == "coverage"]
+    assert samples, "expected at least one coverage sample event"
+    assert {"u", "v", "row", "col", "new_cells"} <= samples[0].keys()
+
+    done = events[-1]
+    assert done["event"] == "coverage_done"
+    assert done["reason"] == "complete"
+    assert done["covered"] == done["total"] == 150
+
+
+def test_progress_json_reports_newly_covered_cells():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, progress_json=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    samples = [e for e in _ndjson_events(out.getvalue()) if e.get("event") == "coverage"]
+
+    all_new_cells = [cell for s in samples for cell in s["new_cells"]]
+    assert len(all_new_cells) == 150             # every ink pixel reported exactly once
+    assert len(set(map(tuple, all_new_cells))) == 150   # no duplicates
+
+
+def test_progress_json_suppresses_plain_text_output():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, progress_json=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    for line in out.getvalue().splitlines():
+        if line.strip():
+            json.loads(line)          # every non-blank line must be valid JSON
+
+
+def test_progress_json_off_by_default_stays_plain_text():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)          # progress_json=False
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    assert "Page fully covered." in out.getvalue()
+
+
+def test_cli_progress_json_flag():
+    args = cli.parse_args(["Hi", "--dry-run", "--progress-json"])
+    assert args.progress_json is True
+    args = cli.parse_args(["Hi", "--dry-run"])
+    assert args.progress_json is False
 
 
 # ===================================================== --profile / --record

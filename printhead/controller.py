@@ -18,6 +18,7 @@ pass in one of three modes:
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Optional
 
 import numpy as np
@@ -26,7 +27,7 @@ from .ble_client import PrintheadBLE
 from .calibration import PageCalibration
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
 from .coverage import DEFAULT_DOSE_HOLD_S, CoverageEngine
-from .geometry import BLANK_FRAME, NUM_NOZZLES
+from .geometry import BLANK_FRAME, NOZZLE_PITCH_MM, NUM_NOZZLES
 from .nozzle_map import remap_rows
 from .pattern_sender import PatternSender
 from .profiling import DEFAULT_BLE_WRITE_CEILING_PER_S
@@ -85,7 +86,8 @@ class PrintController:
                  record: Optional[str] = None,
                  page_calibration: Optional[PageCalibration] = None,
                  dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
-                 ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S):
+                 ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S,
+                 progress_json: bool = False):
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -98,6 +100,7 @@ class PrintController:
         self.page_calibration = page_calibration
         self.dose_hold_s = dose_hold_s
         self.ble_write_ceiling = ble_write_ceiling
+        self.progress_json = progress_json
 
         # Rendered once up front, unless the caller already built the ink
         # (calibration ruler / test patterns bypass text rendering entirely).
@@ -383,11 +386,20 @@ class PrintController:
         where it re-zeros the origin) -- there is no obvious equivalent
         gesture for a fixed page calibration, so this is left for later
         rather than guessing.
+
+        ``self.progress_json``, if set, switches stdout from the plain-text
+        status lines below to NDJSON progress events -- one ``coverage_start``
+        up front, one ``coverage`` per sample (current ``u``/``v``/``row``/
+        ``col`` plus any cells that just finished dosing), and it suppresses
+        the plain-text lines this would otherwise interleave with (mirrors
+        ``diagnostics.monitor_position``'s ``ndjson`` switch). This is what
+        the web UI's live coverage canvas consumes (see ``ui/server.py``).
         """
         if self.page_calibration is None:
             raise RuntimeError("Freehand pass requires a page calibration "
                                "(PrintController(page_calibration=...)).")
         t = self.tracking
+        pj = self.progress_json
         mapper = PageMapper(self.page_calibration)
         coverage = CoverageEngine(self._ink, t.mm_per_column, dose_hold_s=self.dose_hold_s)
         pos_filter = PositionFilter(t.smooth_ms / 1000.0)
@@ -403,12 +415,18 @@ class PrintController:
                                     mode="page", ble_write_ceiling=self.ble_write_ceiling)
             profiler.start()
 
-        print(f"Printing freehand: {self.width} columns x {self.height} rows, "
-              f"dose_hold={self.dose_hold_s * 1000:.0f} ms. Move the cart over "
-              f"the calibrated page.")
+        if pj:
+            print(json.dumps({"event": "coverage_start", "width": self.width,
+                              "height": self.height}), flush=True)
+        else:
+            print(f"Printing freehand: {self.width} columns x {self.height} rows, "
+                  f"dose_hold={self.dose_hold_s * 1000:.0f} ms. Move the cart over "
+                  f"the calibrated page.")
 
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None
+        prev_printed = coverage.printed.copy() if pj else None
+        done_reason = None
         try:
             while True:
                 now = loop.time()
@@ -429,11 +447,37 @@ class PrintController:
                         if profiler is not None:
                             profiler.record_page_sample(u_mm, v_mm, speed)
 
+                    new_cells = []
+                    if pj:
+                        # NOT gated on `changed`: a nozzle's dose completing
+                        # updates printed[row, col] on this tick, but its bit
+                        # in `pattern` only flips off on the *next* tick (once
+                        # wanted becomes False for that pixel) -- so `changed`
+                        # lags a fresh completion by one sample and would miss
+                        # it here if the pass ends (coverage.done) before that
+                        # next tick ever happens.
+                        new_mask = coverage.printed & ~prev_printed
+                        if new_mask.any():
+                            rows, cols = np.nonzero(new_mask)
+                            new_cells = list(zip(rows.tolist(), cols.tolist()))
+                            prev_printed = coverage.printed.copy()
+
+                    if pj:
+                        col = int(round(u_mm / t.mm_per_column)) if t.mm_per_column else 0
+                        row = int(round(v_mm / NOZZLE_PITCH_MM))
+                        print(json.dumps({"event": "coverage", "u": round(u_mm, 3),
+                                          "v": round(v_mm, 3), "row": row, "col": col,
+                                          "new_cells": new_cells}), flush=True)
+
                 if coverage.done:
-                    print("Page fully covered.")
+                    done_reason = "complete"
+                    if not pj:
+                        print("Page fully covered.")
                     break
                 if now - t_start > t.timeout_s:
-                    print("Freehand pass timed out.")
+                    done_reason = "timeout"
+                    if not pj:
+                        print("Freehand pass timed out.")
                     break
                 await asyncio.sleep(interval)
         finally:
@@ -445,13 +489,18 @@ class PrintController:
         if self.record:
             from .recording import render_coverage
             if render_coverage(coverage.printed, coverage.ink, self.record):
-                print(f"Coverage reconstruction -> {self.record}")
-            else:
+                if not pj:
+                    print(f"Coverage reconstruction -> {self.record}")
+            elif not pj:
                 print("Nothing was recorded (nothing printed).")
 
         covered = int(coverage.printed.sum())
         total = int(coverage.ink.sum())
-        print(f"Finished pass; sent blank frame. Covered {covered}/{total} ink pixels.")
+        if pj:
+            print(json.dumps({"event": "coverage_done", "reason": done_reason,
+                              "covered": covered, "total": total}), flush=True)
+        else:
+            print(f"Finished pass; sent blank frame. Covered {covered}/{total} ink pixels.")
 
     # ---------------------------------------------- dry-run simulation path
     async def _dry_run_line_pass(self) -> None:

@@ -48,6 +48,9 @@
   .metric.accent .v{color:var(--accent)}
   .spark{margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
   canvas{width:100%;height:90px;display:block}
+  /* Coverage canvases must keep their own pixel aspect ratio (image
+     width:height), unlike the sparkline above which fills its box freely. */
+  #coverageBase,#coverageCursor{width:auto;height:auto;max-width:100%;display:block}
   .sensor-ctl{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-top:14px}
 
   /* tabs + forms */
@@ -129,7 +132,14 @@
       <div class="metric accent"><div class="k">Advance</div><div class="v"><span id="posAdv">–</span><span class="u">mm</span></div></div>
       <div class="metric accent"><div class="k">Column · speed</div><div class="v"><span id="posCol">–</span><span class="u" id="posVel"></span></div></div>
     </div>
-    <div class="spark"><canvas id="spark" width="1100" height="90"></canvas></div>
+    <div class="spark" id="sparkWrap"><canvas id="spark" width="1100" height="90"></canvas></div>
+    <div class="spark" id="coverageWrap" style="display:none">
+      <div style="position:relative;display:inline-block">
+        <canvas id="coverageBase"></canvas>
+        <canvas id="coverageCursor" style="position:absolute;left:0;top:0"></canvas>
+      </div>
+      <div class="live-badge" id="coverageInfo" style="margin-top:8px">–</div>
+    </div>
   </section>
 
   <div class="grid">
@@ -138,6 +148,7 @@
       <div class="tabs" id="tabs">
         <div class="tab active" data-t="print">Print</div>
         <div class="tab" data-t="tracking">Tracking &amp; scale</div>
+        <div class="tab" data-t="calibration">Calibration</div>
         <div class="tab" data-t="nozzle">Nozzle map</div>
         <div class="tab" data-t="ble">BLE &amp; profiling</div>
         <div class="tab" data-t="diag">Diagnostics</div>
@@ -176,10 +187,15 @@
       <!-- TRACKING -->
       <div class="panel" data-p="tracking">
         <div class="row">
-          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="time">time</option></select></div>
+          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="page">page (freehand 2D)</option><option value="time">time</option></select></div>
           <div class="field"><label>Period (s, time mode)</label><input id="period" type="number" step="0.005" value="0.03"></div>
         </div>
-        <div class="row">
+        <div class="row page-only" style="display:none">
+          <div class="field"><label>Page calibration (path)</label><input id="page_calibration" placeholder="page_calibration.json"></div>
+          <div class="field"><label>Dose hold (s, optional)</label><input id="dose_hold_s" type="number" step="0.005" placeholder="0.05 (default)" title="Seconds a nozzle must continuously hold a pixel before it counts as printed. Untuned first guess -- see the Calibration tab hint."></div>
+        </div>
+        <div class="hint page-only" style="display:none">Build a page calibration on the <b>Calibration</b> tab first, or point this at a previously saved one.</div>
+        <div class="row line-only">
           <div class="field"><label>Advance axis</label><select id="advance_axis"><option>x</option><option selected>y</option><option>z</option></select></div>
           <div class="field"><label>Axis sign</label><select id="axis_sign"><option value="1">+1</option><option value="-1">−1</option></select></div>
         </div>
@@ -187,7 +203,7 @@
           <div class="field"><label>mm per column</label><input id="mm_per_column" type="number" step="0.01" value="0.2"></div>
           <div class="field"><label>DPI (overrides mm/col)</label><input id="dpi" type="number" placeholder="–"></div>
         </div>
-        <div class="row">
+        <div class="row line-only">
           <label class="check"><input type="checkbox" id="auto_calibrate"> Auto-calibrate direction</label>
           <div class="field"><label>Calib distance (mm)</label><input id="calib_distance" type="number" value="5"></div>
         </div>
@@ -212,6 +228,45 @@
         <label class="check"><input type="checkbox" id="no_track"> Disable tracking (force time mode)</label>
       </div>
 
+      <!-- CALIBRATION -->
+      <div class="panel" data-p="calibration">
+        <div class="hint">Trace two adjacent page edges with the tracked cart to build a page
+          calibration for freehand (<b>page</b> mode) printing. Connect the sensor above first,
+          then trace each edge in one continuous motion -- the fit uses the whole trace (robust
+          against hand tremor), not just the endpoints.</div>
+        <div class="row">
+          <div class="field"><label>Sheet width (mm, optional)</label><input id="cal_sheet_w" type="number" placeholder="e.g. 210 for A4"></div>
+          <div class="field"><label>Sheet height (mm, optional)</label><input id="cal_sheet_h" type="number" placeholder="e.g. 297 for A4"></div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Edge 1 (column / width direction)</label>
+            <div class="btnrow"><button class="btn" id="btnTraceCol">● Trace edge 1</button>
+              <span class="live-badge" id="colSampleCount">0 samples</span></div>
+          </div>
+          <div class="field">
+            <label>Edge 2 (row / height direction)</label>
+            <div class="btnrow"><button class="btn" id="btnTraceRow">● Trace edge 2</button>
+              <span class="live-badge" id="rowSampleCount">0 samples</span></div>
+          </div>
+        </div>
+        <div class="btnrow" style="margin:4px 0 16px">
+          <button class="btn primary" id="btnCalCompute">Compute calibration</button>
+          <button class="btn ghost" id="btnCalReset">Reset traces</button>
+        </div>
+        <div id="calResult" style="display:none;margin-bottom:16px">
+          <div class="cmd" id="calSummary" style="white-space:pre-wrap"></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Save to path</label><input id="cal_save_path" value="page_calibration.json"></div>
+          <div class="field"><label>&nbsp;</label><button class="btn" id="btnCalSave" disabled>💾 Save calibration</button></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>Load existing (path)</label><input id="cal_load_path" placeholder="page_calibration.json"></div>
+          <div class="field"><label>&nbsp;</label><button class="btn" id="btnCalLoad">Load &amp; preview</button></div>
+        </div>
+      </div>
+
       <!-- NOZZLE MAP -->
       <div class="panel" data-p="nozzle">
         <div class="hint">Correct scrambled nozzle wiring. Give the block size and a 1-indexed permutation, e.g. block 5 → <code>2,3,4,1,5</code>. Leave empty to disable.</div>
@@ -229,7 +284,7 @@
         </div>
         <div class="row">
           <div class="field"><label>Scan timeout (s)</label><input id="scan_timeout" type="number" value="10"></div>
-          <div class="field"><label>Columns per write</label><input id="batch_cols" type="number" min="0" value="0" title="0 = derive from the negotiated MTU. Use 1 for firmware without column batching."></div>
+          <div class="field line-only"><label>Columns per write</label><input id="batch_cols" type="number" min="0" value="0" title="0 = derive from the negotiated MTU. Use 1 for firmware without column batching."></div>
         </div>
         <div class="row">
           <label class="check"><input type="checkbox" id="auto_start"> Auto-start (skip button)</label>
@@ -238,6 +293,9 @@
         <div class="row">
           <label class="check"><input type="checkbox" id="profile"> Profile timing</label>
           <div class="field"><label>Profile CSV path (optional)</label><input id="profile_csv" placeholder="timing.csv"></div>
+        </div>
+        <div class="row page-only" style="display:none">
+          <div class="field"><label>BLE write ceiling (writes/s, optional)</label><input id="ble_write_ceiling" type="number" placeholder="270 (default)" title="Known BLE write-without-response throughput ceiling to compare the page-mode pattern-update rate against. Measure the real number for your hardware with --ble-benchmark."></div>
         </div>
       </div>
 
@@ -302,16 +360,33 @@ function updateSrc(){
 }
 document.querySelectorAll('input[name=src]').forEach(r=>r.onchange=updateSrc);
 
+/* ---------- mode switching (line/page/time) ---------- */
+function isPageMode(){ return val('mode')==='page'; }
+function updateMode(){
+  const page = isPageMode();
+  document.querySelectorAll('.line-only').forEach(el=>el.style.display = page ? 'none' : '');
+  document.querySelectorAll('.page-only').forEach(el=>el.style.display = page ? '' : 'none');
+  $('sparkWrap').style.display = page ? 'none' : '';
+  if(!page){ $('coverageWrap').style.display = 'none'; }
+  buildPreview();
+}
+$('mode').addEventListener('change', updateMode);
+
 /* ---------- argv builders ---------- */
 function pushIf(a,cond,flag,v){ if(cond){ a.push(flag); if(v!==undefined && v!=="") a.push(String(v)); } }
 
 function trackingArgs(a){
   if(chk('no_track')) a.push('--no-track');
   else pushIf(a, val('mode')!=='line', '--mode', val('mode'));
-  pushIf(a, val('advance_axis')!=='y', '--advance-axis', val('advance_axis'));
-  pushIf(a, val('axis_sign')!=='1', '--axis-sign', val('axis_sign'));
-  pushIf(a, chk('auto_calibrate'), '--auto-calibrate');
-  pushIf(a, chk('auto_calibrate') && val('calib_distance')!=='5', '--calib-distance', val('calib_distance'));
+  if(isPageMode() && !chk('no_track')){
+    pushIf(a, !!val('page_calibration'), '--page-calibration', val('page_calibration'));
+    pushIf(a, !!val('dose_hold_s'), '--dose-hold-s', val('dose_hold_s'));
+  } else {
+    pushIf(a, val('advance_axis')!=='y', '--advance-axis', val('advance_axis'));
+    pushIf(a, val('axis_sign')!=='1', '--axis-sign', val('axis_sign'));
+    pushIf(a, chk('auto_calibrate'), '--auto-calibrate');
+    pushIf(a, chk('auto_calibrate') && val('calib_distance')!=='5', '--calib-distance', val('calib_distance'));
+  }
   if(val('dpi')) { a.push('--dpi', val('dpi')); }
   else pushIf(a, val('mm_per_column')!=='0.2', '--mm-per-column', val('mm_per_column'));
   pushIf(a, val('origin')!=='button', '--origin', val('origin'));
@@ -352,11 +427,14 @@ function bleArgs(a){
   pushIf(a, val('device_name')!=='PrintheadBLE','--device-name',val('device_name'));
   pushIf(a, !!val('address'),'--address',val('address'));
   pushIf(a, val('scan_timeout')!=='10','--scan-timeout',val('scan_timeout'));
-  pushIf(a, val('batch_cols')!=='0','--batch-cols',val('batch_cols'));
+  pushIf(a, !isPageMode() && val('batch_cols')!=='0','--batch-cols',val('batch_cols'));
   pushIf(a, chk('auto_start'),'--auto-start');
   pushIf(a, chk('once'),'--once');
   pushIf(a, chk('profile'),'--profile');
   pushIf(a, chk('profile') && !!val('profile_csv'),'--profile-csv',val('profile_csv'));
+  pushIf(a, isPageMode() && !!val('ble_write_ceiling'),'--ble-write-ceiling',val('ble_write_ceiling'));
+  // The live coverage canvas needs page mode's NDJSON progress events.
+  pushIf(a, isPageMode(),'--progress-json');
   pushIf(a, val('period')!=='0.03' && (chk('no_track')||val('mode')==='time'),'--period',val('period'));
 }
 function globalArgs(a){ pushIf(a, chk('gSimulate'),'--simulate'); pushIf(a, chk('gDryRun'),'--dry-run'); }
@@ -399,7 +477,13 @@ function clearLog(){ con.innerHTML=''; }
 /* ---------- run / stop ---------- */
 async function post(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
 async function runArgs(args){ const r=await post('/api/run',{args}); if(!r.ok) log('! '+r.error,'err'); }
-$('btnRun').onclick=()=>runArgs(printArgs());
+$('btnRun').onclick=()=>{
+  if(isPageMode() && !chk('no_track') && !val('page_calibration')){
+    log('! page mode needs a page calibration -- build one on the Calibration tab, or enter a path (Tracking & scale tab)','err');
+    return;
+  }
+  runArgs(printArgs());
+};
 $('btnStop').onclick=()=>post('/api/stop');
 function runDiag(flag){ runArgs(diagArgs(flag)); }
 $('btnPreview').onclick=async()=>{
@@ -466,7 +550,111 @@ function onPosition(o){
   if(lastT!==null){ const dt=now-lastT; if(dt>0){ const v=Math.abs(o.advance-lastAdv)/dt; $('posVel').textContent=' col · '+v.toFixed(1)+' mm/s'; } }
   lastT=now; lastAdv=o.advance;
   hist.push(o.advance); if(hist.length>240) hist.shift(); draw();
+  onCalibrationPosition(o);
 }
+
+/* ---------- live 2D coverage canvas (page mode) ---------- */
+const NUM_NOZZLES = 152;                 // must match printhead/geometry.py
+const covBase=$('coverageBase'), covBaseCx=covBase.getContext('2d');
+const covCursor=$('coverageCursor'), covCursorCx=covCursor.getContext('2d');
+let covScale=1;
+function resetCoverage(width,height){
+  const maxW=1100, maxH=340;
+  covScale=Math.max(1, Math.floor(Math.min(maxW/width, maxH/height)));
+  const cw=width*covScale, ch=height*covScale;
+  covBase.width=cw; covBase.height=ch;
+  covCursor.width=cw; covCursor.height=ch;
+  covBaseCx.fillStyle='#0e131a'; covBaseCx.fillRect(0,0,cw,ch);
+  covBaseCx.strokeStyle='#2a3240'; covBaseCx.strokeRect(0.5,0.5,cw-1,ch-1);
+  covCursorCx.clearRect(0,0,cw,ch);
+  $('coverageInfo').textContent=`target ${width}×${height} px`;
+  $('coverageWrap').style.display='';
+}
+function drawCoverageCells(cells){
+  if(!cells.length) return;
+  covBaseCx.fillStyle='#2dd4bf';
+  for(const [r,c] of cells){ covBaseCx.fillRect(c*covScale, r*covScale, covScale, covScale); }
+}
+function drawCoverageCursor(row,col){
+  const cw=covCursor.width, ch=covCursor.height;
+  covCursorCx.clearRect(0,0,cw,ch);
+  covCursorCx.fillStyle='#38bdf826';
+  covCursorCx.fillRect(0, row*covScale, cw, NUM_NOZZLES*covScale);
+  covCursorCx.strokeStyle='#38bdf8'; covCursorCx.lineWidth=1;
+  covCursorCx.beginPath();
+  covCursorCx.moveTo(col*covScale+0.5, 0); covCursorCx.lineTo(col*covScale+0.5, ch);
+  covCursorCx.stroke();
+}
+function onCoverageEvent(m){
+  if(m.event==='coverage_start'){ resetCoverage(m.width, m.height); }
+  else if(m.event==='coverage'){
+    drawCoverageCells(m.new_cells);
+    drawCoverageCursor(m.row, m.col);
+    $('coverageInfo').textContent=`u=${m.u.toFixed(1)}mm v=${m.v.toFixed(1)}mm  row=${m.row} col=${m.col}`;
+  } else if(m.event==='coverage_done'){
+    log(`coverage: ${m.covered}/${m.total} px (${m.reason})`, m.reason==='complete'?'done':'sensor');
+    $('coverageInfo').textContent=`done: ${m.covered}/${m.total} px covered (${m.reason})`;
+  }
+}
+
+/* ---------- calibration tab ---------- */
+let colSamples=[], rowSamples=[], tracingCol=false, tracingRow=false, lastCalibration=null;
+function onCalibrationPosition(o){
+  if(tracingCol){ colSamples.push([o.x,o.y,o.z]); $('colSampleCount').textContent=colSamples.length+' samples'; }
+  if(tracingRow){ rowSamples.push([o.x,o.y,o.z]); $('rowSampleCount').textContent=rowSamples.length+' samples'; }
+}
+function setTracing(which,on){
+  if(which==='col'){ tracingCol=on; $('btnTraceCol').textContent=on?'■ Stop tracing edge 1':'● Trace edge 1'; $('btnTraceCol').classList.toggle('danger',on); }
+  else { tracingRow=on; $('btnTraceRow').textContent=on?'■ Stop tracing edge 2':'● Trace edge 2'; $('btnTraceRow').classList.toggle('danger',on); }
+}
+$('btnTraceCol').onclick=()=>{
+  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
+  if(!tracingCol) setTracing('row',false);
+  setTracing('col',!tracingCol);
+};
+$('btnTraceRow').onclick=()=>{
+  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
+  if(!tracingRow) setTracing('col',false);
+  setTracing('row',!tracingRow);
+};
+$('btnCalReset').onclick=()=>{
+  colSamples=[]; rowSamples=[]; lastCalibration=null;
+  setTracing('col',false); setTracing('row',false);
+  $('colSampleCount').textContent='0 samples'; $('rowSampleCount').textContent='0 samples';
+  $('calResult').style.display='none'; $('btnCalSave').disabled=true;
+};
+$('btnCalCompute').onclick=async()=>{
+  if(colSamples.length<2 || rowSamples.length<2){
+    log('! need at least 2 samples on each edge -- trace both edges first','err'); return;
+  }
+  const body={col_samples:colSamples, row_samples:rowSamples};
+  if(val('cal_sheet_w')) body.sheet_width_mm=parseFloat(val('cal_sheet_w'));
+  if(val('cal_sheet_h')) body.sheet_height_mm=parseFloat(val('cal_sheet_h'));
+  const r=await post('/api/calibration/compute',body);
+  if(!r.ok){ log('! '+r.error,'err'); return; }
+  lastCalibration=r.calibration;
+  $('calResult').style.display='';
+  let txt=`angle error: ${r.angle_error_deg.toFixed(1)}°  |  scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}`;
+  if(r.warning) txt+='\n⚠ '+r.warning;
+  $('calSummary').textContent=txt;
+  $('btnCalSave').disabled=false;
+};
+$('btnCalSave').onclick=async()=>{
+  if(!lastCalibration) return;
+  const r=await post('/api/calibration/save',{calibration:lastCalibration, path:val('cal_save_path')});
+  if(r.ok){ log('calibration saved -> '+r.path,'done'); $('page_calibration').value=r.path; }
+  else log('! '+r.error,'err');
+};
+$('btnCalLoad').onclick=async()=>{
+  const r=await post('/api/calibration/load',{path:val('cal_load_path')});
+  if(!r.ok){ log('! '+r.error,'err'); return; }
+  lastCalibration=r.calibration;
+  $('calResult').style.display='';
+  $('calSummary').textContent=`loaded '${val('cal_load_path')}'  |  angle error: ${r.angle_error_deg.toFixed(1)}°  |  `+
+    `scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}`;
+  $('btnCalSave').disabled=false;
+  $('page_calibration').value=val('cal_load_path');
+};
 
 /* ---------- run state ---------- */
 function setRun(running,cmd){
@@ -483,6 +671,7 @@ function connect(){
     const m=JSON.parse(ev.data);
     if(m.type==='log') log((m.stream==='action'&&m.line.startsWith('$')?'':'')+m.line, m.stream==='sensor'?'sensor':(m.line.startsWith('$')?'cmd':''));
     else if(m.type==='position') onPosition(m);
+    else if(m.type==='coverage_event') onCoverageEvent(m);
     else if(m.type==='sensor_event'){ if(m.event==='error') log('sensor: '+m.message,'err'); if(m.event==='connected'){ resetSpark(); setSensor(true); } }
     else if(m.type==='sensor_stopped') setSensor(false);
     else if(m.type==='action_done'){ log('— finished (exit '+m.code+') —','done');
@@ -491,7 +680,7 @@ function connect(){
   };
   ws.onclose=()=>{ setTimeout(connect,1200); };
 }
-connect(); updateSrc(); buildPreview(); draw();
+connect(); updateSrc(); updateMode(); buildPreview(); draw();
 </script>
 </body>
 </html>

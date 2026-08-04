@@ -99,6 +99,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Page mode: seconds a nozzle must continuously hold a "
                         "pixel before it counts as printed (default: "
                         "coverage.DEFAULT_DOSE_HOLD_S, an untuned first guess)")
+    g.add_argument("--progress-json", action="store_true",
+                   help="Page mode: emit one JSON progress event per sample "
+                        "(current u/v/row/col + newly-covered cells) instead "
+                        "of the plain-text status lines -- used by the web UI's "
+                        "live coverage view")
 
     # --- Amfitrack ---------------------------------------------------------
     g = ap.add_argument_group("Amfitrack positioning")
@@ -321,6 +326,7 @@ def build_controller(args: argparse.Namespace) -> PrintController:
                            profile=args.profile, profile_csv=args.profile_csv,
                            record=args.record,
                            page_calibration=build_page_calibration(args),
+                           progress_json=args.progress_json,
                            **kwargs)
 
 
