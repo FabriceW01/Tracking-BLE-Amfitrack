@@ -34,6 +34,19 @@ PREVIEW_PATH = Path(tempfile.gettempdir()) / "printhead_ui_preview.png"
 RECORD_PATH = Path(tempfile.gettempdir()) / "printhead_ui_record.png"
 
 
+def _try_parse_json(line: str) -> Optional[dict]:
+    """Parse one subprocess stdout line as NDJSON, or return ``None`` if it
+    isn't valid JSON (a plain log line). Shared by the sensor stream and the
+    action-run handlers below, which both need to tell a structured progress
+    event -- today just ``{"event": "position", ...}`` from ``--pos-json`` --
+    apart from ordinary log text. A print pass emitting the same event, once
+    page mode adds one, is picked up by ``run_action`` for free."""
+    try:
+        return json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 class RunRequest(BaseModel):
     args: List[str] = []
 
@@ -81,7 +94,11 @@ class Hub:
             return {"ok": False, "error": "an action is already running"}
 
         async def on_line(line: str) -> None:
-            await self.broadcast({"type": "log", "stream": "action", "line": line})
+            obj = _try_parse_json(line)
+            if isinstance(obj, dict) and obj.get("event") == "position":
+                await self.broadcast({"type": "position", **obj})
+            else:
+                await self.broadcast({"type": "log", "stream": "action", "line": line})
 
         async def on_exit(code: int) -> None:
             await self.broadcast({"type": "action_done", "code": code})
@@ -146,13 +163,11 @@ class Hub:
             # A superseded (refreshed) process must not push stale samples.
             if self.sensor is not proc_box.get("p"):
                 return
-            try:
-                obj = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            obj = _try_parse_json(line)
+            if not isinstance(obj, dict):
                 await self.broadcast({"type": "log", "stream": "sensor", "line": line})
                 return
-            event = obj.get("event")
-            if event == "position":
+            if obj.get("event") == "position":
                 await self.broadcast({"type": "position", **obj})
             else:
                 await self.broadcast({"type": "sensor_event", **obj})

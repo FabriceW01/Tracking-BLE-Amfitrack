@@ -56,23 +56,33 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
               f"{tracking.mm_per_column:.3f} mm/col). Ctrl+C to stop.")
     try:
         while True:
-            pos = tracker.read_position()
+            pos, quat = tracker.read_pose()
             if pos is not None:
                 pos = pos_filter.update(pos, time.monotonic())
                 if origin is None:
                     origin = pos.copy()
                 advance = tracking.axis_sign * float(pos[axis] - origin[axis])
                 col = int(round(advance / tracking.mm_per_column))
+                # quat (qx,qy,qz,qw) -- see AmfitrackTracker._extract_pose -- is
+                # included only when the connected hardware/SDK actually reports it,
+                # so this line looks exactly as before on setups that don't.
                 if ndjson:
-                    print(json.dumps({
+                    event = {
                         "event": "position",
                         "x": round(float(pos[0]), 3), "y": round(float(pos[1]), 3),
                         "z": round(float(pos[2]), 3),
-                        "advance": round(advance, 3), "col": col}), flush=True)
+                        "advance": round(advance, 3), "col": col}
+                    if quat is not None:
+                        event.update(qx=round(float(quat[0]), 4), qy=round(float(quat[1]), 4),
+                                     qz=round(float(quat[2]), 4), qw=round(float(quat[3]), 4))
+                    print(json.dumps(event), flush=True)
                 else:
-                    print(f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
-                          f"advance={advance:9.2f} mm  |  col={col:5d}",
-                          end="\r", flush=True)
+                    line = (f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
+                           f"advance={advance:9.2f} mm  |  col={col:5d}")
+                    if quat is not None:
+                        line += (f"  |  quat=[{quat[0]:+.2f} {quat[1]:+.2f} "
+                                f"{quat[2]:+.2f} {quat[3]:+.2f}]")
+                    print(line, end="\r", flush=True)
             await asyncio.sleep(1.0 / hz)
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass

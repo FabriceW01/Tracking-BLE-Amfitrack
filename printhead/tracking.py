@@ -19,7 +19,7 @@ Two pieces:
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -128,6 +128,7 @@ class AmfitrackTracker:
         self._conn = None
         self._devices = []
         self._last: Optional[np.ndarray] = None
+        self._last_quat: Optional[np.ndarray] = None
 
     def open(self) -> None:
         # Imported lazily so the package works (dry-run / simulate) without the
@@ -164,50 +165,87 @@ class AmfitrackTracker:
 
     def read_position(self) -> Optional[np.ndarray]:
         """Return the latest ``(x, y, z)`` in mm, or ``None`` if no new sample."""
+        pos, _ = self._read_latest()
+        return pos
+
+    def read_pose(self) -> "tuple[Optional[np.ndarray], Optional[np.ndarray]]":
+        """
+        Return the latest ``(position, quaternion)``, either ``None`` if that
+        part was absent from every packet drained this call.
+
+        ``quaternion`` is ``(qx, qy, qz, qw)`` orientation, or ``None`` if the
+        connected SDK/firmware never reports it -- see ``_extract_pose``. This
+        field has been confirmed on real hardware (same ``payload.emf.quat_*``
+        access path), but is not yet relied on anywhere in the print pipeline.
+        """
+        return self._read_latest()
+
+    def _read_latest(self) -> "tuple[Optional[np.ndarray], Optional[np.ndarray]]":
         pos = None
+        quat = None
         for dev in self._devices:
             try:
                 while dev.packet_available():
-                    candidate = self._extract_position(dev.get_packet().payload)
-                    if candidate is not None:
-                        pos = candidate
+                    p, q = self._extract_pose(dev.get_packet().payload)
+                    if p is not None:
+                        pos = p
+                    if q is not None:
+                        quat = q
             except Exception:
                 continue
         if pos is not None:
             self._last = pos
-        return pos
+        if quat is not None:
+            self._last_quat = quat
+        return pos, quat
 
     # ---- single adapter point for SDK-version differences ------------------
     @staticmethod
-    def _extract_position(payload) -> Optional[np.ndarray]:
+    def _extract_pose(payload) -> "tuple[Optional[np.ndarray], Optional[np.ndarray]]":
         """
-        Pull an ``(x, y, z)`` position in **mm** out of an amfiprot payload.
+        Pull an ``(x, y, z)`` position in **mm**, and an orientation quaternion
+        if the payload carries one, out of an amfiprot packet.
 
-        The primary layout is the confirmed-working ``payload.emf.pos_{x,y,z}``.
-        A few other layouts are tried as a fallback for differing SDK versions;
-        adjust HERE if your SDK reports the position differently.
+        The primary position layout is the confirmed-working
+        ``payload.emf.pos_{x,y,z}``. A few other layouts are tried as a
+        fallback for differing SDK versions; adjust HERE if your SDK reports
+        the position differently.
+
+        Quaternion support (``payload.emf.quat_{x,y,z,w}``) is confirmed
+        working on real hardware: the identical ``payload.emf`` object this
+        reads position from also carries ``quat_x/y/z/w``, verified against a
+        reference implementation of this same SDK (the ``AmfiPoseProvider``
+        this class's connection logic already mirrors, see ``open()``).
+        Surfaced via ``read_pose()`` / ``--pos``; usable for freehand
+        page-mode cart-orientation correction.
         """
         emf = getattr(payload, "emf", payload)
+        pos = None
 
         # 1) confirmed working: emf.pos_x / pos_y / pos_z (mm)
         if all(hasattr(emf, a) for a in ("pos_x", "pos_y", "pos_z")):
-            return np.array([emf.pos_x, emf.pos_y, emf.pos_z], dtype=float)
+            pos = np.array([emf.pos_x, emf.pos_y, emf.pos_z], dtype=float)
+        else:
+            # 2) nested .position with .x/.y/.z (mm)
+            nested = getattr(emf, "position", None)
+            if nested is not None and hasattr(nested, "x"):
+                pos = np.array([nested.x, nested.y, nested.z], dtype=float)
+            # 3) flat .x/.y/.z on the emf payload (mm)
+            elif all(hasattr(emf, a) for a in ("x", "y", "z")):
+                pos = np.array([emf.x, emf.y, emf.z], dtype=float)
+            else:
+                # 4) C-SDK style names in metres -> convert to mm
+                metre_names = ("position_x_in_m", "position_y_in_m", "position_z_in_m")
+                if all(hasattr(emf, n) for n in metre_names):
+                    pos = np.array([getattr(emf, n) for n in metre_names],
+                                   dtype=float) * 1000.0
 
-        # 2) nested .position with .x/.y/.z (mm)
-        pos = getattr(emf, "position", None)
-        if pos is not None and hasattr(pos, "x"):
-            return np.array([pos.x, pos.y, pos.z], dtype=float)
+        quat = None
+        if all(hasattr(emf, a) for a in ("quat_x", "quat_y", "quat_z", "quat_w")):
+            quat = np.array([emf.quat_x, emf.quat_y, emf.quat_z, emf.quat_w],
+                            dtype=float)
 
-        # 3) flat .x/.y/.z on the emf payload (mm)
-        if all(hasattr(emf, a) for a in ("x", "y", "z")):
-            return np.array([emf.x, emf.y, emf.z], dtype=float)
-
-        # 4) C-SDK style names in metres -> convert to mm
-        metre_names = ("position_x_in_m", "position_y_in_m", "position_z_in_m")
-        if all(hasattr(emf, n) for n in metre_names):
-            return np.array([getattr(emf, n) for n in metre_names], dtype=float) * 1000.0
-
-        return None                               # not a position-bearing packet
+        return pos, quat                           # either may be None
 
     def close(self) -> None:
         if self._conn is not None:
@@ -223,35 +261,105 @@ class AmfitrackTracker:
 # ============================================================================
 # Hardware-free simulator
 # ============================================================================
+# Elapsed seconds since the pass started -> a fake (x, y, z) position in mm.
+PathFn = Callable[[float], np.ndarray]
+
+
+def waypoints_path(points, speed_mm_s: float, loop: bool = False) -> PathFn:
+    """
+    Build a :data:`PathFn` that walks piecewise-linear through ``points`` (an
+    ``(N, 3)``-like sequence of mm positions) at a constant speed, starting at
+    ``points[0]``.
+
+    Used to make :class:`SimulatedTracker` fake a genuine 2D/3D scribble --
+    loops, revisits, vertical sweeps -- instead of straight-line travel along
+    one axis, which is what exercising page-mode calibration/coverage without
+    hardware needs and a single-axis fake cannot produce.
+
+    ``loop=True`` repeats the path indefinitely once the last point is
+    reached; otherwise the tracker holds at the final point.
+    """
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 3 or len(pts) < 2:
+        raise ValueError("waypoints_path needs at least two (x, y, z) points.")
+    seg_vec = np.diff(pts, axis=0)                        # (N-1, 3)
+    seg_len = np.linalg.norm(seg_vec, axis=1)              # (N-1,)
+    if np.any(seg_len <= 0):
+        raise ValueError("waypoints_path: consecutive points must not coincide.")
+    seg_dir = seg_vec / seg_len[:, None]
+    seg_end_dist = np.cumsum(seg_len)                      # cumulative arc length
+    total_len = float(seg_end_dist[-1])
+
+    def path(t: float) -> np.ndarray:
+        dist = speed_mm_s * t
+        if loop and total_len > 0:
+            dist = dist % total_len
+        if dist >= total_len:
+            return pts[-1].copy()
+        i = int(np.searchsorted(seg_end_dist, dist, side="right"))
+        start_dist = seg_end_dist[i - 1] if i > 0 else 0.0
+        return pts[i] + seg_dir[i] * (dist - start_dist)
+
+    return path
+
+
 class SimulatedTracker:
     """
-    Fakes a printhead moving at constant speed along the configured travel axis,
-    so ``--simulate`` can exercise the position -> column loop without hardware.
+    Fakes printhead motion so ``--simulate`` can exercise the position -> column
+    loop without hardware.
+
+    Default behaviour (unchanged): constant speed along the configured travel
+    axis -- the 1D ``--mode line`` use case.
+
+    Pass ``path_fn`` (see :func:`waypoints_path`) to instead walk an arbitrary
+    2D/3D path. Page-mode calibration and coverage need this: they must handle
+    loops, revisits and vertical sweeps that a single-axis fake cannot exercise.
     """
 
-    def __init__(self, settings: TrackingSettings, speed_mm_s: float = 50.0):
+    def __init__(self, settings: TrackingSettings, speed_mm_s: float = 50.0,
+                 path_fn: Optional[PathFn] = None):
         self.settings = settings
         self.speed_mm_s = speed_mm_s
         self._axis = _AXIS_INDEX[settings.advance_axis]
+        self._path_fn = path_fn
         self._t0: Optional[float] = None
 
     def open(self) -> None:
         self._t0 = time.monotonic()
-        print(f"SimulatedTracker: {self.speed_mm_s:.0f} mm/s along "
-              f"{self.settings.advance_axis}-axis.")
+        if self._path_fn is None:
+            print(f"SimulatedTracker: {self.speed_mm_s:.0f} mm/s along "
+                  f"{self.settings.advance_axis}-axis.")
+        else:
+            print("SimulatedTracker: following a custom 2D/3D path.")
 
     def read_position(self) -> np.ndarray:
         if self._t0 is None:
             self._t0 = time.monotonic()
-        travelled = self.speed_mm_s * (time.monotonic() - self._t0)
+        elapsed = time.monotonic() - self._t0
+        if self._path_fn is not None:
+            return np.asarray(self._path_fn(elapsed), dtype=float)
+        travelled = self.speed_mm_s * elapsed
         pos = np.zeros(3, dtype=float)
         pos[self._axis] = self.settings.axis_sign * travelled
         return pos
+
+    def read_pose(self) -> "tuple[np.ndarray, Optional[np.ndarray]]":
+        """Same interface as :meth:`AmfitrackTracker.read_pose`, so callers
+        (e.g. ``diagnostics.monitor_position``) don't need to branch on tracker
+        type. The simulator never fakes orientation, so ``quaternion`` is
+        always ``None``."""
+        return self.read_position(), None
 
     def close(self) -> None:
         self._t0 = None
 
 
-def make_tracker(settings: TrackingSettings, simulate: bool):
-    """Factory: real dongle tracker or the hardware-free simulator."""
-    return SimulatedTracker(settings) if simulate else AmfitrackTracker(settings)
+def make_tracker(settings: TrackingSettings, simulate: bool,
+                 path_fn: Optional[PathFn] = None):
+    """Factory: real dongle tracker or the hardware-free simulator.
+
+    ``path_fn`` (see :func:`waypoints_path`) is only used when
+    ``simulate=True``; ignored for the real tracker."""
+    if simulate:
+        return SimulatedTracker(settings, path_fn=path_fn)
+    return AmfitrackTracker(settings)

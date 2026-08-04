@@ -109,6 +109,23 @@ def render_text(settings: RenderSettings) -> np.ndarray:
 # ============================================================================
 # Ink mask -> nozzle frames
 # ============================================================================
+def pack_nozzle_bits(active: np.ndarray) -> bytes:
+    """
+    Pack a boolean vector of up to ``NUM_NOZZLES`` ink-row flags into one
+    ``ROW_BYTES``-byte frame: bit ``j`` (byte ``j // 8``, bit ``j % 8``,
+    LSB-first) is image row ``j`` = ``FIRST_NOZZLE + j``. Same bit layout as
+    :func:`frames_from_ink`, factored out as a single-column primitive for
+    callers that build one frame at a time from a live state (e.g. the
+    freehand coverage engine) rather than a whole ``(H, W)`` image at once --
+    where ``frames_from_ink`` packs all ``W`` columns in one vectorised call
+    for speed, this packs the one column it's given.
+    """
+    bits = np.zeros(NUM_NOZZLES, dtype=np.uint8)
+    n = min(len(active), LAST_NOZZLE - FIRST_NOZZLE + 1)
+    bits[FIRST_NOZZLE:FIRST_NOZZLE + n] = np.asarray(active)[:n]
+    return bytes(np.packbits(bits, bitorder="little"))
+
+
 def frames_from_ink(ink: np.ndarray) -> list[bytes]:
     """
     Turn a ``(IMAGE_HEIGHT, W)`` boolean mask into a list of ``W`` 21-byte frames.

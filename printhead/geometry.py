@@ -38,3 +38,14 @@ NOZZLE_OFFSET = 8                             # frame bit j -> physical nozzle j
 
 # A frame with no nozzle firing; used to stop printing / start clean.
 BLANK_FRAME = bytes(ROW_BYTES)
+
+# ----------------------------------------------------------------------------
+# Physical nozzle-bar spacing (freehand page-mode; user-measured, confirmed)
+# ----------------------------------------------------------------------------
+# The 152-nozzle bar is 15mm wide edge-to-edge ("152 Duesen, 1,5 cm breit").
+NOZZLE_BAR_WIDTH_MM = 15.0
+# Centre-to-centre spacing between adjacent nozzles: NUM_NOZZLES equally spaced
+# points spanning NOZZLE_BAR_WIDTH_MM edge-to-edge have NUM_NOZZLES - 1 gaps.
+# Needed to convert a page-plane position perpendicular to travel (v_mm) into a
+# nozzle-row index in the freehand coverage engine.
+NOZZLE_PITCH_MM = NOZZLE_BAR_WIDTH_MM / (NUM_NOZZLES - 1)
