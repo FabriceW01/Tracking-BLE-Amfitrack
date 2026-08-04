@@ -18,23 +18,32 @@ from typing import Optional
 import numpy as np
 
 from .ble_client import PrintheadBLE
+from .calibration import PageCalibration
 from .config import BleSettings, NozzleMapSettings, TrackingSettings
 from .geometry import BLANK_FRAME, IMAGE_HEIGHT
 from .nozzle_map import remap_rows
 from .rendering import frames_from_ink
-from .tracking import _AXIS_INDEX, PositionFilter, make_tracker
+from .tracking import _AXIS_INDEX, PageMapper, PositionFilter, make_tracker
 
 
 # ============================================================================
 # --pos : live Amfitrack position readout
 # ============================================================================
 async def monitor_position(tracking: TrackingSettings, simulate: bool,
-                           hz: float = 15.0, ndjson: bool = False) -> None:
+                           hz: float = 15.0, ndjson: bool = False,
+                           page_calibration_path: Optional[str] = None) -> None:
     """Continuously print the sensor position (x/y/z), the travel-axis value and
     the resulting column, until Ctrl+C. Doubles as an axis / mm-per-column aid.
 
     ``ndjson=True`` prints one newline-terminated JSON object per sample instead
-    of the live single-line readout, so tools (the web UI) can parse the stream."""
+    of the live single-line readout, so tools (the web UI) can parse the stream.
+
+    ``page_calibration_path``, if given, loads a ``PageCalibration`` (see
+    ``calibration.py``) and additionally reports the live page-plane
+    ``(page_u, page_v, page_z)`` for that calibration -- lets a page-mode
+    calibration be sanity-checked (known hand motion -> plausible u/v) before
+    anything is printed with it. A bad/missing path aborts the same way a
+    failed tracker connection does, since the caller asked for it explicitly."""
     tracker = make_tracker(tracking, simulate)
     try:
         tracker.open()
@@ -44,6 +53,20 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
         else:
             print(f"Cannot open Amfitrack tracker: {exc}")
         return
+
+    page_mapper = None
+    if page_calibration_path is not None:
+        try:
+            page_mapper = PageMapper(PageCalibration.load(page_calibration_path))
+        except Exception as exc:
+            if ndjson:
+                print(json.dumps({"event": "error",
+                                  "message": f"Cannot load page calibration: {exc}"}),
+                      flush=True)
+            else:
+                print(f"Cannot load page calibration '{page_calibration_path}': {exc}")
+            tracker.close()
+            return
 
     axis = _AXIS_INDEX[tracking.advance_axis]
     origin = None
@@ -66,6 +89,7 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                 # quat (qx,qy,qz,qw) -- see AmfitrackTracker._extract_pose -- is
                 # included only when the connected hardware/SDK actually reports it,
                 # so this line looks exactly as before on setups that don't.
+                page_uvz = page_mapper.project(pos) if page_mapper is not None else None
                 if ndjson:
                     event = {
                         "event": "position",
@@ -75,6 +99,10 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                     if quat is not None:
                         event.update(qx=round(float(quat[0]), 4), qy=round(float(quat[1]), 4),
                                      qz=round(float(quat[2]), 4), qw=round(float(quat[3]), 4))
+                    if page_uvz is not None:
+                        event.update(page_u=round(page_uvz[0], 3),
+                                     page_v=round(page_uvz[1], 3),
+                                     page_z=round(page_uvz[2], 3))
                     print(json.dumps(event), flush=True)
                 else:
                     line = (f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
@@ -82,6 +110,9 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                     if quat is not None:
                         line += (f"  |  quat=[{quat[0]:+.2f} {quat[1]:+.2f} "
                                 f"{quat[2]:+.2f} {quat[3]:+.2f}]")
+                    if page_uvz is not None:
+                        line += (f"  |  page u={page_uvz[0]:8.2f}  v={page_uvz[1]:8.2f}  "
+                                f"z={page_uvz[2]:6.2f} mm")
                     print(line, end="\r", flush=True)
             await asyncio.sleep(1.0 / hz)
     except (KeyboardInterrupt, asyncio.CancelledError):

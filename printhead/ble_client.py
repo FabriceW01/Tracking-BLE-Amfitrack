@@ -141,6 +141,22 @@ class PrintheadBLE:
     async def write_blank(self) -> None:
         await self._client.write_gatt_char(NOZZLE_UUID, BLANK_FRAME, response=False)
 
+    # -------------------------------------------------- freehand page mode
+    async def write_pattern(self, pattern: bytes) -> None:
+        """
+        Send the current full 152-nozzle state: one 19-byte frame, no response.
+
+        Same wire operation as :meth:`write_column`, but kept as its own named
+        method because the *meaning* is different: write_column/write_columns
+        carry one column of a sequential 1D scan, each value unique and never
+        repeated (a FIFO is the right model). This carries the freehand
+        coverage engine's current live nozzle state -- a snapshot that
+        :class:`~printhead.pattern_sender.PatternSender` sends "latest wins",
+        never queued, since an intermediate snapshot superseded before it went
+        out is worthless.
+        """
+        await self._client.write_gatt_char(NOZZLE_UUID, pattern, response=False)
+
     # ------------------------------------------------------ time-based mode
     async def stream_time(self, frames, period: float, verbose: bool = False) -> None:
         """Send one column per ``period`` seconds, then a blank frame to stop."""

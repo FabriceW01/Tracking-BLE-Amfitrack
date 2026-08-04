@@ -47,18 +47,26 @@ class TrackingSettings:
     Amfitrack positioning configuration.
 
     ``mode`` selects the print strategy:
-      * ``"position"`` - closed loop: the printed column follows the measured
-        position, so the horizontal scale is independent of cart speed.
-      * ``"time"``     - legacy behaviour: stream one column every ``period`` s.
+      * ``"line"`` - 1D closed loop: the printed column follows the measured
+        position along a single travel direction, so the horizontal scale is
+        independent of cart speed. (Named ``"position"`` before freehand page
+        mode existed; renamed once there were two position-based modes to
+        tell apart.)
+      * ``"page"`` - 2D freehand closed loop: the cart can move anywhere over
+        a calibrated page (loops, revisits, vertical sweeps included) and a
+        per-nozzle coverage engine decides what still needs ink. Requires a
+        ``PageCalibration`` (see ``calibration.py``), traced ahead of time.
+      * ``"time"`` - legacy behaviour: stream one column every ``period`` s.
 
     The sensor is mounted rotated (travel happens in Y/Z instead of X/Y), so the
-    axis that drives column advancement is configurable. Two strategies exist:
+    axis that drives column advancement is configurable (line mode only). Two
+    strategies exist:
       * fixed axis   - use ``advance_axis`` (default ``"y"``) times ``axis_sign``.
       * auto-calibrate - measure the real direction of motion at start and
         project the position onto it (robust against any rotation).
     """
     enabled: bool = True
-    mode: str = "position"          # "position" | "time"
+    mode: str = "line"              # "line" | "page" | "time"
 
     # --- axis mapping for the rotated sensor -------------------------------
     advance_axis: str = "y"         # "x" | "y" | "z" (which axis = travel dir.)

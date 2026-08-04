@@ -2,18 +2,23 @@
 Amfitrack positioning
 ======================
 
-Turns the electromagnetic 6-DOF pose from an Amfitrack sensor into the scalar
-"how far has the printhead travelled" value the controller needs to pick a
-column.
+Turns the electromagnetic 6-DOF pose from an Amfitrack sensor into either the
+scalar "how far has the printhead travelled" value the legacy 1D pipeline
+needs to pick a column, or a 2-D page-plane position for freehand printing.
 
-Two pieces:
-  * :class:`AmfitrackTracker` - reads raw ``(x, y, z)`` position (mm) from the
-    USB dongle via ``amfiprot`` / ``amfiprot_amfitrack``.  :class:`SimulatedTracker`
-    is a drop-in replacement that fakes motion so the closed loop can be tested
+Three pieces:
+  * :class:`AmfitrackTracker` - reads raw ``(x, y, z)`` position (mm), and
+    orientation quaternion when available, from the USB dongle via
+    ``amfiprot`` / ``amfiprot_amfitrack``. :class:`SimulatedTracker` is a
+    drop-in replacement that fakes motion so the closed loop can be tested
     without hardware.
-  * :class:`AdvanceMapper` - converts a 3-D position into travel distance along
-    the print direction, handling the *rotated* sensor (travel in Y/Z instead of
-    X/Y) either by picking a fixed axis or by auto-calibrating the direction.
+  * :class:`AdvanceMapper` - the 1D pipeline's mapper: converts a 3-D position
+    into travel distance along the print direction, handling the *rotated*
+    sensor (travel in Y/Z instead of X/Y) either by picking a fixed axis or by
+    auto-calibrating the direction.
+  * :class:`PageMapper` - the 2-D counterpart for freehand page printing:
+    projects a position onto a calibrated page plane (see ``calibration.py``)
+    instead of a single travel scalar.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .calibration import PageCalibration
 from .config import TrackingSettings
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
@@ -115,6 +121,29 @@ class AdvanceMapper:
                   f"[{self._direction[0]:+.2f} {self._direction[1]:+.2f} "
                   f"{self._direction[2]:+.2f}]")
         return self.settings.axis_sign * float(np.dot(pos - self._origin, self._direction))
+
+
+class PageMapper:
+    """
+    Maps a 3-D position (mm) onto a calibrated 2-D page plane -- the page-mode
+    counterpart to :class:`AdvanceMapper`'s single scalar "advance". Wraps a
+    :class:`~printhead.calibration.PageCalibration` fit ahead of time (trace
+    two page edges, see ``calibration.py``) rather than locking anything at
+    pass-start: the calibration's own origin (a traced page corner) already
+    anchors ``(u, v)``, so one calibration stays valid across many passes as
+    long as the paper and cart mount haven't moved.
+    """
+
+    def __init__(self, calibration: PageCalibration):
+        self.calibration = calibration
+
+    def project(self, pos) -> "tuple[float, float, float]":
+        """
+        World position (mm) -> page-plane ``(u_mm, v_mm, z_mm)``. Feed it an
+        already-filtered position (see :class:`PositionFilter`) -- this does
+        no smoothing of its own, only the fixed geometric projection.
+        """
+        return self.calibration.project(pos)
 
 
 # ============================================================================

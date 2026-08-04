@@ -87,13 +87,23 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # --- printing mode -----------------------------------------------------
     g = ap.add_argument_group("printing mode")
-    g.add_argument("--mode", choices=("position", "time"), default="position",
-                   help="position = Amfitrack closed loop (default); "
+    g.add_argument("--mode", choices=("line", "page", "time"), default="line",
+                   help="line = 1D Amfitrack closed loop (default); "
+                        "page = freehand 2D closed loop, needs --page-calibration; "
                         "time = stream one column every --period seconds")
     g.add_argument("--no-track", dest="track", action="store_false",
                    help="Disable tracking (forces time mode)")
     g.add_argument("--period", type=float, default=0.03,
                    help="Seconds per column in time mode (default 0.03)")
+    g.add_argument("--dose-hold-s", type=float, default=None,
+                   help="Page mode: seconds a nozzle must continuously hold a "
+                        "pixel before it counts as printed (default: "
+                        "coverage.DEFAULT_DOSE_HOLD_S, an untuned first guess)")
+    g.add_argument("--progress-json", action="store_true",
+                   help="Page mode: emit one JSON progress event per sample "
+                        "(current u/v/row/col + newly-covered cells) instead "
+                        "of the plain-text status lines -- used by the web UI's "
+                        "live coverage view")
 
     # --- Amfitrack ---------------------------------------------------------
     g = ap.add_argument_group("Amfitrack positioning")
@@ -141,17 +151,24 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Use a fake tracker (no hardware) to test the loop")
 
     # --- timing / profiling ------------------------------------------------
-    g = ap.add_argument_group("timing / profiling (position mode)")
+    g = ap.add_argument_group("timing / profiling (line/page mode)")
     g.add_argument("--profile", action="store_true",
-                   help="Instrument the position pass: log head speed, demanded "
-                        "vs. sustained BLE column rate and write latency, and a "
-                        "verdict on whether columns kept up with the head")
+                   help="Instrument the pass: line mode logs head speed, demanded "
+                        "vs. sustained BLE column rate and write latency; page mode "
+                        "logs the pattern-update rate against --ble-write-ceiling. "
+                        "Either way, ends in a verdict on whether BLE kept up")
     g.add_argument("--profile-csv",
-                   help="Also write a per-column timing log to this CSV path")
+                   help="Also write a per-write timing log to this CSV path")
+    g.add_argument("--ble-write-ceiling", type=float, default=None,
+                   help="Page mode --profile only: known BLE write-without-response "
+                        "ceiling (writes/s) to compare the pattern-update rate "
+                        "against (default: an untuned guess -- measure the real "
+                        "number for your hardware with --ble-benchmark)")
     g.add_argument("--record",
-                   help="Reconstruct what is actually deposited on paper: record "
-                        "every sent frame + head position and save a PNG (intended "
-                        "vs. sent-mapped-to-position) to this path after the pass")
+                   help="Reconstruct what is actually deposited on paper: line mode "
+                        "records every sent frame + head position and compares "
+                        "intended-vs-sent; page mode saves the coverage engine's "
+                        "printed mask directly (intended/covered/missed). PNG")
 
     # --- BLE / run ---------------------------------------------------------
     g = ap.add_argument_group("BLE / run")
@@ -181,6 +198,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--pos-json", action="store_true",
                    help="With --pos: emit one JSON object per sample (newline "
                         "terminated) instead of the live line (used by the web UI)")
+    g.add_argument("--page-calibration", metavar="PATH",
+                   help="With --pos: load a page calibration JSON (see "
+                        "printhead.calibration.PageCalibration) and also report "
+                        "live page-plane u/v/z, to sanity-check a calibration "
+                        "against known hand motion before printing with it")
     mx.add_argument("--list-nodes", action="store_true",
                     help="List the Amfitrack USB nodes (name/uuid/tx_id) and exit")
     mx.add_argument("--scan-ble", action="store_true",
@@ -203,6 +225,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--nozzle-block-size and --nozzle-order must be given together")
     if args.nozzle_block_size is not None and args.nozzle_block_size <= 0:
         ap.error("--nozzle-block-size must be a positive integer")
+    if not _debug_mode(args) and args.track and args.mode == "page" and not args.page_calibration:
+        ap.error("--mode page requires --page-calibration PATH (trace the page "
+                 "edges with calibration.calibrate_page() first, then save())")
     return args
 
 
@@ -272,16 +297,37 @@ def build_nozzle_map(args: argparse.Namespace) -> Optional[NozzleMapSettings]:
     return NozzleMapSettings(block_size=args.nozzle_block_size, order=order)
 
 
+def build_page_calibration(args: argparse.Namespace):
+    """Load the PageCalibration named by --page-calibration, or None if it
+    was not given (only --mode page requires it -- see parse_args)."""
+    if not args.page_calibration:
+        return None
+    from .calibration import PageCalibration
+    try:
+        return PageCalibration.load(args.page_calibration)
+    except Exception as exc:
+        raise SystemExit(f"printhead: error: cannot load page calibration "
+                         f"'{args.page_calibration}': {exc}")
+
+
 def build_controller(args: argparse.Namespace) -> PrintController:
     tracking = build_tracking(args)
     ink, label = build_ink(args, tracking.mm_per_column)
     render = RenderSettings(text=label)
+    kwargs = {}
+    if args.dose_hold_s is not None:
+        kwargs["dose_hold_s"] = args.dose_hold_s
+    if args.ble_write_ceiling is not None:
+        kwargs["ble_write_ceiling"] = args.ble_write_ceiling
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,
                            nozzle_map=build_nozzle_map(args),
                            profile=args.profile, profile_csv=args.profile_csv,
-                           record=args.record)
+                           record=args.record,
+                           page_calibration=build_page_calibration(args),
+                           progress_json=args.progress_json,
+                           **kwargs)
 
 
 def _run_debug(args: argparse.Namespace) -> None:
@@ -289,7 +335,8 @@ def _run_debug(args: argparse.Namespace) -> None:
     from . import diagnostics
     if args.pos:
         asyncio.run(diagnostics.monitor_position(
-            build_tracking(args), args.simulate, ndjson=args.pos_json))
+            build_tracking(args), args.simulate, ndjson=args.pos_json,
+            page_calibration_path=args.page_calibration))
     elif args.list_nodes:
         diagnostics.list_nodes(build_tracking(args))
     elif args.scan_ble:

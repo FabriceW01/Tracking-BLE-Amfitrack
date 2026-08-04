@@ -20,13 +20,16 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import warnings
 from pathlib import Path
 from typing import List, Optional, Set
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
+from ..calibration import CalibrationAngleWarning, PageCalibration, calibrate_page
 from .runner import CommandProcess
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -38,17 +41,97 @@ def _try_parse_json(line: str) -> Optional[dict]:
     """Parse one subprocess stdout line as NDJSON, or return ``None`` if it
     isn't valid JSON (a plain log line). Shared by the sensor stream and the
     action-run handlers below, which both need to tell a structured progress
-    event -- today just ``{"event": "position", ...}`` from ``--pos-json`` --
-    apart from ordinary log text. A print pass emitting the same event, once
-    page mode adds one, is picked up by ``run_action`` for free."""
+    event apart from ordinary log text: ``{"event": "position", ...}`` from
+    ``--pos-json``, or ``{"event": "coverage"|"coverage_start"|"coverage_done",
+    ...}`` from a page-mode pass run with ``--progress-json`` (see
+    ``PrintController._print_freehand_pass``)."""
     try:
         return json.loads(line)
     except (json.JSONDecodeError, ValueError):
         return None
 
 
+_COVERAGE_EVENTS = {"coverage_start", "coverage", "coverage_done"}
+
+
+# ================================================================ calibration
+# Plain functions rather than methods on Hub: calibration is a pure
+# computation over samples the browser already buffered from the live
+# --pos-json sensor stream (see the Calibration tab), not a managed
+# subprocess, so it needs none of Hub's process/broadcast state. Factored out
+# from the @app.post handlers below so they're testable without spinning up
+# FastAPI or a test HTTP client -- this project's tests are all plain
+# functions, no pytest/httpx.
+def compute_calibration(col_samples, row_samples,
+                        sheet_width_mm: Optional[float] = None,
+                        sheet_height_mm: Optional[float] = None) -> dict:
+    """Business logic behind ``POST /api/calibration/compute``."""
+    try:
+        col = np.asarray(col_samples, dtype=float)
+        row = np.asarray(row_samples, dtype=float)
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "error": f"invalid samples: {exc}"}
+
+    warning_msg = None
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", CalibrationAngleWarning)
+            cal = calibrate_page(col, row, sheet_width_mm=sheet_width_mm,
+                                 sheet_height_mm=sheet_height_mm)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    for w in caught:
+        if issubclass(w.category, CalibrationAngleWarning):
+            warning_msg = str(w.message)
+
+    return {"ok": True, "angle_error_deg": cal.angle_error_deg,
+            "scale_col": cal.scale_col, "scale_row": cal.scale_row,
+            "warning": warning_msg, "calibration": cal.to_dict()}
+
+
+def save_calibration(calibration: dict, path: str) -> dict:
+    """Business logic behind ``POST /api/calibration/save``. ``calibration``
+    is the ``calibration`` dict a prior ``compute_calibration()`` call
+    returned -- the browser round-trips it rather than the server holding
+    calibration state between requests."""
+    try:
+        PageCalibration.from_dict(calibration).save(path)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "path": path}
+
+
+def load_calibration(path: str) -> dict:
+    """Business logic behind ``POST /api/calibration/load``: read back a
+    previously saved calibration's summary, e.g. to confirm one before
+    printing with it."""
+    try:
+        cal = PageCalibration.load(path)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "angle_error_deg": cal.angle_error_deg,
+            "scale_col": cal.scale_col, "scale_row": cal.scale_row,
+            "calibration": cal.to_dict()}
+
+
 class RunRequest(BaseModel):
     args: List[str] = []
+
+
+class CalibrationComputeRequest(BaseModel):
+    col_samples: List[List[float]]
+    row_samples: List[List[float]]
+    sheet_width_mm: Optional[float] = None
+    sheet_height_mm: Optional[float] = None
+
+
+class CalibrationSaveRequest(BaseModel):
+    calibration: dict
+    path: str
+
+
+class CalibrationLoadRequest(BaseModel):
+    path: str
 
 
 class Hub:
@@ -97,6 +180,8 @@ class Hub:
             obj = _try_parse_json(line)
             if isinstance(obj, dict) and obj.get("event") == "position":
                 await self.broadcast({"type": "position", **obj})
+            elif isinstance(obj, dict) and obj.get("event") in _COVERAGE_EVENTS:
+                await self.broadcast({"type": "coverage_event", **obj})
             else:
                 await self.broadcast({"type": "log", "stream": "action", "line": line})
 
@@ -250,6 +335,22 @@ async def record_png():
         raise HTTPException(status_code=404, detail="no recording yet")
     return FileResponse(str(RECORD_PATH), media_type="image/png",
                         headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/calibration/compute")
+async def calibration_compute_endpoint(req: CalibrationComputeRequest) -> dict:
+    return compute_calibration(req.col_samples, req.row_samples,
+                               req.sheet_width_mm, req.sheet_height_mm)
+
+
+@app.post("/api/calibration/save")
+async def calibration_save_endpoint(req: CalibrationSaveRequest) -> dict:
+    return save_calibration(req.calibration, req.path)
+
+
+@app.post("/api/calibration/load")
+async def calibration_load_endpoint(req: CalibrationLoadRequest) -> dict:
+    return load_calibration(req.path)
 
 
 @app.post("/api/sensor/start")
