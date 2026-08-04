@@ -181,6 +181,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--pos-json", action="store_true",
                    help="With --pos: emit one JSON object per sample (newline "
                         "terminated) instead of the live line (used by the web UI)")
+    g.add_argument("--page-calibration", metavar="PATH",
+                   help="With --pos: load a page calibration JSON (see "
+                        "printhead.calibration.PageCalibration) and also report "
+                        "live page-plane u/v/z, to sanity-check a calibration "
+                        "against known hand motion before printing with it")
     mx.add_argument("--list-nodes", action="store_true",
                     help="List the Amfitrack USB nodes (name/uuid/tx_id) and exit")
     mx.add_argument("--scan-ble", action="store_true",
@@ -289,7 +294,8 @@ def _run_debug(args: argparse.Namespace) -> None:
     from . import diagnostics
     if args.pos:
         asyncio.run(diagnostics.monitor_position(
-            build_tracking(args), args.simulate, ndjson=args.pos_json))
+            build_tracking(args), args.simulate, ndjson=args.pos_json,
+            page_calibration_path=args.page_calibration))
     elif args.list_nodes:
         diagnostics.list_nodes(build_tracking(args))
     elif args.scan_ble:

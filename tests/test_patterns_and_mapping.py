@@ -156,6 +156,13 @@ def test_cli_accepts_calibrate_and_pattern():
     assert args.pattern == "solid"
 
 
+def test_cli_page_calibration_flag_defaults_to_none_and_parses():
+    args = cli.parse_args(["--pos", "--simulate"])
+    assert args.page_calibration is None
+    args = cli.parse_args(["--pos", "--simulate", "--page-calibration", "cal.json"])
+    assert args.page_calibration == "cal.json"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:
