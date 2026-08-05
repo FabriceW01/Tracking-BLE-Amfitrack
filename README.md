@@ -54,10 +54,11 @@ python main.py "Hallo" --mode time --period 0.03
 **Experimentell: `--mode page`** — freihändiges 2D-Drucken (Wagen frei über die
 Seite bewegen, nicht nur eine Richtung). Braucht eine vorher erstellte
 `PageCalibration` (`printhead/calibration.py`, `--page-calibration PATH`) — dafür
-gibt es noch **keinen** CLI-Befehl, der Kanten abfährt und speichert (kommt mit
-der Kalibrierungs-UI). Bisher nur an synthetischen Daten getestet, noch nicht an
-echter Hardware. Details: `README_BLE_INTERFACE.md` im Firmware-Repo (Abschnitt
-"Page Mode").
+im **Calibration**-Tab der Web-UI zwei angrenzende Seitenkanten mit dem
+Sensor abfahren, "Compute calibration" berechnen lassen und speichern; die
+gespeicherte Datei dann per `--page-calibration PATH` laden. Bisher nur an
+synthetischen Daten getestet, noch nicht an echter Hardware. Details:
+`README_BLE_INTERFACE.md` im Firmware-Repo (Abschnitt "Page Mode").
 
 ---
 

@@ -27,7 +27,13 @@ from .ble_client import PrintheadBLE
 from .calibration import PageCalibration
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
 from .coverage import DEFAULT_DOSE_HOLD_S, CoverageEngine
-from .geometry import BLANK_FRAME, NOZZLE_PITCH_MM, NUM_NOZZLES
+from .geometry import (
+    BLANK_FRAME,
+    NOZZLE_MODE_LINE,
+    NOZZLE_MODE_PAGE,
+    NOZZLE_PITCH_MM,
+    NUM_NOZZLES,
+)
 from .nozzle_map import remap_rows
 from .pattern_sender import PatternSender
 from .profiling import DEFAULT_BLE_WRITE_CEILING_PER_S
@@ -46,6 +52,7 @@ class _NullPrinthead:
         self.column_writes = 0
         self.blank_writes = 0
         self.pattern_writes = 0
+        self.print_mode = None
 
     async def write_column(self, frame):
         self.column_writes += 1
@@ -58,6 +65,10 @@ class _NullPrinthead:
 
     async def write_pattern(self, pattern):
         self.pattern_writes += 1
+
+    async def set_print_mode(self, mode, required: bool = True):
+        self.print_mode = mode
+        return True
 
 
 class _ImmediateEvent:
@@ -173,6 +184,19 @@ class PrintController:
 
         async with PrintheadBLE(self.ble) as ble:
             await ble.start_notifications(on_start, on_startpoint)
+
+            # The firmware defaults to (and silently stays in) line mode, so
+            # the mode matching this pass must be selected explicitly here --
+            # otherwise every write below is dosed with the wrong model
+            # (see ble_client.set_print_mode). Page mode is a hard
+            # requirement: a silently-wrong dose model is worse than not
+            # printing. Line/time mode is best-effort: it is also the
+            # firmware's own default, so older firmware without this
+            # characteristic still behaves correctly without it.
+            if mode == "page":
+                await ble.set_print_mode(NOZZLE_MODE_PAGE, required=True)
+            else:
+                await ble.set_print_mode(NOZZLE_MODE_LINE, required=False)
 
             if use_tracker:
                 tracker = make_tracker(self.tracking, self.simulate)
