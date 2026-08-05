@@ -20,7 +20,7 @@ import numpy as np
 from .ble_client import PrintheadBLE
 from .calibration import PageCalibration
 from .config import BleSettings, NozzleMapSettings, TrackingSettings
-from .geometry import BLANK_FRAME, IMAGE_HEIGHT
+from .geometry import BLANK_FRAME, IMAGE_HEIGHT, NOZZLE_MODE_LINE
 from .nozzle_map import remap_rows
 from .rendering import frames_from_ink
 from .tracking import _AXIS_INDEX, PageMapper, PositionFilter, make_tracker
@@ -199,12 +199,12 @@ async def scan_ble(ble: BleSettings) -> None:
 # ============================================================================
 async def nozzle_test(ble: BleSettings, nozzle_map: Optional[NozzleMapSettings] = None,
                       on_seconds: float = 2.0, sweep_step: float = 0.02) -> None:
-    """All nozzles on briefly, then a single nozzle swept down all 164 rows.
+    """All nozzles on briefly, then a single nozzle swept down all 152 rows.
 
     If ``nozzle_map`` is given, it is applied first, so the sweep lets you
     visually confirm a block remap fixes the physical firing order."""
     all_on_ink = np.ones((IMAGE_HEIGHT, 1), dtype=bool)
-    sweep_ink = np.eye(IMAGE_HEIGHT, dtype=bool)      # 164 single-nozzle frames
+    sweep_ink = np.eye(IMAGE_HEIGHT, dtype=bool)      # 152 single-nozzle frames
     if nozzle_map is not None and nozzle_map.block_size:
         all_on_ink = remap_rows(all_on_ink, nozzle_map.block_size, nozzle_map.order)
         sweep_ink = remap_rows(sweep_ink, nozzle_map.block_size, nozzle_map.order)
@@ -213,6 +213,15 @@ async def nozzle_test(ble: BleSettings, nozzle_map: Optional[NozzleMapSettings] 
 
     try:
         async with PrintheadBLE(ble) as client:
+            # This tool bypasses _run_ble(), so nothing else pins the firmware to
+            # line mode here. If it is still in page mode from an earlier --mode
+            # page run, the "all on" write below would not fire 3 times like line
+            # mode intends -- it becomes a held pattern re-fired every
+            # PATTERN_STRIDE ticks, i.e. ~120 times over on_seconds=2.0s, dumping
+            # ~40x the intended ink through all nozzles at once. required=False:
+            # this must still run against older firmware without MODE_UUID, where
+            # line mode is the only behaviour anyway.
+            await client.set_print_mode(NOZZLE_MODE_LINE, required=False)
             print(f"All {IMAGE_HEIGHT} nozzles ON for {on_seconds:.1f}s ...")
             await client.write_column(all_on)
             await asyncio.sleep(on_seconds)
@@ -247,6 +256,8 @@ async def ble_benchmark(ble: BleSettings, tracking: TrackingSettings,
     mmpc = tracking.mm_per_column
     try:
         async with PrintheadBLE(ble) as client:
+            # Measure in a known mode, so the reported cols/s means something.
+            await client.set_print_mode(NOZZLE_MODE_LINE, required=False)
             print(f"Throughput: sending {n_fast} frames (no response) ...")
             t0 = loop.time()
             for _ in range(n_fast):

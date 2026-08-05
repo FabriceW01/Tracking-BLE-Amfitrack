@@ -2,7 +2,7 @@
 
 Ansteuerung der Düsen einer **HP302-Druckerpatrone** über einen ESP32-BLE-Server
 („PrintheadBLE"), erweitert um eine **Positionserkennung mit dem Amfitrack-System**.
-Text wird in ein 164 px hohes Schwarz/Weiß-Bild gerendert und spaltenweise gedruckt.
+Text wird in ein 152 px hohes Schwarz/Weiß-Bild gerendert und spaltenweise gedruckt.
 
 Statt rein zeitgesteuert (eine Spalte pro `--period`) kann der Druck jetzt der
 **real gemessenen Position** des Druckkopfs folgen (Closed-Loop). Damit ist die
@@ -14,9 +14,9 @@ horizontale Skalierung unabhängig von der Verfahrgeschwindigkeit.
 
 ```
 printhead/
-├── geometry.py     BLE-UUIDs + Druckkopf-Geometrie (Nozzles 2..165, 164 px, 21-Byte-Frames)
+├── geometry.py     BLE-UUIDs + Druckkopf-Geometrie (Nozzles 8..159, 152 px, 19-Byte-Frames)
 ├── config.py       Einstellungen als dataclasses (RenderSettings, BleSettings, TrackingSettings)
-├── rendering.py    Text → 164-px-Ink-Maske → 21-Byte-Frames (vektorisiert via numpy.packbits)
+├── rendering.py    Text → 152-px-Ink-Maske → 19-Byte-Frames (vektorisiert via numpy.packbits)
 ├── ble_client.py   Async-BLE-Transport (bleak): Connect, Notify, Spalten/Blank schreiben
 ├── tracking.py     Amfitrack-Tracker + Achsen-Remapping/Projektion + Simulator
 ├── controller.py   Orchestriert Positions- und Zeit-Modus
@@ -100,7 +100,7 @@ Alle Optionen des ursprünglichen Skripts bleiben erhalten:
 | `--flip-y` | vertikal spiegeln (falls kopfüber) |
 | `--mirror-x` | Spaltenreihenfolge umkehren (falls gespiegelt) |
 
-Die Höhe ist immer exakt 164 px (Nozzles 2..165); die Breite ergibt sich aus dem Text.
+Die Höhe ist immer exakt 152 px (Nozzles 8..159); die Breite ergibt sich aus dem Text.
 
 ## Positionserkennung (Amfitrack)
 
@@ -226,8 +226,8 @@ in Blöcken der angegebenen Größe gemäß der neuen Reihenfolge umsortiert.
 ursprüngliche Position dort landen soll. Beispiel: Block-Standardreihenfolge
 `1,2,3,4,5` wird zu `2,3,4,1,5` → Slot 1 bekommt, was ursprünglich Düse 2 war,
 Slot 2 bekommt Düse 3, Slot 3 bekommt Düse 4, Slot 4 bekommt Düse 1, Slot 5 bleibt.
-Das Muster wiederholt sich für alle 164 Zeilen; passt die Blockgröße nicht exakt
-(z. B. 164 nicht durch 5 teilbar), bleibt der letzte unvollständige Block
+Das Muster wiederholt sich für alle 152 Zeilen; passt die Blockgröße nicht exakt
+(z. B. 152 nicht durch 5 teilbar), bleibt der letzte unvollständige Block
 unverändert (eine Meldung weist darauf hin).
 
 ```bash
@@ -253,7 +253,7 @@ statt eines Tracebacks.
 | `--pos` | Gibt die **Live-Position** vom Amfitrack aus: `x/y/z` (mm) + Verfahr-Wert entlang `--advance-axis` + Spaltenindex. Zugleich Kalibrierhilfe für Achse und `--mm-per-column`. Ctrl+C beendet. |
 | `--list-nodes` | Verbindet zum USB-Dongle und listet alle Nodes (`name`/`uuid`/`tx_id`), markiert die als „Sensor" erkannten. |
 | `--scan-ble` | Scannt BLE und listet Geräte (`address` + `name`) – zum Finden der PrintheadBLE-Adresse (nutzbar mit `--address`). |
-| `--nozzle-test` | Feuert per BLE ein Testmuster (alle 164 Düsen kurz an → Einzeldüse über alle Zeilen → Blank), um die Patrone zu prüfen. Berücksichtigt `--nozzle-block-size`/`--nozzle-order`, falls gesetzt. |
+| `--nozzle-test` | Feuert per BLE ein Testmuster (alle 152 Düsen kurz an → Einzeldüse über alle Zeilen → Blank), um die Patrone zu prüfen. Berücksichtigt `--nozzle-block-size`/`--nozzle-order`, falls gesetzt. |
 | `--ble-benchmark` | Misst den **BLE-Durchsatz** (Frames/s ohne Response) und die **Round-Trip-Latenz** (Frames mit Response) – die Obergrenze, ab der der Druck geschwindigkeitsabhängig wird. |
 
 ```bash

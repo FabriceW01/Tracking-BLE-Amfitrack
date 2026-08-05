@@ -163,6 +163,29 @@ def test_cli_page_calibration_flag_defaults_to_none_and_parses():
     assert args.page_calibration == "cal.json"
 
 
+def test_cli_rejects_nozzle_block_remap_in_page_mode():
+    # Page mode's nozzle-to-row alignment slides with vertical travel (see
+    # nozzle_map.py's docstring), so the block permutation -- indexed by fixed
+    # image row -- is only correct at multiples of the block size. Rejected
+    # outright rather than silently producing a wrong print most of the time.
+    try:
+        cli.parse_args(["Hi", "--mode", "page", "--page-calibration", "cal.json",
+                        "--nozzle-block-size", "5", "--nozzle-order", "2,3,4,1,5",
+                        "--dry-run"])
+        assert False, "expected SystemExit"
+    except SystemExit:
+        pass
+
+
+def test_cli_still_accepts_nozzle_block_remap_in_line_mode():
+    # The guard above must not be over-broad: the same flags are fine in line
+    # mode (the default), where the remap is geometrically correct.
+    args = cli.parse_args(["Hi", "--nozzle-block-size", "5",
+                           "--nozzle-order", "2,3,4,1,5", "--dry-run"])
+    assert args.nozzle_block_size == 5
+    assert args.nozzle_order == "2,3,4,1,5"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:

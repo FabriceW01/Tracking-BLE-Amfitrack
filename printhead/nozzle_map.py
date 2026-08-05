@@ -5,6 +5,14 @@ Nozzle block remapping
 If the physical nozzles are wired in repeating blocks whose firing order does
 not match their physical (vertical) order, this reorders the ink rows before
 framing so the printed image still comes out visually correct.
+
+Line-mode only: the permutation is applied at fixed array indices, which only
+matches physical nozzle position because line mode's frame bit ``j`` always
+carries image row ``j``. Page mode's nozzle-to-row alignment slides with
+vertical travel (nozzle ``p`` reads ``ink[base_row + p]`` for a moving
+``base_row``), so the same index-based permutation would only land correctly
+when ``base_row`` happens to be a multiple of the block size. ``cli.py``
+rejects the combination outright rather than half-supporting it.
 """
 
 from __future__ import annotations
@@ -40,7 +48,7 @@ def remap_rows(ink: np.ndarray, block_size: int, order: List[int]) -> np.ndarray
     Reorder ``ink`` rows in repeating blocks of ``block_size``:
     ``new[block_start + i] = old[block_start + order[i]]``.
 
-    A trailing partial block (e.g. 164 rows not divisible by ``block_size``) is
+    A trailing partial block (e.g. 152 rows not divisible by ``block_size``) is
     left unchanged, since the permutation does not fully apply to it.
     """
     h = ink.shape[0]

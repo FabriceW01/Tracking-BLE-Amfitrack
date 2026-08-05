@@ -15,7 +15,7 @@ from typing import List, Optional
 
 @dataclass
 class RenderSettings:
-    """Everything needed to turn a text string into a 164 px-tall ink mask."""
+    """Everything needed to turn a text string into a 152 px-tall ink mask."""
     text: str
     font: Optional[str] = None
     render_size: int = 220          # font pixel size for the initial render
