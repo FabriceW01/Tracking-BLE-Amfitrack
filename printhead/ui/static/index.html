@@ -177,8 +177,10 @@
         </div>
         <div class="row" id="patternKnobs">
           <div class="field"><label>Length (mm)</label><input id="pattern_length_mm" type="number" value="200"></div>
+          <div class="field page-only" style="display:none"><label>Height (mm)</label><input id="pattern_height_mm" type="number" placeholder="15.1 (default, = IMAGE_HEIGHT rows)" title="Page mode only: total physical height of the pattern; line/time mode packs fixed frames that need exactly IMAGE_HEIGHT rows."></div>
           <div class="field"><label>Square (mm)</label><input id="pattern_square_mm" type="number" value="10"></div>
           <div class="field"><label>Square (rows)</label><input id="pattern_square_rows" type="number" value="20"></div>
+          <div class="field"><label>Square height (mm)</label><input id="pattern_square_height_mm" type="number" placeholder="overrides Square (rows)" title="Row period in mm for checkerboard/h-stripes; a raw row is only ~0.1mm, so this is usually what you want for actually-square tiles."></div>
           <div class="field"><label>Ruler major / minor (mm)</label>
             <div style="display:flex;gap:8px"><input id="calib_major_mm" type="number" value="10"><input id="calib_minor_mm" type="number" value="1"></div></div>
         </div>
@@ -196,7 +198,7 @@
         </div>
         <div class="hint page-only" style="display:none">Build a page calibration on the <b>Calibration</b> tab first, or point this at a previously saved one.</div>
         <div class="row line-only">
-          <div class="field"><label>Advance axis</label><select id="advance_axis"><option>x</option><option selected>y</option><option>z</option></select></div>
+          <div class="field"><label>Advance axis</label><select id="advance_axis"><option selected>x</option><option>y</option><option>z</option></select></div>
           <div class="field"><label>Axis sign</label><select id="axis_sign"><option value="1">+1</option><option value="-1">−1</option></select></div>
         </div>
         <div class="row">
@@ -382,7 +384,7 @@ function trackingArgs(a){
     pushIf(a, !!val('page_calibration'), '--page-calibration', val('page_calibration'));
     pushIf(a, !!val('dose_hold_s'), '--dose-hold-s', val('dose_hold_s'));
   } else {
-    pushIf(a, val('advance_axis')!=='y', '--advance-axis', val('advance_axis'));
+    pushIf(a, val('advance_axis')!=='x', '--advance-axis', val('advance_axis'));
     pushIf(a, val('axis_sign')!=='1', '--axis-sign', val('axis_sign'));
     pushIf(a, chk('auto_calibrate'), '--auto-calibrate');
     pushIf(a, chk('auto_calibrate') && val('calib_distance')!=='5', '--calib-distance', val('calib_distance'));
@@ -408,10 +410,13 @@ function renderArgs(a){
     pushIf(a, val('calib_major_mm')!=='10','--calib-major-mm',val('calib_major_mm'));
     pushIf(a, val('calib_minor_mm')!=='1','--calib-minor-mm',val('calib_minor_mm'));
     pushIf(a, val('pattern_length_mm')!=='200','--pattern-length-mm',val('pattern_length_mm'));
+    pushIf(a, isPageMode() && !!val('pattern_height_mm'),'--pattern-height-mm',val('pattern_height_mm'));
   } else if(src()==='pattern'){ a.push('--pattern', val('pattern'));
     pushIf(a, val('pattern_length_mm')!=='200','--pattern-length-mm',val('pattern_length_mm'));
+    pushIf(a, isPageMode() && !!val('pattern_height_mm'),'--pattern-height-mm',val('pattern_height_mm'));
     pushIf(a, val('pattern_square_mm')!=='10','--pattern-square-mm',val('pattern_square_mm'));
     pushIf(a, val('pattern_square_rows')!=='20','--pattern-square-rows',val('pattern_square_rows'));
+    pushIf(a, !!val('pattern_square_height_mm'),'--pattern-square-height-mm',val('pattern_square_height_mm'));
   } else {
     a.push(val('text') || 'Text');
     pushIf(a, !!val('font'), '--font', val('font'));
@@ -452,7 +457,7 @@ function diagArgs(flag){
 function sensorArgs(){
   const a=[];
   pushIf(a, chk('gSimulate'),'--simulate');
-  pushIf(a, val('advance_axis')!=='y','--advance-axis',val('advance_axis'));
+  pushIf(a, val('advance_axis')!=='x','--advance-axis',val('advance_axis'));
   pushIf(a, val('axis_sign')!=='1','--axis-sign',val('axis_sign'));
   if(val('dpi')) a.push('--dpi', val('dpi')); else pushIf(a, val('mm_per_column')!=='0.2','--mm-per-column',val('mm_per_column'));
   pushIf(a, val('vendor_id')!=='0x0C17','--vendor-id',val('vendor_id'));

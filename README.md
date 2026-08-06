@@ -72,6 +72,29 @@ Vor dem eigentlichen Druck mit `--pos --page-calibration PATH` das live
 Wagen tatsächlich innerhalb der Seite (und nicht z. B. am falschen Rand oder
 mit vertauschten Achsen) unterwegs ist.
 
+**Größeres, richtig proportioniertes Testmuster in `--mode page`:** Genau weil
+`--mode page` nicht auf die ~15 mm der 152 Düsen begrenzt ist, lohnt sich für
+den Bring-up ein deutlich größeres `--calibrate`/`--pattern`-Bild als die
+sonst übliche `IMAGE_HEIGHT`-Zeilenzahl:
+
+| Option | Bedeutung |
+|---|---|
+| `--pattern-height-mm MM` | Physische Gesamthöhe von `--calibrate`/`--pattern` in mm (`rows = height_mm / NOZZLE_PITCH_MM`). Nur mit `--mode page` gültig — im Zeilen-/Zeit-Modus packt `frames_from_ink()` feste Frames mit genau `IMAGE_HEIGHT` Zeilen, eine andere Höhe wird dort mit einem klaren Fehler abgelehnt. Ohne diese Option bleibt das Muster bei `IMAGE_HEIGHT` Zeilen (~15 mm) gedeckelt. |
+| `--pattern-square-height-mm MM` | Zeilenperiode in mm für checkerboard/h-stripes, überschreibt `--pattern-square-rows` (`square_rows = v / NOZZLE_PITCH_MM`). |
+
+⚠️ **Seitenverhältnis-Falle:** Eine Bildzeile ist nur **~0.0993 mm** hoch
+(`NOZZLE_PITCH_MM`). `--pattern-square-rows 20` (der Default) ist damit nur
+knapp **2 mm** hoch, während `--pattern-square-mm 10` (der Default) **10 mm**
+breit ist — ein 5:1-Streifen statt eines Quadrats. Für tatsächlich quadratische
+Kacheln `--pattern-square-height-mm` statt `--pattern-square-rows` verwenden.
+
+```bash
+# Großes Schachbrett in Seiten-Modus: 200mm x 100mm Gesamtfläche, 10mm-Quadrate.
+python main.py --pattern checkerboard --mode page --page-calibration page_calibration.json \
+    --pattern-length-mm 200 --pattern-height-mm 100 \
+    --pattern-square-mm 10 --pattern-square-height-mm 10
+```
+
 ---
 
 ## Web-UI
@@ -139,15 +162,15 @@ Drucks jederzeit** den Nullpunkt auf die **aktuelle Position** und setzt die Fro
 zurück – der Druck beginnt also wieder bei Spalte 0, ohne dass ein neuer START-Druck
 nötig ist.
 
-### Verdreht eingebauter Sensor
+### Verfahrachse / verdreht eingebauter Sensor
 
-Der Sensor ist so verbaut, dass die Bewegung in **Y/Z statt X/Y** stattfindet.
-Es gibt zwei Wege, das zu behandeln:
+Die tatsächliche Verfahrachse dieses Aufbaus ist **X** (Default). Ist der Sensor
+auf einem Aufbau verdreht verbaut, gibt es zwei Wege, das zu behandeln:
 
 **1. Feste Achse (Standard)** – die Verfahrrichtung ist eine wählbare Achse:
 
 ```bash
-python main.py "Text" --advance-axis y          # Default (Bewegung entlang Y)
+python main.py "Text" --advance-axis x          # Default (Bewegung entlang X)
 python main.py "Text" --advance-axis z --axis-sign -1
 ```
 
@@ -225,7 +248,7 @@ python main.py --pattern diagonal --mode line --preview diag.png
 |---|---|
 | `--pattern-length-mm` | Physische Länge des Musters in mm (Default 200) |
 | `--pattern-square-mm` | Kachel-/Streifenbreite in mm (checkerboard, v-stripes, diagonal-Periode) |
-| `--pattern-square-rows` | Kachel-/Streifenhöhe in Zeilen (checkerboard, h-stripes) |
+| `--pattern-square-rows` | Kachel-/Streifenhöhe in Zeilen (checkerboard, h-stripes) — Achtung Seitenverhältnis, siehe `--pattern-square-height-mm` im `--mode page`-Abschnitt oben |
 
 ## Düsen-Mapping
 
@@ -270,7 +293,7 @@ statt eines Tracebacks.
 
 ```bash
 # Live-Position anschauen (Achse/Skalierung kalibrieren):
-python main.py --pos --advance-axis y --mm-per-column 0.2
+python main.py --pos --advance-axis x --mm-per-column 0.2
 python main.py --pos --simulate                  # ohne Hardware
 
 # Amfitrack-Nodes / BLE-Geräte auflisten:

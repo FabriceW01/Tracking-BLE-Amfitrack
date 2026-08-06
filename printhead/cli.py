@@ -16,7 +16,7 @@ from typing import Optional
 from . import patterns
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
 from .controller import PrintController
-from .geometry import DEVICE_NAME, IMAGE_HEIGHT
+from .geometry import DEVICE_NAME, IMAGE_HEIGHT, NOZZLE_PITCH_MM
 from .nozzle_map import parse_order
 from .rendering import render_text
 
@@ -70,6 +70,18 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(default 10)")
     g.add_argument("--pattern-square-rows", type=int, default=20,
                    help="Row period for checkerboard/h-stripes (default 20)")
+    g.add_argument("--pattern-height-mm", type=float, default=None,
+                   help="Total physical height of --calibrate/--pattern in mm "
+                        "(rows = max(1, round(height_mm / NOZZLE_PITCH_MM))). "
+                        "Page mode only: line/time mode packs fixed frames via "
+                        "frames_from_ink(), which requires exactly IMAGE_HEIGHT "
+                        "rows, so this is rejected outside --mode page. Without "
+                        "it the pattern is capped at IMAGE_HEIGHT rows (~15mm).")
+    g.add_argument("--pattern-square-height-mm", type=float, default=None,
+                   help="Row period in mm for checkerboard/h-stripes; overrides "
+                        "--pattern-square-rows (square_rows = max(1, round(v / "
+                        "NOZZLE_PITCH_MM))). A raw row is only ~0.1mm, so this "
+                        "is usually what you want for actually-square tiles.")
     g.add_argument("--calib-major-mm", type=float, default=10.0,
                    help="Distance between full-height ruler ticks (default 10 = 1cm)")
     g.add_argument("--calib-minor-mm", type=float, default=1.0,
@@ -107,9 +119,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # --- Amfitrack ---------------------------------------------------------
     g = ap.add_argument_group("Amfitrack positioning")
-    g.add_argument("--advance-axis", choices=("x", "y", "z"), default="y",
-                   help="Sensor axis that is the travel direction. Default y "
-                        "because the sensor is mounted rotated (travel in Y/Z).")
+    g.add_argument("--advance-axis", choices=("x", "y", "z"), default="x",
+                   help="Sensor axis that is the travel direction. Default x, "
+                        "the rig's measured travel axis; change this if your "
+                        "sensor is mounted rotated relative to that.")
     g.add_argument("--axis-sign", type=int, choices=(1, -1), default=1,
                    help="Flip the travel direction (default 1)")
     g.add_argument("--auto-calibrate", action="store_true",
@@ -235,6 +248,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     if not _debug_mode(args) and args.track and args.mode == "page" and not args.page_calibration:
         ap.error("--mode page requires --page-calibration PATH (trace the page "
                  "edges with calibration.calibrate_page() first, then save())")
+    if (not _debug_mode(args) and args.track and args.mode != "page"
+            and args.pattern_height_mm is not None):
+        ap.error("--pattern-height-mm is only valid with --mode page: line/time "
+                 "mode packs fixed frames via frames_from_ink(), which requires "
+                 "exactly IMAGE_HEIGHT rows, so the pattern height can't be "
+                 "changed there")
     return args
 
 
@@ -272,16 +291,32 @@ def build_tracking(args: argparse.Namespace) -> TrackingSettings:
 
 def build_ink(args: argparse.Namespace, mm_per_column: float):
     """Return (ink, label) from whichever content source was selected."""
+    # --pattern-height-mm (page mode only, see parse_args) picks the row count;
+    # otherwise every generator defaults to IMAGE_HEIGHT, same as text.
+    rows = IMAGE_HEIGHT
+    if args.pattern_height_mm is not None:
+        rows = max(1, round(args.pattern_height_mm / NOZZLE_PITCH_MM))
+    height_mm = rows * NOZZLE_PITCH_MM
+
+    # --pattern-square-height-mm is just a mm-based alternative unit for
+    # --pattern-square-rows -- a raw row is only ~0.1mm, so mm is usually what
+    # you actually want for a square tile.
+    square_rows = args.pattern_square_rows
+    if args.pattern_square_height_mm is not None:
+        square_rows = max(1, round(args.pattern_square_height_mm / NOZZLE_PITCH_MM))
+
     if args.calibrate:
         ink = patterns.ruler_pattern(
             args.pattern_length_mm, mm_per_column,
-            major_every_mm=args.calib_major_mm, minor_every_mm=args.calib_minor_mm)
-        return ink, f"[calibrate {args.pattern_length_mm:.0f}mm]"
+            major_every_mm=args.calib_major_mm, minor_every_mm=args.calib_minor_mm,
+            rows=rows)
+        return ink, f"[calibrate {args.pattern_length_mm:.0f}mm x {height_mm:.0f}mm]"
     if args.pattern:
         ink = patterns.PATTERNS[args.pattern](
             args.pattern_length_mm, mm_per_column,
-            square_mm=args.pattern_square_mm, square_rows=args.pattern_square_rows)
-        return ink, f"[pattern {args.pattern} {args.pattern_length_mm:.0f}mm]"
+            square_mm=args.pattern_square_mm, square_rows=square_rows,
+            rows=rows)
+        return ink, f"[pattern {args.pattern} {args.pattern_length_mm:.0f}mm x {height_mm:.0f}mm]"
     render = RenderSettings(
         text=args.text, font=args.font, render_size=args.render_size,
         threshold=args.threshold, margin=args.margin, invert=args.invert,
