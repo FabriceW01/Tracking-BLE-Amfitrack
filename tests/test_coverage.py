@@ -13,7 +13,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from printhead.coverage import CoverageEngine                        # noqa: E402
+from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S     # noqa: E402
 from printhead.geometry import NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES  # noqa: E402
 
 DOSE_HOLD_S = 0.1
@@ -21,6 +21,54 @@ DOSE_HOLD_S = 0.1
 
 def _unpack(pattern: bytes) -> np.ndarray:
     return np.unpackbits(np.frombuffer(pattern, dtype=np.uint8), bitorder="little")
+
+
+# ================================================== measured dose-hold tuning
+def test_default_dose_hold_tracks_the_firmware_pattern_stride():
+    # DEFAULT_DOSE_HOLD_S is derived from -- and MUST stay in sync with --
+    # the firmware's PATTERN_STRIDE (src/ble_dose.h in the firmware repo):
+    # DOSE_HOLD_S ~= 3 * PATTERN_STRIDE * 450e-6 (3 = BLE_DROPS_PER_COLUMN,
+    # 450us = the firmware print loop tick, PATTERN_STRIDE = 4). If someone
+    # changes DEFAULT_DOSE_HOLD_S here without changing PATTERN_STRIDE (and
+    # re-flashing) to match, or vice versa, the ~3-drop-per-pixel target this
+    # pair was tuned to breaks silently on hardware -- this test is the loud
+    # failure meant to catch that on the client side.
+    firmware_pattern_stride = 4
+    drops_per_column = 3          # BLE_DROPS_PER_COLUMN, line mode's dose target
+    tick_s = 450e-6                # firmware print loop tick
+    expected = drops_per_column * firmware_pattern_stride * tick_s
+    assert abs(DEFAULT_DOSE_HOLD_S - expected) < 1e-6, (
+        f"DEFAULT_DOSE_HOLD_S={DEFAULT_DOSE_HOLD_S} no longer matches "
+        f"3 * PATTERN_STRIDE({firmware_pattern_stride}) * 450us = {expected} "
+        "-- update the firmware's PATTERN_STRIDE (src/ble_dose.h) to match, "
+        "or this comment/test, and re-flash the firmware")
+
+
+def test_realistic_median_dwell_completes_with_the_new_default():
+    # 0.2 mm column at the measured median hand speed (17.3 mm/s) dwells for
+    # about 11.6 ms -- comfortably above the new 5.4 ms default, so the
+    # pixel must be marked printed.
+    ink = np.ones((10, 5), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DEFAULT_DOSE_HOLD_S)
+    median_dwell_s = 0.2 / 17.3
+
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    eng.step(u_mm=0.0, v_mm=0.0, t=median_dwell_s)
+    assert eng.printed[0, 0]
+
+
+def test_short_dwell_above_37mms_stays_unprinted_with_the_new_default():
+    # A 3 ms dwell corresponds to roughly 0.2/0.003 ~= 67 mm/s, well above
+    # the ~37 mm/s point where the new default hold no longer fits inside
+    # one column's crossing time -- the pixel must stay open for a later
+    # pass rather than being marked printed early.
+    ink = np.ones((10, 5), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DEFAULT_DOSE_HOLD_S)
+    short_dwell_s = 0.003
+
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    eng.step(u_mm=0.0, v_mm=0.0, t=short_dwell_s)
+    assert not eng.printed[0, 0]
 
 
 # ============================================================== basic dosing

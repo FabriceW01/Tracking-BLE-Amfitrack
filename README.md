@@ -95,6 +95,27 @@ python main.py --pattern checkerboard --mode page --page-calibration page_calibr
     --pattern-square-mm 10 --pattern-square-height-mm 10
 ```
 
+**Dosierung in `--mode page` (`--dose-hold-s`):** Ein Pixel gilt erst als
+gedruckt, wenn eine Düse ununterbrochen `--dose-hold-s` Sekunden darüber
+steht — Default `coverage.DEFAULT_DOSE_HOLD_S = 0.0054` s (5.4 ms), gemessen
+an einem echten 200×100 mm Schachbrett-Druck bei median 17.3 mm/s
+Handgeschwindigkeit. Bei diesem Wert bekommt ein Pixel ca. **3 Tropfen**
+(wie `BLE_DROPS_PER_COLUMN` im Zeilen-Modus), bevor es als fertig gilt. Bei
+Handgeschwindigkeiten über ca. **37 mm/s** reicht die Verweildauer über
+einer Spalte nicht mehr für die vollen 5.4 ms — das Pixel bleibt absichtlich
+offen für einen späteren Durchgang, statt halb dosiert zu gelten; das ist
+gewolltes Verhalten, kein Fehler. Der alte Default (0.05 s = 50 ms) verlangte
+unter 4 mm/s, um überhaupt ein Pixel zu markieren; gemessen wurden dabei nur
+0.044 % Coverage über einen fertigen Druck, mit sichtbarem Geisterbild/
+Doppeldruck als Folge (jeder Revisit hat dieselben Pixel an leicht anderer
+Handposition erneut gefeuert, weil `printed` fast nirgends True wurde).
+
+⚠️ **Firmware-Kopplung:** `--dose-hold-s` muss zum Firmware-`PATTERN_STRIDE`
+(`src/ble_dose.h`, Firmware-Repo) passen: `DEFAULT_DOSE_HOLD_S ≈ 3 ×
+PATTERN_STRIDE × 450 µs`. Wird nur eine Seite geändert, stimmt die
+Tropfenzahl pro Pixel nicht mehr — die Firmware muss bei einer Änderung
+**neu geflasht** werden.
+
 ---
 
 ## Web-UI
