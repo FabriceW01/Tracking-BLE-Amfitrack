@@ -72,6 +72,33 @@ Vor dem eigentlichen Druck mit `--pos --page-calibration PATH` das live
 Wagen tatsächlich innerhalb der Seite (und nicht z. B. am falschen Rand oder
 mit vertauschten Achsen) unterwegs ist.
 
+**Sensor-Düsen-Versatz (`--sensor-offset-row-mm` / `--sensor-offset-col-mm`):**
+Der getrackte Amfitrack-Sensor sitzt **nicht** physisch am Druckkopf — er ist
+an einer anderen Stelle des Wagens montiert als die 152-Düsen-Leiste, mit
+einem festen Versatz dazwischen. `PageMapper` (`printhead/tracking.py`)
+korrigiert das automatisch, bevor `(u, v)` an die Coverage-Engine geht.
+Die Default-Werte sind eine echte Messung, kein Schätzwert:
+
+| Option | Bedeutung | Default |
+|---|---|---|
+| `--sensor-offset-row-mm MM` | Abstand Sensor → **Mitte** der Düsenleiste entlang der Zeilenachse (entlang der Düsenreihe, senkrecht zur Fahrtrichtung) | `62.36` mm (gemessen: "Die Mitte der Nozzle-Reihe ist 62,36 mm verschoben von der Y-Koordinate des Amfitrack") |
+| `--sensor-offset-col-mm MM` | Dasselbe entlang der Spaltenachse (Fahrtrichtung) | `0.0` mm (bisher keine gegenteilige Messung; explizit als eigener, überschreibbarer Wert geführt, falls sich das noch ändert) |
+
+Beide Defaults stecken als `SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM` /
+`SENSOR_TO_NOZZLE_COL_MM` in `printhead/geometry.py` — als feste mechanische
+Eigenschaft des Wagens, unabhängig von jeder einzelnen `PageCalibration`
+(eine neue Seite kalibrieren erfordert diesen Wert also nie erneut).
+
+⚠️ **Falsche Richtung nach dem Testdruck?** Einfach den Flag-Wert **negieren**
+(z. B. `--sensor-offset-row-mm -62.36`), sonst muss nichts geändert werden.
+
+**Verifikation:** Nach dieser Änderung `--pos --page-calibration PATH`
+starten und den Wagen so halten, dass **die Düsenleiste** (nicht der Sensor!)
+exakt auf der zuvor abgefahrenen Seitenecke steht. Das live angezeigte `v`
+sollte jetzt nahe **0** liegen — vor diesem Fix hätte es (je nach
+Zentrum-vs.-Düse-0-Bezug) eher um **-62.36 mm** oder einen ähnlich
+verschobenen Wert gelegen.
+
 **Größeres, richtig proportioniertes Testmuster in `--mode page`:** Genau weil
 `--mode page` nicht auf die ~15 mm der 152 Düsen begrenzt ist, lohnt sich für
 den Bring-up ein deutlich größeres `--calibrate`/`--pattern`-Bild als die

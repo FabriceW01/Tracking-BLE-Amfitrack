@@ -33,6 +33,8 @@ from .geometry import (
     NOZZLE_MODE_PAGE,
     NOZZLE_PITCH_MM,
     NUM_NOZZLES,
+    SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+    SENSOR_TO_NOZZLE_COL_MM,
 )
 from .nozzle_map import remap_rows
 from .pattern_sender import PatternSender
@@ -98,7 +100,9 @@ class PrintController:
                  page_calibration: Optional[PageCalibration] = None,
                  dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
                  ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S,
-                 progress_json: bool = False):
+                 progress_json: bool = False,
+                 sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+                 sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM):
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -112,6 +116,8 @@ class PrintController:
         self.dose_hold_s = dose_hold_s
         self.ble_write_ceiling = ble_write_ceiling
         self.progress_json = progress_json
+        self.sensor_offset_row_mm = sensor_offset_row_mm
+        self.sensor_offset_col_mm = sensor_offset_col_mm
 
         # Rendered once up front, unless the caller already built the ink
         # (calibration ruler / test patterns bypass text rendering entirely).
@@ -434,7 +440,9 @@ class PrintController:
                                "(PrintController(page_calibration=...)).")
         t = self.tracking
         pj = self.progress_json
-        mapper = PageMapper(self.page_calibration)
+        mapper = PageMapper(self.page_calibration,
+                           sensor_offset_row_mm=self.sensor_offset_row_mm,
+                           sensor_offset_col_mm=self.sensor_offset_col_mm)
         coverage = CoverageEngine(self._ink, t.mm_per_column, dose_hold_s=self.dose_hold_s)
         pos_filter = PositionFilter(t.smooth_ms / 1000.0)
         sender = PatternSender(ble)
