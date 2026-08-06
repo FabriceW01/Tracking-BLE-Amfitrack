@@ -20,6 +20,11 @@ STARTPOINT_UUID = "cc1087f5-1d92-6ca4-b84f-3e5880e6713d"  # Read / Notify, 1 byt
 MODE_UUID = "f5ad7c1f-f6e1-4dd7-bbb7-d8b9286a88c6"   # Read / Write, 1 byte
 NOZZLE_MODE_LINE = 0
 NOZZLE_MODE_PAGE = 1
+# Speed warning: client writes 1 when the cart is moving too fast to print
+# reliably, 0 otherwise. Advisory only -- drives the firmware's repurposed
+# HEALTH LED, has no effect on dosing (see README_BLE_INTERFACE.md "3) Speed
+# Warning Characteristic" in the firmware repo). Must match the firmware.
+SPEED_WARN_UUID = "58c05253-945f-48fc-a26c-989c785d6678"   # Read / Write, 1 byte
 
 # ----------------------------------------------------------------------------
 # Printhead geometry (must match the firmware)

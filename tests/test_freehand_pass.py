@@ -21,7 +21,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from printhead import cli                                             # noqa: E402
 from printhead.calibration import PageCalibration                     # noqa: E402
 from printhead.config import BleSettings, RenderSettings, TrackingSettings  # noqa: E402
-from printhead.controller import PrintController, _NullPrinthead      # noqa: E402
+from printhead.controller import (                                    # noqa: E402
+    DEFAULT_SPEED_WARNING_MM_S,
+    PrintController,
+    _NullPrinthead,
+    _speed_warning_transition,
+)
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
 from printhead.tracking import PageMapper                             # noqa: E402
 
@@ -57,7 +62,8 @@ def _identity_calibration():
 
 
 def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
-                profile=False, profile_csv=None, record=None, progress_json=False):
+                profile=False, profile_csv=None, record=None, progress_json=False,
+                speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S):
     render = RenderSettings(text="freehand test")
     ble = BleSettings()
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
@@ -66,7 +72,8 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
                            page_calibration=_identity_calibration(),
                            dose_hold_s=dose_hold_s, profile=profile,
                            profile_csv=profile_csv, record=record,
-                           progress_json=progress_json)
+                           progress_json=progress_json,
+                           speed_warning_mm_s=speed_warning_mm_s)
 
 
 def _sweep_positions(n_cols, samples_per_col=12):
@@ -514,6 +521,205 @@ def test_build_page_calibration_loads_a_saved_file():
 def test_build_page_calibration_is_none_without_the_flag():
     args = cli.parse_args(["Hi", "--dry-run"])
     assert cli.build_page_calibration(args) is None
+
+
+def test_cli_speed_warning_mm_s_defaults_to_none_and_parses():
+    args = cli.parse_args(["Hi", "--dry-run"])
+    assert args.speed_warning_mm_s is None
+    args = cli.parse_args(["Hi", "--dry-run", "--speed-warning-mm-s", "30"])
+    assert args.speed_warning_mm_s == 30.0
+
+
+# ================================================ speed warning / hysteresis
+# The pure decision function first: fast, deterministic, no real timing
+# involved -- this is what the mutation check below (see the PR description)
+# was actually run against, since it can be driven with an exact, repeatable
+# sequence of speeds rather than something dependent on real asyncio.sleep()
+# jitter.
+
+def test_speed_warning_transition_turns_on_above_and_off_20pct_below():
+    thr = 25.0
+    # Below threshold: stays off.
+    assert _speed_warning_transition(False, 24.9, thr) is False
+    # Above threshold: turns on.
+    assert _speed_warning_transition(False, 25.1, thr) is True
+    # Already on, still above the OFF edge (20.0 = thr*0.8): stays on.
+    assert _speed_warning_transition(True, 20.1, thr) is True
+    assert _speed_warning_transition(True, 24.9, thr) is True   # dead band
+    # Already on, drops below the OFF edge: turns off.
+    assert _speed_warning_transition(True, 19.9, thr) is False
+    # Already off, still below ON edge: stays off (no reason to move).
+    assert _speed_warning_transition(False, 0.0, thr) is False
+
+
+def _count_transitions(speeds, threshold_mm_s):
+    """Feed a speed sequence through _speed_warning_transition and count how
+    many times the returned state actually differs from the previous one --
+    i.e. how many BLE writes a real pass would issue for this sequence."""
+    state = False
+    calls = 0
+    for speed in speeds:
+        new_state = _speed_warning_transition(state, speed, threshold_mm_s)
+        if new_state != state:
+            calls += 1
+            state = new_state
+    return calls
+
+
+def _hovering_speeds(n=30):
+    """Alternates comfortably above (30) and comfortably within the dead
+    band (22.5, the midpoint of 20..25) at the default 25 mm/s threshold --
+    exactly the "hovering near the boundary" scenario hysteresis exists for."""
+    return [30.0 if i % 2 == 0 else 22.5 for i in range(n)]
+
+
+def test_speed_warning_transition_hysteresis_does_not_chatter_on_hovering_speed():
+    calls = _count_transitions(_hovering_speeds(), DEFAULT_SPEED_WARNING_MM_S)
+    # Exactly one: the very first sample (30 > 25) turns it on; every sample
+    # after that -- 22.5 or 30 -- is still >= the 20 mm/s OFF edge, so it
+    # never turns off again for the rest of the sequence.
+    assert calls == 1, f"expected exactly 1 transition, got {calls}"
+
+
+def test_speed_warning_transition_MUTATION_check_removing_the_dead_band_chatters():
+    # Same hovering sequence, but with the dead band removed (ON/OFF share
+    # the same threshold) -- this inlines the mutation described in the PR
+    # instead of editing controller.py by hand, so the regression stays
+    # covered by the suite rather than only having been checked once by
+    # hand. See the PR description for the verbatim before/after counts
+    # from actually mutating _speed_warning_transition and rerunning this
+    # file.
+    def _no_dead_band(is_warning, speed_mm_s, threshold_mm_s):
+        if not is_warning and speed_mm_s > threshold_mm_s:
+            return True
+        if is_warning and speed_mm_s < threshold_mm_s:   # no * 0.8 here
+            return False
+        return is_warning
+
+    state = False
+    calls = 0
+    for speed in _hovering_speeds():
+        new_state = _no_dead_band(state, speed, DEFAULT_SPEED_WARNING_MM_S)
+        if new_state != state:
+            calls += 1
+            state = new_state
+    # Every 22.5 sample (< 25) now turns it off, every 30 sample (> 25)
+    # turns it back on -- chattering on essentially every sample, not the
+    # single transition the hysteresis version above gets.
+    assert calls > 10, f"expected the dead-band-free version to chatter, got only {calls} transitions"
+
+
+# ---------------------------------------- integration: through a real pass
+def _speed_sweep_positions(deltas, v_mm=1000.0):
+    """u_mm advances by each of `deltas` in turn (v_mm fixed, far outside any
+    test image's reach so CoverageEngine never completes and the pass always
+    ends via --timeout, not via coverage.done) -- one ScriptedTracker sample
+    per delta, so at a given poll_hz the resulting along-travel speed is
+    delta / (nominal poll interval), give or take real scheduling jitter."""
+    positions = []
+    u = 0.0
+    for d in deltas:
+        u += d
+        positions.append((u, v_mm, 0.0))
+    return positions
+
+
+def test_freehand_pass_speed_above_threshold_triggers_the_warning():
+    # 40 mm/s at poll_hz=100 (10 ms nominal interval) = 0.4 mm/sample --
+    # comfortably above the 25 mm/s default threshold even with generous
+    # real-time scheduling jitter.
+    deltas = [0.4] * 30
+    ink = np.ones((5, 5), dtype=bool)
+    ctrl = _controller(ink, poll_hz=100.0, timeout_s=0.35)
+    tracker = ScriptedTracker(_speed_sweep_positions(deltas))
+    null = _NullPrinthead()
+
+    asyncio.run(ctrl._print_freehand_pass(null, tracker))
+
+    assert True in null.speed_warnings, null.speed_warnings
+
+
+def test_freehand_pass_speed_below_threshold_never_triggers_the_warning():
+    # 3 mm/s at poll_hz=100 = 0.03 mm/sample -- comfortably below even the
+    # 20 mm/s OFF edge, let alone the 25 mm/s ON threshold.
+    deltas = [0.03] * 30
+    ink = np.ones((5, 5), dtype=bool)
+    ctrl = _controller(ink, poll_hz=100.0, timeout_s=0.35)
+    tracker = ScriptedTracker(_speed_sweep_positions(deltas))
+    null = _NullPrinthead()
+
+    asyncio.run(ctrl._print_freehand_pass(null, tracker))
+
+    assert True not in null.speed_warnings, null.speed_warnings
+
+
+def test_freehand_pass_hovering_speed_does_not_chatter():
+    # Alternates ~40 mm/s (0.4 mm/sample, comfortably above the 25 mm/s ON
+    # threshold) and ~24.5 mm/s (0.245 mm/sample) at poll_hz=100. 24.5 is
+    # deliberately biased close to the 25 mm/s ON threshold rather than
+    # centred in the dead band (20..25): the margin that actually matters
+    # against real asyncio timing jitter is the *lower* one (down to the 20
+    # mm/s OFF edge, here ~18%), since occasionally landing above 25 again
+    # while already on is harmless (no transition -- see
+    # _speed_warning_transition), only dropping below 20 is not. More
+    # position samples than the timeout can possibly consume (see
+    # _speed_sweep_positions/ScriptedTracker), so the sequence is never
+    # exhausted into a held-still, zero-speed tail, which would otherwise
+    # add its own (legitimate, but here undesired-for-this-assertion) OFF
+    # transition on top of the one this test is actually checking for. A
+    # short timeout keeps the number of real (wall-clock, hence jittery)
+    # samples small, which is what actually keeps this reliable -- see the
+    # deterministic, exact version of this same scenario just above
+    # (test_speed_warning_transition_hysteresis_does_not_chatter_on_hovering_speed),
+    # which is what the mutation check in the PR description was run
+    # against; this integration test only needs to confirm the real pass
+    # loop calls through to set_speed_warning() the way that pure function
+    # predicts, tolerating occasional real-timing noise with a generous
+    # (but still obviously "not chattering") bound below.
+    deltas = [0.4 if i % 2 == 0 else 0.245 for i in range(100)]
+    ink = np.ones((5, 5), dtype=bool)
+    ctrl = _controller(ink, poll_hz=100.0, timeout_s=0.3)
+    tracker = ScriptedTracker(_speed_sweep_positions(deltas))
+    null = _NullPrinthead()
+
+    asyncio.run(ctrl._print_freehand_pass(null, tracker))
+
+    # Not "one call per sample" (~30 samples run in 0.3 s at poll_hz=100):
+    # the ideal count is 2 (one True crossing above 25, one False at
+    # cleanup), occasional real-scheduler jitter can add a couple more, but
+    # nowhere near the dozens of on/off flips a naive single-threshold
+    # version produces for a sequence that straddles 25 mm/s this often
+    # (see the MUTATION_check test above for the exact, deterministic
+    # contrast).
+    assert len(null.speed_warnings) <= 12, null.speed_warnings
+
+
+def test_freehand_pass_clears_the_warning_at_normal_pass_end():
+    deltas = [0.4] * 30
+    ink = np.ones((5, 5), dtype=bool)
+    ctrl = _controller(ink, poll_hz=100.0, timeout_s=0.35)
+    tracker = ScriptedTracker(_speed_sweep_positions(deltas))
+    null = _NullPrinthead()
+
+    asyncio.run(ctrl._print_freehand_pass(null, tracker))
+
+    assert null.speed_warnings, "expected at least the warning + its clearing"
+    assert null.speed_warnings[-1] is False, \
+        f"the last call must clear the warning, got {null.speed_warnings}"
+
+
+def test_freehand_pass_never_warns_when_tracker_never_moves():
+    # No speed can be computed at all (prev_u stays unset) when position is
+    # constant -- must never crash, and the only call is the unconditional
+    # clear at pass end.
+    ink = np.ones((5, 5), dtype=bool)
+    ctrl = _controller(ink, poll_hz=100.0, timeout_s=0.1)
+    tracker = ScriptedTracker([(0.0, 1000.0, 0.0)])
+    null = _NullPrinthead()
+
+    asyncio.run(ctrl._print_freehand_pass(null, tracker))
+
+    assert null.speed_warnings == [False]
 
 
 if __name__ == "__main__":

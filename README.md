@@ -147,6 +147,37 @@ PATTERN_STRIDE × 450 µs` (jetzt `PATTERN_STRIDE = 3`). Wird nur eine Seite ge�
 Tropfenzahl pro Pixel nicht mehr — die Firmware muss bei einer Änderung
 **neu geflasht** werden.
 
+**Geschwindigkeitswarnung in `--mode page` (`--speed-warning-mm-s`):**
+Während des Freihand-Durchlaufs schreibt der Client zusätzlich zur
+Nozzle-Charakteristik eine neue BLE-Charakteristik (`SPEED_WARN_UUID =
+58c05253-945f-48fc-a26c-989c785d6678`, Read/Write, 1 Byte, `0` = ok /
+`1` = zu schnell), sobald die gemessene Handgeschwindigkeit
+`--speed-warning-mm-s` überschreitet — Default
+`controller.DEFAULT_SPEED_WARNING_MM_S = 25.0` mm/s. Dieser Wert stammt aus
+derselben Messreihe wie oben: bei 25 mm/s war die Coverage bereits auf **~60
+%** gefallen (siehe Tabelle oben), also der Punkt, ab dem ein spürbarer Teil
+des Durchlaufs ungedruckt bleibt und eine Warnung an den Bediener sinnvoll
+wird. Die Firmware nutzt den Wert nur, um die (zu diesem Zweck
+umgewidmete) HEALTH-LED anzusteuern — auf die Dosierung hat er keinen
+Einfluss.
+
+Um an der Schwelle nicht bei jedem Sample umzuschalten, hat das Ein-/
+Ausschalten eine **Hysterese**: EIN ab `speed_warning_mm_s`, AUS erst wieder
+20 % darunter (Totband 20–25 mm/s beim Default). Die Charakteristik wird nur
+bei einem tatsächlichen Zustandswechsel beschrieben, nicht bei jedem
+Sample, und bei Durchlaufende immer auf `0` zurückgesetzt (auch wenn der
+Durchlauf durch einen Fehler abbricht). Der Schreibvorgang ist bewusst
+*fail-soft*: anders als der Print-Mode-Wechsel (`--dose-hold-s` o.ä.) darf
+ein verlorenes BLE-Write hier niemals den Druckvorgang abbrechen — ein
+Fehler wird nur geloggt.
+
+⚠️ **Firmware-Kopplung:** Erfordert eine Firmware mit der neuen Speed-Warning-
+Charakteristik geflasht (siehe `README_BLE_INTERFACE.md`, Abschnitt "3) Speed
+Warning Characteristic", im Firmware-Repo `Printhead_Original_V2`, Branch
+`claude/speed-warning-led`). Ohne diese Firmware schlägt das BLE-Write
+fehl — das wird abgefangen und geloggt, bricht den Druckvorgang aber nicht
+ab (siehe oben).
+
 ---
 
 ## Web-UI

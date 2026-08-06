@@ -44,6 +44,40 @@ from .tracking import AdvanceMapper, PageMapper, PositionFilter, make_tracker
 # stop firing its column. Tolerates slow feed while preventing a stationary blob.
 _STALL_GRACE_S = 0.2
 
+# Cart speed (mm/s) above which the freehand pass warns the firmware "too
+# fast" over BLE (see PrintController.speed_warning_mm_s and
+# _print_freehand_pass's hysteresis below). Derived from the dose-tuning
+# measurement documented in coverage.DEFAULT_DOSE_HOLD_S's comment: a
+# simulated pass at the production dose_hold_s/poll_hz defaults gives 100%
+# coverage at the measured median hand speed (17.3 mm/s), falling to 60% by
+# 25 mm/s and 14% by 35 mm/s -- 25 mm/s is picked here as the point past
+# which a meaningful fraction of a pass is already going unprinted, worth
+# surfacing to the operator (and the firmware's LED) rather than a hard
+# cutoff derived from any firmware constant.
+DEFAULT_SPEED_WARNING_MM_S = 25.0
+
+
+def _speed_warning_transition(is_warning: bool, speed_mm_s: float,
+                               threshold_mm_s: float) -> bool:
+    """
+    Hysteresis for the speed-warning flag: turn ON once speed exceeds
+    ``threshold_mm_s``, turn OFF only once it drops 20% below that (a dead
+    band of ``threshold_mm_s * 0.8 .. threshold_mm_s``), so a speed hovering
+    right at the threshold does not flip the BLE characteristic (and the
+    firmware's LED) on every sample.
+
+    Pure function of the current state and one new sample -- kept free of
+    asyncio/BLE so it is directly, deterministically unit-testable (see
+    tests/test_freehand_pass.py, including its mutation check: removing the
+    dead band, i.e. using ``threshold_mm_s`` for both edges, reintroduces
+    chattering on a hovering speed sequence).
+    """
+    if not is_warning and speed_mm_s > threshold_mm_s:
+        return True
+    if is_warning and speed_mm_s < threshold_mm_s * 0.8:
+        return False
+    return is_warning
+
 
 class _NullPrinthead:
     """Stand-in for PrintheadBLE used by ``--dry-run --simulate`` (no BLE)."""
@@ -53,6 +87,7 @@ class _NullPrinthead:
         self.blank_writes = 0
         self.pattern_writes = 0
         self.print_mode = None
+        self.speed_warnings = []   # every set_speed_warning() call, in order
 
     async def write_column(self, frame):
         self.column_writes += 1
@@ -69,6 +104,9 @@ class _NullPrinthead:
     async def set_print_mode(self, mode, required: bool = True):
         self.print_mode = mode
         return True
+
+    async def set_speed_warning(self, warn: bool):
+        self.speed_warnings.append(warn)
 
 
 class _ImmediateEvent:
@@ -98,6 +136,7 @@ class PrintController:
                  page_calibration: Optional[PageCalibration] = None,
                  dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
                  ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S,
+                 speed_warning_mm_s: float = DEFAULT_SPEED_WARNING_MM_S,
                  progress_json: bool = False):
         self.render = render
         self.ble = ble
@@ -111,6 +150,7 @@ class PrintController:
         self.page_calibration = page_calibration
         self.dose_hold_s = dose_hold_s
         self.ble_write_ceiling = ble_write_ceiling
+        self.speed_warning_mm_s = speed_warning_mm_s
         self.progress_json = progress_json
 
         # Rendered once up front, unless the caller already built the ink
@@ -428,6 +468,15 @@ class PrintController:
         the plain-text lines this would otherwise interleave with (mirrors
         ``diagnostics.monitor_position``'s ``ndjson`` switch). This is what
         the web UI's live coverage canvas consumes (see ``ui/server.py``).
+
+        Also warns the firmware over BLE (``ble.set_speed_warning``) when the
+        along-travel speed already being computed here for the profiler
+        exceeds ``self.speed_warning_mm_s``, with hysteresis
+        (``_speed_warning_transition``) so a speed hovering at the threshold
+        does not chatter the characteristic every sample. Cleared
+        unconditionally at pass end, in the same tolerant ``finally`` path
+        as ``sender.close()``/the final blank frame, so a stale warning never
+        outlives the pass that raised it.
         """
         if self.page_calibration is None:
             raise RuntimeError("Freehand pass requires a page calibration "
@@ -483,6 +532,7 @@ class PrintController:
         prev_u, prev_v, prev_t = None, None, None
         prev_printed = coverage.printed.copy() if pj else None
         done_reason = None
+        speed_warn_state = False   # current value of the speed-warning flag
 
         # Out-of-page visibility (defect 2): a pass whose (u, v) never lands
         # inside the target image is otherwise indistinguishable from a
@@ -517,6 +567,19 @@ class PrintController:
                         speed = ((u_mm - prev_u) ** 2 + (v_mm - prev_v) ** 2) ** 0.5 \
                             / (now - prev_t)
                     prev_u, prev_v, prev_t = u_mm, v_mm, now
+
+                    # Speed warning, with hysteresis (see
+                    # _speed_warning_transition): only ever writes BLE on an
+                    # actual state change, which in practice is rare enough
+                    # that the extra await here is a non-issue -- no need
+                    # for a PatternSender-style background task for
+                    # something this infrequent.
+                    if speed is not None:
+                        new_warn = _speed_warning_transition(
+                            speed_warn_state, speed, self.speed_warning_mm_s)
+                        if new_warn != speed_warn_state:
+                            speed_warn_state = new_warn
+                            await ble.set_speed_warning(speed_warn_state)
 
                     pattern, changed = coverage.step(u_mm, v_mm, now)
                     if coverage.last_in_bounds:
@@ -583,6 +646,17 @@ class PrintController:
             # cleanup must not mask whatever is already propagating out of
             # the loop.
             await sender.close()
+            # A stale "too fast" warning must not linger once the pass has
+            # ended. set_speed_warning() already fails soft on its own (see
+            # PrintheadBLE.set_speed_warning), but this is wrapped the same
+            # tolerant way as write_blank() below anyway: cleanup running
+            # during an already-propagating exception (KeyboardInterrupt
+            # included, defect 3) must never raise a second one that masks
+            # the first.
+            try:
+                await ble.set_speed_warning(False)
+            except Exception:
+                pass
             try:
                 await ble.write_blank()
             except Exception as exc:

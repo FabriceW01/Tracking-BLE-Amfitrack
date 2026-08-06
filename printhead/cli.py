@@ -15,7 +15,7 @@ from typing import Optional
 
 from . import patterns
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
-from .controller import PrintController
+from .controller import DEFAULT_SPEED_WARNING_MM_S, PrintController
 from .geometry import DEVICE_NAME, IMAGE_HEIGHT, NOZZLE_PITCH_MM
 from .nozzle_map import parse_order
 from .rendering import render_text
@@ -126,6 +126,18 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(current u/v/row/col + newly-covered cells) instead "
                         "of the plain-text status lines -- used by the web UI's "
                         "live coverage view")
+    g.add_argument("--speed-warning-mm-s", type=float, default=None,
+                   help="Page mode: cart speed (mm/s) above which the client "
+                        "warns the firmware over BLE that it is moving too "
+                        "fast to print reliably (default: "
+                        f"controller.DEFAULT_SPEED_WARNING_MM_S = "
+                        f"{DEFAULT_SPEED_WARNING_MM_S:g}, the speed at which "
+                        "dose-tuning measurements found coverage had already "
+                        "fallen to ~60%%). Hysteresis: the warning clears "
+                        "again only once speed drops 20%% below this "
+                        "threshold, to avoid chattering the characteristic "
+                        "right at the boundary. Advisory only -- drives a "
+                        "status LED on the firmware, never affects dosing")
 
     # --- Amfitrack ---------------------------------------------------------
     g = ap.add_argument_group("Amfitrack positioning")
@@ -371,6 +383,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         kwargs["dose_hold_s"] = args.dose_hold_s
     if args.ble_write_ceiling is not None:
         kwargs["ble_write_ceiling"] = args.ble_write_ceiling
+    if args.speed_warning_mm_s is not None:
+        kwargs["speed_warning_mm_s"] = args.speed_warning_mm_s
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,
