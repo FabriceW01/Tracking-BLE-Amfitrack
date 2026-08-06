@@ -22,7 +22,7 @@ from printhead import cli                                             # noqa: E4
 from printhead.calibration import PageCalibration                     # noqa: E402
 from printhead.config import BleSettings, RenderSettings, TrackingSettings  # noqa: E402
 from printhead.controller import PrintController, _NullPrinthead      # noqa: E402
-from printhead.coverage import CoverageEngine                         # noqa: E402
+from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
 from printhead.tracking import PageMapper                             # noqa: E402
 
 
@@ -341,6 +341,65 @@ def test_progress_json_out_of_page_carries_bounds_fields():
     assert done["samples"] > 0
     assert done["u_min"] is not None and done["u_max"] is not None
     assert done["v_min"] == done["v_max"] == 500.0
+
+
+# =========================================== dose-hold / poll-interval guard
+def test_freehand_pass_warns_when_dose_hold_exceeds_poll_interval():
+    # The exact quantization-cliff shape from the dose-hold correction: a
+    # dose_hold_s (5.4 ms) that sits AT/ABOVE the poll interval (5.0 ms at
+    # poll_hz=200) means two consecutive samples can never complete a dose
+    # -- a third (or later) sample is required, and measured coverage
+    # collapsed from 100% to 31% at exactly this ratio. The guard must warn
+    # at pass start rather than let this surface as silent near-zero
+    # coverage with no obvious cause.
+    ink = np.zeros((5, 5), dtype=bool)   # nothing to cover -- pass ends immediately
+    ctrl = _controller(ink, dose_hold_s=0.0054, poll_hz=200.0, timeout_s=1.0)
+    tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    assert "[warn]" in text, text
+    assert "dose_hold_s" in text and "poll interval" in text, text
+    assert "three or more samples" in text, text
+
+
+def test_freehand_pass_does_not_warn_with_a_normally_configured_dose_hold():
+    # Guard against a false positive: the corrected production default
+    # (coverage.DEFAULT_DOSE_HOLD_S = 4.05 ms, 19% below the 5.0 ms poll
+    # interval at poll_hz=200) must never trigger the quantization-cliff
+    # warning -- this is the "normally configured" case the guard must stay
+    # out of the way of.
+    ink = np.zeros((5, 5), dtype=bool)
+    ctrl = _controller(ink, dose_hold_s=DEFAULT_DOSE_HOLD_S, poll_hz=200.0,
+                       timeout_s=1.0)
+    tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    assert "[warn]" not in text, text
+
+
+def test_progress_json_suppresses_the_dose_hold_warning_too():
+    # --progress-json must stay pure NDJSON (mirrors how the out-of-page
+    # warning is suppressed in that mode) even when the quantization-cliff
+    # condition holds.
+    ink = np.zeros((5, 5), dtype=bool)
+    ctrl = _controller(ink, dose_hold_s=0.0054, poll_hz=200.0, timeout_s=1.0,
+                       progress_json=True)
+    tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    for line in out.getvalue().splitlines():
+        if line.strip():
+            json.loads(line)          # every non-blank line must be valid JSON
 
 
 # ================================================== interrupted pass cleanup (defect 3)
