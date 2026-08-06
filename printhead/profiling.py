@@ -79,7 +79,14 @@ class PassProfiler:
             try:
                 self._csv = open(self.csv_path, "w")
                 if self.mode == "page":
-                    self._csv.write("t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s\n")
+                    # qx,qy,qz,qw: raw orientation quaternion, logged purely for
+                    # offline correlation -- investigating whether cart rotation,
+                    # combined with the fixed sensor->nozzle-bar lever arm
+                    # (geometry.SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM, see also
+                    # PageMapper), explains observed freehand misalignment.
+                    # Not read back or used to correct anything live yet.
+                    self._csv.write(
+                        "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw\n")
                 else:
                     self._csv.write("t_s,column,advance_mm,write_latency_ms,speed_mm_s\n")
             except OSError as exc:
@@ -106,13 +113,22 @@ class PassProfiler:
                 self._print_live(speed_mm_s, latency_s)
 
     def record_page_sample(self, u_mm: float, v_mm: float,
-                           speed_mm_s: Optional[float]) -> None:
+                           speed_mm_s: Optional[float],
+                           quat: Optional[np.ndarray] = None) -> None:
         """
         Log one page-mode pattern update. Call this only when
         ``CoverageEngine.step()`` reports ``changed=True`` (i.e. a pattern
         was actually handed to ``PatternSender.send()``), mirroring
         ``record_write()``'s per-write-event cadence rather than logging
         every poll tick -- most ticks do not change anything.
+
+        ``quat`` is the raw ``(qx, qy, qz, qw)`` orientation for this sample
+        (see ``AmfitrackTracker.read_pose``), or ``None`` when no orientation
+        packet was drained this tick -- logged as-is (not yet used for any
+        live correction) so a real print pass can later be checked offline
+        for cart rotation coinciding with misalignment, given the fixed
+        sensor->nozzle-bar lever arm (see ``geometry.
+        SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM`` / ``tracking.PageMapper``).
         """
         from .geometry import NOZZLE_PITCH_MM
 
@@ -129,8 +145,16 @@ class PassProfiler:
 
         if self._csv is not None:
             t = now - self._t0
+            # Blank (not 0) when quat is None: 0,0,0,0 would look like a real
+            # (degenerate) quaternion and could mislead an offline analysis.
+            if quat is not None:
+                quat_fields = (f"{float(quat[0]):.4f},{float(quat[1]):.4f},"
+                               f"{float(quat[2]):.4f},{float(quat[3]):.4f}")
+            else:
+                quat_fields = ",,,"
             self._csv.write(f"{t:.4f},{row},{col},{u_mm:.3f},{v_mm:.3f},"
-                            f"{speed_mm_s or 0.0:.2f},{writes_per_s:.1f}\n")
+                            f"{speed_mm_s or 0.0:.2f},{writes_per_s:.1f},"
+                            f"{quat_fields}\n")
 
         if self.live and now - self._last_live >= self.live_every_s:
             self._last_live = now

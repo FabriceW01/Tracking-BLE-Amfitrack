@@ -39,10 +39,20 @@ from printhead.tracking import PageMapper                             # noqa: E4
 class ScriptedTracker:
     """Returns a predetermined sequence of (x, y, z) positions, holding the
     last one once the sequence is exhausted (mirrors test_position_pass.py's
-    ScriptedTracker, generalised from a 1D advance to a full 3D position)."""
+    ScriptedTracker, generalised from a 1D advance to a full 3D position).
 
-    def __init__(self, positions):
+    ``_print_freehand_pass`` reads pose via ``read_pose()`` (not
+    ``read_position()``), so this needs one too. Default is
+    ``quats=None``, mirroring ``SimulatedTracker``'s contract (quaternion
+    always ``None`` -- the simulator/fakes never invent orientation); pass
+    ``quats`` (same length/indexing convention as ``positions``, also holds
+    its last entry once exhausted) for the few tests that need a real
+    orientation sequence to reach the profiler CSV."""
+
+    def __init__(self, positions, quats=None):
         self._seq = [np.asarray(p, dtype=float) for p in positions]
+        self._quats = ([np.asarray(q, dtype=float) for q in quats]
+                       if quats is not None else None)
         self._i = 0
 
     def open(self):
@@ -52,12 +62,17 @@ class ScriptedTracker:
         pass
 
     def read_position(self):
+        return self.read_pose()[0]
+
+    def read_pose(self):
         if self._i < len(self._seq):
-            value = self._seq[self._i]
+            pos = self._seq[self._i]
+            quat = self._quats[self._i] if self._quats is not None else None
             self._i += 1
         else:
-            value = self._seq[-1]
-        return value
+            pos = self._seq[-1]
+            quat = self._quats[-1] if self._quats is not None else None
+        return pos, quat
 
 
 def _identity_calibration():
@@ -288,7 +303,56 @@ def test_freehand_pass_with_profile_csv_writes_the_page_schema():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+
+
+def test_freehand_pass_with_profile_csv_logs_orientation_when_the_tracker_has_it():
+    # End-to-end: a tracker that supplies real quat samples must have them
+    # reach the CSV (via _print_freehand_pass -> read_pose() ->
+    # record_page_sample(quat=...)), non-blank, for at least one row. This is
+    # raw diagnostic data for offline correlation against the suspected
+    # rotation + sensor-to-nozzle-bar lever arm misalignment (see
+    # geometry.SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM) -- not used live here.
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "profile.csv")
+        ctrl = _controller(ink, timeout_s=5.0, profile=True, profile_csv=csv_path)
+        positions = _sweep_positions(n_cols=5, samples_per_col=12)
+        # Identity-ish quaternion (no rotation) repeated for every sample --
+        # the point of this test is that a real value reaches the CSV at
+        # all, not any particular rotation.
+        quats = [(0.0, 0.0, 0.0, 1.0)] * len(positions)
+        tracker = ScriptedTracker(positions, quats=quats)
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+
+        with open(csv_path) as fh:
+            lines = fh.read().strip().splitlines()
+        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+        data_rows = lines[1:]
+        assert data_rows, "expected at least one profiled sample"
+        quat_rows = [row.split(",")[-4:] for row in data_rows]
+        assert any(fields == ["0.0000", "0.0000", "0.0000", "1.0000"]
+                  for fields in quat_rows), quat_rows
+
+
+def test_freehand_pass_with_profile_csv_blank_orientation_without_a_quat_tracker():
+    # Guard against a false positive on the test above: the default
+    # ScriptedTracker (no quats=) must still produce blank -- not "0,0,0,0"
+    # -- orientation fields, matching SimulatedTracker/real hardware ticks
+    # with no orientation packet.
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "profile.csv")
+        ctrl = _controller(ink, timeout_s=5.0, profile=True, profile_csv=csv_path)
+        tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+
+        with open(csv_path) as fh:
+            lines = fh.read().strip().splitlines()
+        data_rows = lines[1:]
+        assert data_rows, "expected at least one profiled sample"
+        for row in data_rows:
+            assert row.split(",")[-4:] == ["", "", "", ""], row
 
 
 def test_freehand_pass_with_record_writes_a_coverage_png():
@@ -464,11 +528,14 @@ class _RaisingTracker:
         pass
 
     def read_position(self):
+        return self.read_pose()[0]
+
+    def read_pose(self):
         if self._i >= self._fail_after:
             raise _RaisingTracker.Boom("simulated interruption")
         value = self._seq[self._i] if self._i < len(self._seq) else self._seq[-1]
         self._i += 1
-        return value
+        return value, None
 
 
 def test_freehand_pass_interrupted_still_closes_profiler_csv_and_attempts_record():
@@ -495,7 +562,7 @@ def test_freehand_pass_interrupted_still_closes_profiler_csv_and_attempts_record
         assert os.path.exists(csv_path), "profiler CSV must still be closed/flushed"
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
 
         assert os.path.exists(png_path), "coverage PNG must still be attempted"
 

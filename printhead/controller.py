@@ -559,7 +559,7 @@ class PrintController:
         try:
             while True:
                 now = loop.time()
-                pos = tracker.read_position()
+                pos, quat = tracker.read_pose()
                 if pos is not None:
                     pos = pos_filter.update(pos, now)   # low-pass the noisy signal
                     u_mm, v_mm, _z_mm = mapper.project(pos)
@@ -595,7 +595,7 @@ class PrintController:
                     if changed:
                         sender.send(pattern)
                         if profiler is not None:
-                            profiler.record_page_sample(u_mm, v_mm, speed)
+                            profiler.record_page_sample(u_mm, v_mm, speed, quat=quat)
 
                     # Nothing has ever been in bounds yet: say so periodically
                     # instead of running the whole pass in silence (plain-text
