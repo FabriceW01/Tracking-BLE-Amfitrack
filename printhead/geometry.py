@@ -20,6 +20,11 @@ STARTPOINT_UUID = "cc1087f5-1d92-6ca4-b84f-3e5880e6713d"  # Read / Notify, 1 byt
 MODE_UUID = "f5ad7c1f-f6e1-4dd7-bbb7-d8b9286a88c6"   # Read / Write, 1 byte
 NOZZLE_MODE_LINE = 0
 NOZZLE_MODE_PAGE = 1
+# Speed warning: client writes 1 when the cart is moving too fast to print
+# reliably, 0 otherwise. Advisory only -- drives the firmware's repurposed
+# HEALTH LED, has no effect on dosing (see README_BLE_INTERFACE.md "3) Speed
+# Warning Characteristic" in the firmware repo). Must match the firmware.
+SPEED_WARN_UUID = "58c05253-945f-48fc-a26c-989c785d6678"   # Read / Write, 1 byte
 
 # ----------------------------------------------------------------------------
 # Printhead geometry (must match the firmware)
@@ -54,3 +59,36 @@ NOZZLE_BAR_WIDTH_MM = 15.0
 # Needed to convert a page-plane position perpendicular to travel (v_mm) into a
 # nozzle-row index in the freehand coverage engine.
 NOZZLE_PITCH_MM = NOZZLE_BAR_WIDTH_MM / (NUM_NOZZLES - 1)
+
+# ----------------------------------------------------------------------------
+# Sensor-to-nozzle-bar mechanical offset (freehand page-mode; user-measured)
+# ----------------------------------------------------------------------------
+# The tracked Amfitrack sensor is not physically located at the printhead: the
+# cart carries the sensor at one spot and the 152-nozzle bar at another, a
+# fixed few centimetres apart. This is a mechanical property of the cart
+# itself -- independent of any particular page/paper -- which is why it lives
+# here next to NOZZLE_BAR_WIDTH_MM/NOZZLE_PITCH_MM rather than in a saved
+# PageCalibration (a PageCalibration describes where a specific page is, not
+# where the nozzles are relative to the sensor; re-calibrating a new page must
+# never require re-entering this number).
+#
+# Measured ("Die Mitte der Nozzle-Reihe ist 62,36 mm verschoben von der
+# Y-Koordinate des Amfitrack"): the CENTRE of the 152-nozzle bar sits 62.36 mm
+# from the sensor, along the row axis (the axis perpendicular to travel, i.e.
+# along the nozzle bar itself -- close to world -Y in the current mounting,
+# but that is mounting-dependent, not a property of this constant). Sign
+# convention: positive means the nozzle bar sits further in the +row
+# direction than the sensor. If a test print comes out offset in the wrong
+# direction, the fix is to NEGATE this value -- nothing else needs to change.
+#
+# Deliberately named around the bar CENTRE (not nozzle 0) to make the
+# reference point unambiguous: tracking.PageMapper is the one place that
+# converts this centre-referenced measurement into the nozzle-0-referenced
+# offset CoverageEngine actually needs (see its docstring for that math).
+SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = 62.36
+
+# Column-axis (travel direction) counterpart. Believed to be 0 -- no
+# measurement has shown otherwise -- but kept as a named, overridable
+# constant rather than assumed silently, in case a future measurement finds
+# a real offset here too.
+SENSOR_TO_NOZZLE_COL_MM = 0.0

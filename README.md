@@ -72,6 +72,33 @@ Vor dem eigentlichen Druck mit `--pos --page-calibration PATH` das live
 Wagen tatsächlich innerhalb der Seite (und nicht z. B. am falschen Rand oder
 mit vertauschten Achsen) unterwegs ist.
 
+**Sensor-Düsen-Versatz (`--sensor-offset-row-mm` / `--sensor-offset-col-mm`):**
+Der getrackte Amfitrack-Sensor sitzt **nicht** physisch am Druckkopf — er ist
+an einer anderen Stelle des Wagens montiert als die 152-Düsen-Leiste, mit
+einem festen Versatz dazwischen. `PageMapper` (`printhead/tracking.py`)
+korrigiert das automatisch, bevor `(u, v)` an die Coverage-Engine geht.
+Die Default-Werte sind eine echte Messung, kein Schätzwert:
+
+| Option | Bedeutung | Default |
+|---|---|---|
+| `--sensor-offset-row-mm MM` | Abstand Sensor → **Mitte** der Düsenleiste entlang der Zeilenachse (entlang der Düsenreihe, senkrecht zur Fahrtrichtung) | `62.36` mm (gemessen: "Die Mitte der Nozzle-Reihe ist 62,36 mm verschoben von der Y-Koordinate des Amfitrack") |
+| `--sensor-offset-col-mm MM` | Dasselbe entlang der Spaltenachse (Fahrtrichtung) | `0.0` mm (bisher keine gegenteilige Messung; explizit als eigener, überschreibbarer Wert geführt, falls sich das noch ändert) |
+
+Beide Defaults stecken als `SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM` /
+`SENSOR_TO_NOZZLE_COL_MM` in `printhead/geometry.py` — als feste mechanische
+Eigenschaft des Wagens, unabhängig von jeder einzelnen `PageCalibration`
+(eine neue Seite kalibrieren erfordert diesen Wert also nie erneut).
+
+⚠️ **Falsche Richtung nach dem Testdruck?** Einfach den Flag-Wert **negieren**
+(z. B. `--sensor-offset-row-mm -62.36`), sonst muss nichts geändert werden.
+
+**Verifikation:** Nach dieser Änderung `--pos --page-calibration PATH`
+starten und den Wagen so halten, dass **die Düsenleiste** (nicht der Sensor!)
+exakt auf der zuvor abgefahrenen Seitenecke steht. Das live angezeigte `v`
+sollte jetzt nahe **0** liegen — vor diesem Fix hätte es (je nach
+Zentrum-vs.-Düse-0-Bezug) eher um **-62.36 mm** oder einen ähnlich
+verschobenen Wert gelegen.
+
 **Größeres, richtig proportioniertes Testmuster in `--mode page`:** Genau weil
 `--mode page` nicht auf die ~15 mm der 152 Düsen begrenzt ist, lohnt sich für
 den Bring-up ein deutlich größeres `--calibrate`/`--pattern`-Bild als die
@@ -146,6 +173,37 @@ die Spitzengeschwindigkeit.
 PATTERN_STRIDE × 450 µs` (jetzt `PATTERN_STRIDE = 3`). Wird nur eine Seite geändert, stimmt die
 Tropfenzahl pro Pixel nicht mehr — die Firmware muss bei einer Änderung
 **neu geflasht** werden.
+
+**Geschwindigkeitswarnung in `--mode page` (`--speed-warning-mm-s`):**
+Während des Freihand-Durchlaufs schreibt der Client zusätzlich zur
+Nozzle-Charakteristik eine neue BLE-Charakteristik (`SPEED_WARN_UUID =
+58c05253-945f-48fc-a26c-989c785d6678`, Read/Write, 1 Byte, `0` = ok /
+`1` = zu schnell), sobald die gemessene Handgeschwindigkeit
+`--speed-warning-mm-s` überschreitet — Default
+`controller.DEFAULT_SPEED_WARNING_MM_S = 25.0` mm/s. Dieser Wert stammt aus
+derselben Messreihe wie oben: bei 25 mm/s war die Coverage bereits auf **~60
+%** gefallen (siehe Tabelle oben), also der Punkt, ab dem ein spürbarer Teil
+des Durchlaufs ungedruckt bleibt und eine Warnung an den Bediener sinnvoll
+wird. Die Firmware nutzt den Wert nur, um die (zu diesem Zweck
+umgewidmete) HEALTH-LED anzusteuern — auf die Dosierung hat er keinen
+Einfluss.
+
+Um an der Schwelle nicht bei jedem Sample umzuschalten, hat das Ein-/
+Ausschalten eine **Hysterese**: EIN ab `speed_warning_mm_s`, AUS erst wieder
+20 % darunter (Totband 20–25 mm/s beim Default). Die Charakteristik wird nur
+bei einem tatsächlichen Zustandswechsel beschrieben, nicht bei jedem
+Sample, und bei Durchlaufende immer auf `0` zurückgesetzt (auch wenn der
+Durchlauf durch einen Fehler abbricht). Der Schreibvorgang ist bewusst
+*fail-soft*: anders als der Print-Mode-Wechsel (`--dose-hold-s` o.ä.) darf
+ein verlorenes BLE-Write hier niemals den Druckvorgang abbrechen — ein
+Fehler wird nur geloggt.
+
+⚠️ **Firmware-Kopplung:** Erfordert eine Firmware mit der neuen Speed-Warning-
+Charakteristik geflasht (siehe `README_BLE_INTERFACE.md`, Abschnitt "3) Speed
+Warning Characteristic", im Firmware-Repo `Printhead_Original_V2`, Branch
+`claude/speed-warning-led`). Ohne diese Firmware schlägt das BLE-Write
+fehl — das wird abgefangen und geloggt, bricht den Druckvorgang aber nicht
+ab (siehe oben).
 
 ---
 

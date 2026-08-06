@@ -27,6 +27,7 @@ from .geometry import (
     MODE_UUID,
     NOZZLE_UUID,
     ROW_BYTES,
+    SPEED_WARN_UUID,
     START_BTN_UUID,
     STARTPOINT_UUID,
 )
@@ -149,6 +150,24 @@ class PrintheadBLE:
             print(f"(could not set print mode {mode}, continuing: {exc})")
             return False
         return True
+
+    # ---------------------------------------------------------- speed warn
+    async def set_speed_warning(self, warn: bool) -> None:
+        """
+        Tell the firmware whether the cart is currently moving too fast to
+        print reliably (see ``PrintController``'s speed-warning hysteresis
+        in ``_print_freehand_pass``). The firmware only uses this to drive
+        a status LED -- nothing about print correctness depends on it -- so
+        unlike :meth:`set_print_mode` this is advisory, not required: fire-
+        and-forget (``response=False``, same as :meth:`write_pattern`) and
+        any failure is swallowed here rather than raised, so a dropped
+        write can never abort a print pass.
+        """
+        try:
+            await self._client.write_gatt_char(
+                SPEED_WARN_UUID, bytes([1 if warn else 0]), response=False)
+        except Exception as exc:
+            print(f"(could not set speed warning to {int(warn)}: {exc})")
 
     # --------------------------------------------------------------- write
     async def write_column(self, frame: bytes, response: bool = False) -> None:
