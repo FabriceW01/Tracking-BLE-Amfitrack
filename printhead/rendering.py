@@ -3,8 +3,8 @@ Text -> bitmap -> nozzle frames
 ===============================
 
 Renders a text string into a black/white mask whose height is EXACTLY
-``IMAGE_HEIGHT`` (164 px); the width depends on the text. Each image column then
-becomes one 21-byte BLE frame.
+``IMAGE_HEIGHT`` (152 px); the width depends on the text. Each image column then
+becomes one 19-byte BLE frame.
 
 Frame format
 ------------
@@ -128,7 +128,7 @@ def pack_nozzle_bits(active: np.ndarray) -> bytes:
 
 def frames_from_ink(ink: np.ndarray) -> list[bytes]:
     """
-    Turn a ``(IMAGE_HEIGHT, W)`` boolean mask into a list of ``W`` 21-byte frames.
+    Turn a ``(IMAGE_HEIGHT, W)`` boolean mask into a list of ``W`` 19-byte frames.
 
     Vectorised with ``numpy.packbits`` instead of a per-pixel Python loop: build a
     ``(W, NUM_NOZZLES)`` bit matrix, place the ``IMAGE_HEIGHT`` image rows at bit

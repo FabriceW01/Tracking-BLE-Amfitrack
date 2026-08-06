@@ -29,7 +29,7 @@ def _auto_int(value: str) -> int:
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         prog="printhead",
-        description="Render text to a 164px-tall B/W image and print it "
+        description="Render text to a 152px-tall B/W image and print it "
                     "column-by-column on an HP302 cartridge via the PrintheadBLE "
                     "ESP32, driven either by Amfitrack position or by a timer.")
     ap.add_argument("text", nargs="?",
@@ -199,10 +199,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="With --pos: emit one JSON object per sample (newline "
                         "terminated) instead of the live line (used by the web UI)")
     g.add_argument("--page-calibration", metavar="PATH",
-                   help="With --pos: load a page calibration JSON (see "
-                        "printhead.calibration.PageCalibration) and also report "
-                        "live page-plane u/v/z, to sanity-check a calibration "
-                        "against known hand motion before printing with it")
+                   help="Load a page calibration JSON (see "
+                        "printhead.calibration.PageCalibration). Required for "
+                        "--mode page. With --pos, also reports live page-plane "
+                        "u/v/z, to sanity-check a calibration against known hand "
+                        "motion before printing with it")
     mx.add_argument("--list-nodes", action="store_true",
                     help="List the Amfitrack USB nodes (name/uuid/tx_id) and exit")
     mx.add_argument("--scan-ble", action="store_true",
@@ -225,6 +226,12 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--nozzle-block-size and --nozzle-order must be given together")
     if args.nozzle_block_size is not None and args.nozzle_block_size <= 0:
         ap.error("--nozzle-block-size must be a positive integer")
+    if not _debug_mode(args) and args.track and args.mode == "page" and args.nozzle_block_size is not None:
+        ap.error("--nozzle-block-size/--nozzle-order are not supported with "
+                 "--mode page: the block permutation is indexed by image row, "
+                 "but page mode's nozzle-to-row alignment shifts with vertical "
+                 "travel, so the permutation would only be correct at multiples "
+                 "of the block size")
     if not _debug_mode(args) and args.track and args.mode == "page" and not args.page_calibration:
         ap.error("--mode page requires --page-calibration PATH (trace the page "
                  "edges with calibration.calibrate_page() first, then save())")

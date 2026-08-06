@@ -24,6 +24,7 @@ from typing import Callable, Optional
 from .config import BleSettings
 from .geometry import (
     BLANK_FRAME,
+    MODE_UUID,
     NOZZLE_UUID,
     ROW_BYTES,
     START_BTN_UUID,
@@ -114,6 +115,40 @@ class PrintheadBLE:
                 await self._client.start_notify(STARTPOINT_UUID, _sp_cb)
             except Exception as exc:
                 print(f"(startpoint notify unavailable: {exc})")
+
+    # ---------------------------------------------------------------- mode
+    async def set_print_mode(self, mode: int, required: bool = True) -> bool:
+        """
+        Select line (:data:`~.geometry.NOZZLE_MODE_LINE`) or page
+        (:data:`~.geometry.NOZZLE_MODE_PAGE`) mode on the firmware.
+
+        The firmware's power-on default is line mode, and it stays in
+        whatever mode the *last* connected client left it in -- so page mode
+        must be selected explicitly before a page-mode pass, and line mode
+        must be selected explicitly too, or a previous page-mode run could
+        leak into a later line/time-mode one. Without this call the firmware
+        silently keeps using the wrong dosing model (column-FIFO/arrival-rate
+        vs. fixed-stride held-pattern); nothing else would report the
+        mismatch.
+
+        Uses ``response=True``: this is a one-off control write, not a
+        hot-path data write, so we pay the extra round trip to get the GATT
+        write ack and let a failure surface here instead of as mysteriously
+        wrong ink on paper.
+        """
+        try:
+            await self._client.write_gatt_char(
+                MODE_UUID, bytes([mode]), response=True)
+        except Exception as exc:
+            if required:
+                raise RuntimeError(
+                    f"Could not switch the firmware to print mode {mode}: {exc}. "
+                    "Printing would silently use the wrong dosing model for this "
+                    "mode. The firmware may predate the print mode characteristic "
+                    "and need re-flashing.") from exc
+            print(f"(could not set print mode {mode}, continuing: {exc})")
+            return False
+        return True
 
     # --------------------------------------------------------------- write
     async def write_column(self, frame: bytes, response: bool = False) -> None:

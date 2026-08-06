@@ -15,6 +15,11 @@ SERVICE_UUID = "d0567401-5a22-c59f-5243-8c0fa18e257b"
 NOZZLE_UUID = "41a9348e-2f6b-8db1-934d-743c6f17649a"   # Write / WriteNoRsp, 19 bytes
 START_BTN_UUID = "b473a21f-6e58-6380-2647-abd7cd4a904e"  # Read / Notify, 1 byte 0/1
 STARTPOINT_UUID = "cc1087f5-1d92-6ca4-b84f-3e5880e6713d"  # Read / Notify, 1 byte 0/1
+# Runtime line/page switch (must match the firmware's power-on default of line
+# mode -- see README_BLE_INTERFACE.md "2) Print Mode Characteristic").
+MODE_UUID = "f5ad7c1f-f6e1-4dd7-bbb7-d8b9286a88c6"   # Read / Write, 1 byte
+NOZZLE_MODE_LINE = 0
+NOZZLE_MODE_PAGE = 1
 
 # ----------------------------------------------------------------------------
 # Printhead geometry (must match the firmware)
