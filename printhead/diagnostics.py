@@ -194,6 +194,29 @@ async def scan_ble(ble: BleSettings) -> None:
         print(f"  {dev.address}  {name}{marker}")
 
 
+def _print_start_button_hint() -> None:
+    """
+    Firmware only drains its BLE receive FIFO into the nozzle output queue
+    while ``process_running == 1`` -- and that flag is set *exclusively* by
+    a physical button press in the firmware's ``mainloop()`` (see
+    ``main.c``: ``button_poll_press_event()`` -> ``i2s_parallel_start()``).
+    BLE writes from here always succeed and land in the FIFO regardless, so
+    without the button this command reports success while physically
+    nothing fires and 0 mA flows -- confirmed against a real serial log.
+    There is no BLE-visible signal wired up to gate on here (see the
+    module docstring / README for why), so a message that cannot be missed
+    is the fix.
+    """
+    print("=" * 72)
+    print("IMPORTANT: the printhead only fires while its print process is")
+    print("running, and that is only ever started by a PHYSICAL PRESS of the")
+    print("START button on the device itself -- this command cannot do that")
+    print("for you. Press and hold the device's START button now, for the")
+    print("duration of this test, or nothing will physically happen even")
+    print("though every BLE write below reports success.")
+    print("=" * 72)
+
+
 # ============================================================================
 # --nozzle-test : fire a diagnostic pattern on the cartridge
 # ============================================================================
@@ -222,6 +245,7 @@ async def nozzle_test(ble: BleSettings, nozzle_map: Optional[NozzleMapSettings] 
             # this must still run against older firmware without MODE_UUID, where
             # line mode is the only behaviour anyway.
             await client.set_print_mode(NOZZLE_MODE_LINE, required=False)
+            _print_start_button_hint()
             print(f"All {IMAGE_HEIGHT} nozzles ON for {on_seconds:.1f}s ...")
             await client.write_column(all_on)
             await asyncio.sleep(on_seconds)
@@ -231,7 +255,12 @@ async def nozzle_test(ble: BleSettings, nozzle_map: Optional[NozzleMapSettings] 
                 await client.write_column(frame)
                 await asyncio.sleep(sweep_step)
             await client.write_blank()
-        print("Nozzle test done.")
+        # Not "done" / success -- the frames were sent over BLE, that's all
+        # this can confirm from here. If nothing visibly fired or no current
+        # was drawn, the START button was most likely not pressed/held.
+        print("Nozzle test: all frames sent. If nothing fired and no current "
+              "was drawn, the physical START button on the device was most "
+              "likely not pressed (or not held) throughout the test.")
     except Exception as exc:
         print(f"Nozzle test failed (BLE): {exc}")
 
@@ -258,6 +287,7 @@ async def ble_benchmark(ble: BleSettings, tracking: TrackingSettings,
         async with PrintheadBLE(ble) as client:
             # Measure in a known mode, so the reported cols/s means something.
             await client.set_print_mode(NOZZLE_MODE_LINE, required=False)
+            _print_start_button_hint()
             print(f"Throughput: sending {n_fast} frames (no response) ...")
             t0 = loop.time()
             for _ in range(n_fast):

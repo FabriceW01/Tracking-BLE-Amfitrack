@@ -56,9 +56,21 @@ Seite bewegen, nicht nur eine Richtung). Braucht eine vorher erstellte
 `PageCalibration` (`printhead/calibration.py`, `--page-calibration PATH`) — dafür
 im **Calibration**-Tab der Web-UI zwei angrenzende Seitenkanten mit dem
 Sensor abfahren, "Compute calibration" berechnen lassen und speichern; die
-gespeicherte Datei dann per `--page-calibration PATH` laden. Bisher nur an
-synthetischen Daten getestet, noch nicht an echter Hardware. Details:
+gespeicherte Datei dann per `--page-calibration PATH` laden. Details:
 `README_BLE_INTERFACE.md` im Firmware-Repo (Abschnitt "Page Mode").
+
+⚠️ **Wichtig:** Beim ersten echten Hardware-Bring-up ist der Modus ohne
+Fehlermeldung leer durchgelaufen (`active=0` die ganze Zeit, Exit-Code 0,
+nichts auf dem Papier) — der Grund war genau der folgende Punkt: Das
+gerenderte Zielbild ist mit 152 Düsenreihen nur ca. 15 mm
+hoch (`NOZZLE_PITCH_MM * 151`). Damit überhaupt eine Düse zündet, muss der
+Wagen in `v`-Richtung auf ca. ±15 mm um die abgefahrene Spaltenkante herum
+bleiben — außerhalb dieses schmalen Streifens ist für *jede* Düse `active=0`,
+und der Pass läuft klaglos (Exit-Code 0) durch, ohne dass etwas gedruckt wird.
+Vor dem eigentlichen Druck mit `--pos --page-calibration PATH` das live
+`(u, v)` gegen eine bekannte Handbewegung prüfen, um sicherzustellen, dass der
+Wagen tatsächlich innerhalb der Seite (und nicht z. B. am falschen Rand oder
+mit vertauschten Achsen) unterwegs ist.
 
 ---
 
