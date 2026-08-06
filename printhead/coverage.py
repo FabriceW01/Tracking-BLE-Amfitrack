@@ -58,18 +58,44 @@ from .rendering import pack_nozzle_bits
 # PATTERN_STRIDE (src/ble_dose.h in the firmware repo):
 #   DEFAULT_DOSE_HOLD_S ~= 3 * PATTERN_STRIDE * 450e-6
 # (450 us = the firmware print loop tick; 3 = BLE_DROPS_PER_COLUMN, line
-# mode's long-validated per-column dose target). At PATTERN_STRIDE = 4 that
-# is 3 * 4 * 450e-6 = 0.0054 s, i.e. a pixel gets ~3 drops before the
+# mode's long-validated per-column dose target). At PATTERN_STRIDE = 3 that
+# is 3 * 3 * 450e-6 = 0.00405 s, i.e. a pixel gets ~3 drops before the
 # coverage mask marks it printed. Changing this constant without changing
 # PATTERN_STRIDE to match (and re-flashing) breaks that ~3-drop target: a
 # shorter hold with an unchanged stride gives fewer than 3 drops, a longer
 # hold gives more. See tests/test_coverage.py for a test that pins this
 # relationship so an edit to one side fails loudly here.
 #
-# At median hand speed the 0.2 mm column dwell is ~11.6 ms, comfortably
-# above this 5.4 ms hold (~90% of samples complete); above ~37 mm/s a pixel
-# deliberately stays unfinished for a later pass -- that is the intended
-# design, not a bug (see CoverageEngine's docstring).
+# CORRECTION (this value replaces an earlier 0.0054 s / PATTERN_STRIDE=4
+# pick that also hit the 3-drop target but ignored polling quantization and
+# landed on a cliff): `step()` only marks a pixel printed on a *sample* that
+# finds elapsed dwell >= dose_hold_s, where "elapsed" is measured from the
+# first sample on that pixel -- so completing a dose costs whole poll
+# intervals, not continuous time. With the default --poll-hz 200 (5.00 ms
+# interval), a hold just *above* one interval (the old 5.4 ms) forces a
+# THIRD sample to land on the same column before it completes, because a
+# second sample at +5.00 ms is still short of 5.4 ms. Measured directly by
+# sweeping dose_hold_s at poll_hz=200 over a realistic hand-speed pass:
+#   dose_hold  4.90 ms -> 100.0 % coverage
+#   dose_hold  5.40 ms ->  31.0 %   <-- the value that shipped in the first pass
+#   dose_hold  7.00 ms ->  31.0 %
+#   dose_hold 10.00 ms ->   6.5 %
+# i.e. crossing the poll interval does not degrade coverage gracefully, it
+# collapses it. The additional constraint this adds, on top of the ~3-drop
+# target above: dose_hold_s MUST stay below the poll interval (1/poll_hz),
+# so that two consecutive samples are always enough to complete a dose --
+# cross that line and coverage falls off a cliff rather than sloping down.
+# 0.00405 s is 19% below the 5.00 ms default poll interval, giving some
+# margin rather than sitting on the edge again.
+#
+# At the measured median hand speed (17.3 mm/s) a full simulated pass at
+# poll_hz=200 gives 100% coverage with this default; coverage falls off
+# above that as hand speed rises (60% at 25 mm/s, 14% at 35 mm/s, 0% at
+# 46 mm/s) because fewer poll samples land on each column before the hand
+# moves on. That falloff is BY DESIGN, not a bug -- an unfinished pixel
+# simply stays open for a later pass (see CoverageEngine's docstring) -- but
+# it means this default is not universally sufficient at all hand speeds;
+# it is tuned to the measured median, not the tail.
 #
 # Like PATTERN_STRIDE, this is a measured-once value from one real print at
 # ~17 mm/s median hand speed, not a finished calibration -- a large,
@@ -77,7 +103,7 @@ from .rendering import pack_nozzle_bits
 # expect iteration once more prints are measured, the same way every other
 # dose constant in this project (BLE_FIRE_MIN/MAX etc.) needed several
 # rounds of hardware iteration before it was right.
-DEFAULT_DOSE_HOLD_S = 0.0054
+DEFAULT_DOSE_HOLD_S = 0.00405
 
 _Pixel = Optional[Tuple[int, int]]
 

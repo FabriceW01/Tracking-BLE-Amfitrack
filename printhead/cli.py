@@ -110,13 +110,17 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--dose-hold-s", type=float, default=None,
                    help="Page mode: seconds a nozzle must continuously hold a "
                         "pixel before it counts as printed (default: "
-                        "coverage.DEFAULT_DOSE_HOLD_S = 0.0054, measured "
+                        "coverage.DEFAULT_DOSE_HOLD_S = 0.00405, measured "
                         "against a real print at ~17 mm/s median hand speed "
                         "-- must track the firmware's PATTERN_STRIDE "
                         "(src/ble_dose.h): DEFAULT_DOSE_HOLD_S ~= "
                         "3 * PATTERN_STRIDE * 450us; changing one without "
                         "the other and re-flashing breaks the ~3-drop-per-"
-                        "pixel target)")
+                        "pixel target. MUST also stay below 1/--poll-hz "
+                        "(the poll interval): at or above it, two "
+                        "consecutive samples cannot complete a dose and "
+                        "coverage collapses -- PrintController warns at "
+                        "runtime if this holds)")
     g.add_argument("--progress-json", action="store_true",
                    help="Page mode: emit one JSON progress event per sample "
                         "(current u/v/row/col + newly-covered cells) instead "

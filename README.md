@@ -97,22 +97,53 @@ python main.py --pattern checkerboard --mode page --page-calibration page_calibr
 
 **Dosierung in `--mode page` (`--dose-hold-s`):** Ein Pixel gilt erst als
 gedruckt, wenn eine Düse ununterbrochen `--dose-hold-s` Sekunden darüber
-steht — Default `coverage.DEFAULT_DOSE_HOLD_S = 0.0054` s (5.4 ms), gemessen
+steht — Default `coverage.DEFAULT_DOSE_HOLD_S = 0.00405` s (4.05 ms), gemessen
 an einem echten 200×100 mm Schachbrett-Druck bei median 17.3 mm/s
 Handgeschwindigkeit. Bei diesem Wert bekommt ein Pixel ca. **3 Tropfen**
-(wie `BLE_DROPS_PER_COLUMN` im Zeilen-Modus), bevor es als fertig gilt. Bei
-Handgeschwindigkeiten über ca. **37 mm/s** reicht die Verweildauer über
-einer Spalte nicht mehr für die vollen 5.4 ms — das Pixel bleibt absichtlich
-offen für einen späteren Durchgang, statt halb dosiert zu gelten; das ist
-gewolltes Verhalten, kein Fehler. Der alte Default (0.05 s = 50 ms) verlangte
-unter 4 mm/s, um überhaupt ein Pixel zu markieren; gemessen wurden dabei nur
-0.044 % Coverage über einen fertigen Druck, mit sichtbarem Geisterbild/
-Doppeldruck als Folge (jeder Revisit hat dieselben Pixel an leicht anderer
-Handposition erneut gefeuert, weil `printed` fast nirgends True wurde).
+(wie `BLE_DROPS_PER_COLUMN` im Zeilen-Modus), bevor es als fertig gilt. Der
+alte Default (0.05 s = 50 ms) verlangte unter 4 mm/s, um überhaupt ein Pixel
+zu markieren; gemessen wurden dabei nur 0.044 % Coverage über einen
+fertigen Druck, mit sichtbarem Geisterbild/Doppeldruck als Folge (jeder
+Revisit hat dieselben Pixel an leicht anderer Handposition erneut gefeuert,
+weil `printed` fast nirgends True wurde).
+
+⚠️ **Quantisierungs-Klippe (korrigiert):** Ein Pixel wird nur in dem
+Sample als fertig markiert, in dem die Verweildauer seit dem *ersten*
+Sample auf diesem Pixel `>= dose_hold_s` erreicht — Fertigstellung kostet
+also ganze Poll-Intervalle (`1 / --poll-hz`), keine stetige Zeit. Eine erste
+Korrekturrunde setzte `dose_hold_s = 0.0054` s (5.4 ms) bei
+`PATTERN_STRIDE = 4` — knapp **über** dem 5.00 ms Poll-Intervall von
+`--poll-hz 200`. Das erzwingt ein *drittes* Sample auf derselben Spalte,
+weil ein zweites Sample bei +5.00 ms die 5.4 ms noch nicht erreicht. Direkt
+gemessen (poll_hz=200, realistischer Handgeschwindigkeits-Durchlauf):
+
+```
+dose_hold  4.90 ms -> 100.0 % Coverage
+dose_hold  5.40 ms ->  31.0 %   <-- der zuvor ausgelieferte Wert
+dose_hold  7.00 ms ->  31.0 %
+dose_hold 10.00 ms ->   6.5 %
+```
+
+Das Überschreiten des Poll-Intervalls degradiert die Coverage also nicht
+sanft, sondern lässt sie einbrechen. Zusätzlich zum 3-Tropfen-Ziel gilt
+deshalb: `dose_hold_s` **muss unter** dem Poll-Intervall (`1 / poll_hz`)
+bleiben, damit zwei aufeinanderfolgende Samples immer für eine
+Fertigstellung reichen. Der neue Default 4.05 ms liegt 19 % unter dem
+5.00 ms Poll-Intervall (statt knapp darüber). `PrintController` warnt zur
+Laufzeit, falls `dose_hold_s >= 1 / poll_hz` doch wieder zutrifft.
+
+Bei Handgeschwindigkeiten über ca. **20 mm/s** reicht die Verweildauer über
+einer Spalte nicht mehr für die vollen 4.05 ms — das Pixel bleibt
+absichtlich offen für einen späteren Durchgang, statt halb dosiert zu
+gelten; das ist gewolltes Verhalten, kein Fehler, aber auch kein Hinweis,
+dass dieser Default bei jeder Handgeschwindigkeit ausreicht: gemessen
+(poll_hz=200) sind es 100 % bei ≤17.3 mm/s, 60 % bei 25 mm/s, 14 % bei
+35 mm/s und 0 % bei 46 mm/s — abgestimmt auf die gemessene Median-, nicht
+die Spitzengeschwindigkeit.
 
 ⚠️ **Firmware-Kopplung:** `--dose-hold-s` muss zum Firmware-`PATTERN_STRIDE`
 (`src/ble_dose.h`, Firmware-Repo) passen: `DEFAULT_DOSE_HOLD_S ≈ 3 ×
-PATTERN_STRIDE × 450 µs`. Wird nur eine Seite geändert, stimmt die
+PATTERN_STRIDE × 450 µs` (jetzt `PATTERN_STRIDE = 3`). Wird nur eine Seite geändert, stimmt die
 Tropfenzahl pro Pixel nicht mehr — die Firmware muss bei einer Änderung
 **neu geflasht** werden.
 

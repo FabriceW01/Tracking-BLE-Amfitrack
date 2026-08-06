@@ -457,6 +457,28 @@ class PrintController:
                   f"dose_hold={self.dose_hold_s * 1000:.0f} ms. Move the cart over "
                   f"the calibrated page.")
 
+        # Quantization-cliff guard (see coverage.DEFAULT_DOSE_HOLD_S for the
+        # measured example): CoverageEngine.step() only marks a pixel
+        # printed on a *sample* that finds elapsed dwell >= dose_hold_s,
+        # measured from the first sample on that pixel -- so completion
+        # costs whole poll intervals, not continuous time. Once
+        # dose_hold_s >= 1/poll_hz, a second sample one interval later is
+        # never enough (it lands at exactly one interval, still short of a
+        # hold that is itself >= one interval); a THIRD sample landing on
+        # the same column is required, which is a much narrower window at
+        # realistic hand speeds and collapses coverage rather than merely
+        # reducing it. Warn here instead of letting that surface later as a
+        # near-empty coverage report with no obvious cause. Suppressed in
+        # --progress-json mode, which must stay pure NDJSON for the UI
+        # consumer (mirrors the out-of-page warning's `not pj` gating below).
+        if not pj and self.dose_hold_s >= 1.0 / t.poll_hz:
+            poll_interval_ms = 1000.0 / t.poll_hz
+            print(f"[warn] dose_hold_s={self.dose_hold_s * 1000:.2f} ms >= poll "
+                  f"interval={poll_interval_ms:.2f} ms (--poll-hz {t.poll_hz:g}): "
+                  f"a dose then needs three or more samples to land on the same "
+                  f"column, and coverage will be very low. Use a shorter "
+                  f"--dose-hold-s or a higher --poll-hz.")
+
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None
         prev_printed = coverage.printed.copy() if pj else None
