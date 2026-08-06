@@ -10,6 +10,8 @@ import sys
 import time
 from contextlib import redirect_stdout
 
+import numpy as np
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printhead import cli                                            # noqa: E402
@@ -56,7 +58,10 @@ def test_csv_log_written(tmp_path=None):
                       csv_path=path)
         with open(path) as fh:
             lines = fh.read().strip().splitlines()
+        # Line mode has no orientation input -- pins the header unchanged and,
+        # explicitly, that the page-mode-only quaternion columns did not leak in.
         assert lines[0] == "t_s,column,advance_mm,write_latency_ms,speed_mm_s"
+        assert "qx" not in lines[0] and "qw" not in lines[0]
         assert len(lines) == 1 + 5           # header + 5 rows
     finally:
         if os.path.exists(path):
@@ -107,8 +112,68 @@ def test_page_mode_csv_log_written():
         _run_page_profiler(mm_per_column=1.0, n=5, gap_s=0.002, csv_path=path)
         with open(path) as fh:
             lines = fh.read().strip().splitlines()
-        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s"
+        assert lines[0] == \
+            "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
         assert len(lines) == 1 + 5
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_page_mode_csv_header_has_quat_columns_even_without_samples():
+    # Header shape is guaranteed unconditionally, so a downstream CSV parser
+    # never needs to special-case a pass with zero orientation samples.
+    path = os.path.join(
+        os.environ.get("TMPDIR", "/tmp"), "printhead_page_profile_test_empty.csv")
+    try:
+        prof = PassProfiler(1.0, live=False, csv_path=path, mode="page")
+        prof.start()
+        prof.finish()
+        with open(path) as fh:
+            lines = fh.read().strip().splitlines()
+        assert lines[0] == \
+            "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_page_mode_csv_logs_quaternion_when_present():
+    path = os.path.join(
+        os.environ.get("TMPDIR", "/tmp"), "printhead_page_profile_test_quat.csv")
+    try:
+        prof = PassProfiler(1.0, live=False, csv_path=path, mode="page")
+        prof.start()
+        quat = np.array([0.12345, -0.6789, 0.0001, 0.98765])
+        prof.record_page_sample(u_mm=1.0, v_mm=2.0, speed_mm_s=5.0, quat=quat)
+        prof.finish()
+        with open(path) as fh:
+            lines = fh.read().strip().splitlines()
+        header = lines[0].split(",")
+        row = lines[1].split(",")
+        assert header[-4:] == ["qx", "qy", "qz", "qw"]
+        assert row[-4:] == ["0.1235", "-0.6789", "0.0001", "0.9877"], row
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_page_mode_csv_blank_quaternion_when_absent():
+    # quat=None (the default) must not raise, and must leave the four fields
+    # blank -- NOT "0,0,0,0", which would look like a real degenerate
+    # quaternion and could mislead an offline analysis.
+    path = os.path.join(
+        os.environ.get("TMPDIR", "/tmp"), "printhead_page_profile_test_noquat.csv")
+    try:
+        prof = PassProfiler(1.0, live=False, csv_path=path, mode="page")
+        prof.start()
+        prof.record_page_sample(u_mm=1.0, v_mm=2.0, speed_mm_s=5.0)
+        prof.finish()
+        with open(path) as fh:
+            lines = fh.read().strip().splitlines()
+        # Splitting on ',' with trailing empty fields keeps them visible.
+        row = lines[1].split(",")
+        assert row[-4:] == ["", "", "", ""], row
     finally:
         if os.path.exists(path):
             os.remove(path)

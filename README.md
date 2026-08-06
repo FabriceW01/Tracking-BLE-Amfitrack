@@ -445,6 +445,16 @@ BLE-Write-Latenz ausgegeben (`load > 1.0` = BLE kommt nicht hinterher). Am Ende 
 Fazit inkl. „bis ~X mm/s halten die Spalten mit". Das `--profile-csv` schreibt pro
 Spalte `t, column, advance, write_latency, speed` für die Offline-Analyse.
 
+Im Seitenmodus (`--mode page`) enthält dieselbe `--profile-csv`-Datei zusätzlich
+`qx,qy,qz,qw` — das rohe Orientierungs-Quaternion des Sensors, sofern die Hardware es
+gerade geliefert hat (sonst leer, nicht `0,0,0,0`). Reine Diagnosedaten für die
+nachträgliche, manuelle Auswertung eines echten Druckdurchlaufs: die Hypothese ist,
+dass eine Rotation des Wagens zusammen mit dem festen Hebelarm Sensor→Düsenleiste
+(`--sensor-offset-row-mm`, s. o.) die beobachteten Verzerrungen (nicht-parallele
+Linien, Versatz bei mehreren Durchgängen) erklären könnte. Aktuell fließt das
+Quaternion in nichts Live ein — `PageMapper.project()` korrigiert nach wie vor nur
+einen festen Versatz, keine Rotation.
+
 **3. `--record BILD.png`** – rekonstruiert, was **tatsächlich aufs Papier geht**:
 jeder gesendete Frame wird mit der Kopfposition aufgezeichnet und danach als Bild
 gespeichert, das die Frames auf ihre reale Position mappt (die Firmware druckt den
