@@ -18,7 +18,9 @@ Three pieces:
     rig, so this either picks a fixed axis or auto-calibrates the direction.
   * :class:`PageMapper` - the 2-D counterpart for freehand page printing:
     projects a position onto a calibrated page plane (see ``calibration.py``)
-    instead of a single travel scalar.
+    instead of a single travel scalar, and then corrects for the tracked
+    sensor not being physically at the nozzle bar (see ``geometry.py``'s
+    ``SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM``/``SENSOR_TO_NOZZLE_COL_MM``).
 """
 
 from __future__ import annotations
@@ -30,6 +32,11 @@ import numpy as np
 
 from .calibration import PageCalibration
 from .config import TrackingSettings
+from .geometry import (
+    NOZZLE_BAR_WIDTH_MM,
+    SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+    SENSOR_TO_NOZZLE_COL_MM,
+)
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 
@@ -125,25 +132,50 @@ class AdvanceMapper:
 
 class PageMapper:
     """
-    Maps a 3-D position (mm) onto a calibrated 2-D page plane -- the page-mode
-    counterpart to :class:`AdvanceMapper`'s single scalar "advance". Wraps a
-    :class:`~printhead.calibration.PageCalibration` fit ahead of time (trace
-    two page edges, see ``calibration.py``) rather than locking anything at
-    pass-start: the calibration's own origin (a traced page corner) already
-    anchors ``(u, v)``, so one calibration stays valid across many passes as
-    long as the paper and cart mount haven't moved.
+    Maps a 3-D sensor position (mm) onto the calibrated 2-D page plane, in
+    the nozzle-0-referenced ``(u, v)`` frame :class:`~printhead.coverage.
+    CoverageEngine` expects -- the page-mode counterpart to
+    :class:`AdvanceMapper`'s single scalar "advance". This does two things:
+
+      1. Projects through a :class:`~printhead.calibration.PageCalibration`
+         fit ahead of time (trace two page edges, see ``calibration.py``)
+         rather than locking anything at pass-start: the calibration's own
+         origin (a traced page corner) already anchors ``(u, v)``, so one
+         calibration stays valid across many passes as long as the paper and
+         cart mount haven't moved. This step alone gives the *sensor's* own
+         page-plane position, not the nozzle bar's.
+      2. Corrects for the tracked sensor not being physically at the nozzle
+         bar: the cart carries the sensor and the 152-nozzle bar a fixed
+         offset apart (measured, see ``geometry.py``'s
+         ``SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM``/``SENSOR_TO_NOZZLE_COL_MM``),
+         so without this the reported ``(u, v)`` would be off by exactly that
+         offset from where ink is actually deposited.
     """
 
-    def __init__(self, calibration: PageCalibration):
+    def __init__(self, calibration: PageCalibration,
+                 sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+                 sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM):
         self.calibration = calibration
+        # Convert the measured bar-CENTRE-referenced offset to the nozzle-0-
+        # referenced one CoverageEngine actually needs: CoverageEngine places
+        # nozzle p at row base_row + p for p in 0..NUM_NOZZLES-1, so the bar's
+        # centre (nozzle index (NUM_NOZZLES-1)/2) sits exactly
+        # NOZZLE_BAR_WIDTH_MM/2 further along +v than nozzle 0 -- exact, not
+        # approximate, because NOZZLE_BAR_WIDTH_MM is defined in geometry.py
+        # as exactly (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM. See geometry.py's
+        # SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM for the measurement itself.
+        self._row_offset_mm = sensor_offset_row_mm - NOZZLE_BAR_WIDTH_MM / 2.0
+        self._col_offset_mm = sensor_offset_col_mm
 
     def project(self, pos) -> "tuple[float, float, float]":
         """
-        World position (mm) -> page-plane ``(u_mm, v_mm, z_mm)``. Feed it an
-        already-filtered position (see :class:`PositionFilter`) -- this does
-        no smoothing of its own, only the fixed geometric projection.
+        World position (mm) -> nozzle-0-referenced page-plane
+        ``(u_mm, v_mm, z_mm)``. Feed it an already-filtered position (see
+        :class:`PositionFilter`) -- this does no smoothing of its own, only
+        the fixed geometric projection plus the fixed sensor->nozzle offset.
         """
-        return self.calibration.project(pos)
+        u, v, z = self.calibration.project(pos)
+        return u + self._col_offset_mm, v + self._row_offset_mm, z
 
 
 # ============================================================================

@@ -28,6 +28,11 @@ from printhead.controller import (                                    # noqa: E4
     _speed_warning_transition,
 )
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
+from printhead.geometry import (                                      # noqa: E402
+    NOZZLE_BAR_WIDTH_MM,
+    SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+    SENSOR_TO_NOZZLE_COL_MM,
+)
 from printhead.tracking import PageMapper                             # noqa: E402
 
 
@@ -68,12 +73,27 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
     ble = BleSettings()
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
                            poll_hz=poll_hz, timeout_s=timeout_s)
+    # Sensor->nozzle offsets neutralised: these tests check
+    # CoverageEngine/PatternSender wiring against a controlled identity
+    # calibration, unrelated to the (separately tested, see
+    # tests/test_page_mapper.py) sensor-to-nozzle-bar offset feature -- a
+    # nonzero *effective* offset here would shift v_mm by tens of mm and push
+    # every sample out of the small target images used below.
+    #
+    # NOTE: PageMapper's row axis always subtracts NOZZLE_BAR_WIDTH_MM/2 from
+    # whatever sensor_offset_row_mm is given (that is the bar-CENTER-to-
+    # nozzle-0 conversion, not "no correction"), so the value that actually
+    # cancels to a zero net shift is NOZZLE_BAR_WIDTH_MM/2.0, NOT 0.0 --
+    # passing literal 0.0 would itself introduce a -NOZZLE_BAR_WIDTH_MM/2 mm
+    # shift. See tests/test_page_mapper.py for this pinned in detail.
     return PrintController(render, ble, trk, ink=ink,
                            page_calibration=_identity_calibration(),
                            dose_hold_s=dose_hold_s, profile=profile,
                            profile_csv=profile_csv, record=record,
                            progress_json=progress_json,
-                           speed_warning_mm_s=speed_warning_mm_s)
+                           speed_warning_mm_s=speed_warning_mm_s,
+                           sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                           sensor_offset_col_mm=0.0)
 
 
 def _sweep_positions(n_cols, samples_per_col=12):
@@ -120,7 +140,13 @@ def test_freehand_pass_actually_covers_every_ink_pixel():
     # directly to check *what* "covered" means at the pixel level, not just
     # that the pass terminated.
     ink = np.ones((30, 5), dtype=bool)
-    mapper = PageMapper(_identity_calibration())
+    # Neutralised sensor offset (NOZZLE_BAR_WIDTH_MM/2.0, not 0.0 -- see the
+    # NOTE in _controller() above): this test drives CoverageEngine/PageMapper
+    # directly against a controlled identity calibration and a small (30-row)
+    # target image, unrelated to the sensor-to-nozzle-bar offset feature.
+    mapper = PageMapper(_identity_calibration(),
+                        sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                        sensor_offset_col_mm=0.0)
     coverage = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
 
     t = 0.0
@@ -306,8 +332,14 @@ def test_freehand_pass_out_of_page_reports_zero_coverage_and_diagnosis():
 
     # The pass-level assertions above only prove the *symptom* (0 covered);
     # confirm the actual signal the fix depends on -- CoverageEngine itself
-    # reporting no nozzle was ever in bounds for this position.
-    mapper = PageMapper(_identity_calibration())
+    # reporting no nozzle was ever in bounds for this position. Neutralised
+    # sensor offset to match the neutralised-offset `ctrl` used above (v=500
+    # is far enough out of bounds either way, but this keeps the two mappers
+    # consistent, and matches the exact v_min/v_max == 500.0 the pass-level
+    # test above expects).
+    mapper = PageMapper(_identity_calibration(),
+                        sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                        sensor_offset_col_mm=0.0)
     coverage = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
     u, v, _z = mapper.project(np.array([2.0, 500.0, 0.0]))
     coverage.step(u, v, 0.0)
@@ -504,6 +536,35 @@ def test_cli_ble_write_ceiling_defaults_to_none_and_parses():
     assert args.ble_write_ceiling is None
     args = cli.parse_args(["Hi", "--dry-run", "--ble-write-ceiling", "150"])
     assert args.ble_write_ceiling == 150.0
+
+
+def test_cli_sensor_offset_flags_default_to_none_and_parse():
+    # Same "default None -> controller falls back to the geometry constant"
+    # pattern as --dose-hold-s / --ble-write-ceiling above.
+    args = cli.parse_args(["Hi", "--dry-run"])
+    assert args.sensor_offset_row_mm is None
+    assert args.sensor_offset_col_mm is None
+    args = cli.parse_args(["Hi", "--dry-run", "--sensor-offset-row-mm", "70.0",
+                           "--sensor-offset-col-mm", "-3.5"])
+    assert args.sensor_offset_row_mm == 70.0
+    assert args.sensor_offset_col_mm == -3.5
+
+
+def test_cli_sensor_offset_flags_reach_the_controller_when_given():
+    args = cli.parse_args(["Hi", "--dry-run", "--sensor-offset-row-mm", "70.0",
+                           "--sensor-offset-col-mm", "-3.5"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.sensor_offset_row_mm == 70.0
+    assert ctrl.sensor_offset_col_mm == -3.5
+
+
+def test_cli_sensor_offset_flags_default_to_the_geometry_constants_unset():
+    # When not given at all, the controller must fall back to the real
+    # measured geometry constants, not to 0.0.
+    args = cli.parse_args(["Hi", "--dry-run"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.sensor_offset_row_mm == SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM
+    assert ctrl.sensor_offset_col_mm == SENSOR_TO_NOZZLE_COL_MM
 
 
 def test_build_page_calibration_loads_a_saved_file():

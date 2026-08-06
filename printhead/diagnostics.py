@@ -20,7 +20,13 @@ import numpy as np
 from .ble_client import PrintheadBLE
 from .calibration import PageCalibration
 from .config import BleSettings, NozzleMapSettings, TrackingSettings
-from .geometry import BLANK_FRAME, IMAGE_HEIGHT, NOZZLE_MODE_LINE
+from .geometry import (
+    BLANK_FRAME,
+    IMAGE_HEIGHT,
+    NOZZLE_MODE_LINE,
+    SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+    SENSOR_TO_NOZZLE_COL_MM,
+)
 from .nozzle_map import remap_rows
 from .rendering import frames_from_ink
 from .tracking import _AXIS_INDEX, PageMapper, PositionFilter, make_tracker
@@ -31,7 +37,9 @@ from .tracking import _AXIS_INDEX, PageMapper, PositionFilter, make_tracker
 # ============================================================================
 async def monitor_position(tracking: TrackingSettings, simulate: bool,
                            hz: float = 15.0, ndjson: bool = False,
-                           page_calibration_path: Optional[str] = None) -> None:
+                           page_calibration_path: Optional[str] = None,
+                           sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+                           sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM) -> None:
     """Continuously print the sensor position (x/y/z), the travel-axis value and
     the resulting column, until Ctrl+C. Doubles as an axis / mm-per-column aid.
 
@@ -43,7 +51,13 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
     ``(page_u, page_v, page_z)`` for that calibration -- lets a page-mode
     calibration be sanity-checked (known hand motion -> plausible u/v) before
     anything is printed with it. A bad/missing path aborts the same way a
-    failed tracker connection does, since the caller asked for it explicitly."""
+    failed tracker connection does, since the caller asked for it explicitly.
+
+    ``sensor_offset_row_mm``/``sensor_offset_col_mm`` are forwarded into the
+    same :class:`~printhead.tracking.PageMapper` a real pass builds (see
+    ``PrintController._print_freehand_pass``), so this diagnostic reports the
+    exact same ``(page_u, page_v)`` a real pass would use -- otherwise it
+    would stop being trustworthy for the sanity-check it exists for."""
     tracker = make_tracker(tracking, simulate)
     try:
         tracker.open()
@@ -57,7 +71,9 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
     page_mapper = None
     if page_calibration_path is not None:
         try:
-            page_mapper = PageMapper(PageCalibration.load(page_calibration_path))
+            page_mapper = PageMapper(PageCalibration.load(page_calibration_path),
+                                     sensor_offset_row_mm=sensor_offset_row_mm,
+                                     sensor_offset_col_mm=sensor_offset_col_mm)
         except Exception as exc:
             if ndjson:
                 print(json.dumps({"event": "error",
