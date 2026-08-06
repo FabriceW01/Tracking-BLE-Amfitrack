@@ -58,18 +58,18 @@ class TrackingSettings:
         ``PageCalibration`` (see ``calibration.py``), traced ahead of time.
       * ``"time"`` - legacy behaviour: stream one column every ``period`` s.
 
-    The sensor is mounted rotated (travel happens in Y/Z instead of X/Y), so the
-    axis that drives column advancement is configurable (line mode only). Two
-    strategies exist:
-      * fixed axis   - use ``advance_axis`` (default ``"y"``) times ``axis_sign``.
+    X is the rig's measured travel axis, but the sensor may be mounted rotated
+    on a given rig, so the axis that drives column advancement is configurable
+    (line mode only). Two strategies exist:
+      * fixed axis   - use ``advance_axis`` (default ``"x"``) times ``axis_sign``.
       * auto-calibrate - measure the real direction of motion at start and
         project the position onto it (robust against any rotation).
     """
     enabled: bool = True
     mode: str = "line"              # "line" | "page" | "time"
 
-    # --- axis mapping for the rotated sensor -------------------------------
-    advance_axis: str = "y"         # "x" | "y" | "z" (which axis = travel dir.)
+    # --- axis mapping for a possibly-rotated sensor mount -------------------
+    advance_axis: str = "x"         # "x" | "y" | "z" (which axis = travel dir.)
     axis_sign: int = 1              # +1 or -1 (flip travel direction)
     auto_calibrate: bool = False    # derive travel direction from first motion
     calib_distance_mm: float = 5.0  # motion needed before auto-calibration locks

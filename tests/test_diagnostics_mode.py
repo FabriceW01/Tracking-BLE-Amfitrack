@@ -117,6 +117,32 @@ def test_ble_benchmark_selects_line_mode_before_writing_anything():
     assert mode_idx < write_idx, ops
 
 
+# ============================================================================
+# START-button hint (defect 1)
+# ============================================================================
+def test_nozzle_test_emits_the_start_button_hint():
+    # Not using _run_with_fake_ble here: it captures stdout internally to
+    # keep test output clean and only returns the ops log, not the text --
+    # this test needs the printed text itself, so it does its own capture.
+    _FakeBLE.instances.clear()
+    original = diagnostics.PrintheadBLE
+    diagnostics.PrintheadBLE = _FakeBLE
+    try:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(diagnostics.nozzle_test(BleSettings(), on_seconds=0.0, sweep_step=0.0))
+    finally:
+        diagnostics.PrintheadBLE = original
+    text = out.getvalue()
+
+    assert "START button" in text, text
+    # And the final message must not overclaim success -- frames were sent,
+    # not necessarily fired (the whole point of this defect).
+    assert "Nozzle test done." not in text, text
+    assert "START button" in text.split("frames sent.")[-1], (
+        "the closing message should also point back at the button", text)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:

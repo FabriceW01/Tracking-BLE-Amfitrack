@@ -81,7 +81,8 @@ def _events(output: str):
 
 def test_monitor_position_reports_page_uvz_when_calibration_given():
     # Identity-ish calibration in the XY plane: SimulatedTracker's default
-    # motion (50 mm/s along y) should come straight through as page_v.
+    # motion (50 mm/s along the default advance axis, x) should come straight
+    # through as page_u.
     cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
                           e_row=np.array([0.0, 1.0, 0.0]))
     with tempfile.TemporaryDirectory() as tmp:
@@ -93,9 +94,9 @@ def test_monitor_position_reports_page_uvz_when_calibration_given():
     assert positions, output
     last = positions[-1]
     assert "page_u" in last and "page_v" in last and "page_z" in last
-    assert abs(last["page_u"]) < 0.5              # travel is along y only
+    assert abs(last["page_v"]) < 0.5              # travel is along x only
     assert abs(last["page_z"]) < 0.5
-    assert abs(last["page_v"] - last["y"]) < 0.5   # e_row == y-axis, scale 1
+    assert abs(last["page_u"] - last["x"]) < 0.5   # e_col == x-axis, scale 1
 
 
 def test_monitor_position_omits_page_uvz_without_calibration():

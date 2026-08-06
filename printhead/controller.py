@@ -285,98 +285,108 @@ class PrintController:
         prev_adv = None
         prev_t = None
 
-        while True:
-            now = loop.time()
+        try:
+            while True:
+                now = loop.time()
 
-            # Startpoint button: re-zero the origin at the current position and
-            # reset the stored progress so printing restarts from column 0.
-            if startpoint_event.is_set():
-                startpoint_event.clear()
-                pos_filter.reset()
-                origin = pos_filter.update(
-                    await self._wait_for_position(tracker, loop), loop.time())
-                mapper.set_origin(origin)      # re-zero (also clears auto-calib dir.)
-                frontier = -1
-                if firing:
-                    await ble.write_blank()
-                firing = False
-                ref_pos, ref_t = np.asarray(origin, dtype=float), loop.time()
-                t_start = ref_t                # give the restarted pass a fresh timeout
-                print("[startpoint] origin reset to current position; "
-                      "printing from column 0.")
+                # Startpoint button: re-zero the origin at the current position and
+                # reset the stored progress so printing restarts from column 0.
+                if startpoint_event.is_set():
+                    startpoint_event.clear()
+                    pos_filter.reset()
+                    origin = pos_filter.update(
+                        await self._wait_for_position(tracker, loop), loop.time())
+                    mapper.set_origin(origin)  # re-zero (also clears auto-calib dir.)
+                    frontier = -1
+                    if firing:
+                        await ble.write_blank()
+                    firing = False
+                    ref_pos, ref_t = np.asarray(origin, dtype=float), loop.time()
+                    t_start = ref_t             # give the restarted pass a fresh timeout
+                    print("[startpoint] origin reset to current position; "
+                          "printing from column 0.")
+                    await asyncio.sleep(interval)
+                    continue
+
+                pos = tracker.read_position()
+                if pos is not None:
+                    pos = pos_filter.update(pos, now)   # low-pass the noisy signal
+                    if np.linalg.norm(pos - ref_pos) >= t.min_move_mm:
+                        ref_pos, ref_t = pos, now        # accumulated real movement
+                    moving = (now - ref_t) <= _STALL_GRACE_S
+
+                    adv = mapper.advance(pos)            # None while auto-calibrating
+                    if adv is not None:
+                        # Along-travel speed (mm/s) for the profiler.
+                        speed = None
+                        if prev_adv is not None and now > prev_t:
+                            speed = abs(adv - prev_adv) / (now - prev_t)
+                        prev_adv, prev_t = adv, now
+
+                        col = int(round(adv / t.mm_per_column))
+                        if col >= self.width:
+                            break                        # reached the end of the text
+                        col = max(0, col)
+
+                        if not moving:
+                            # head stopped -> stop firing (avoid an ink blob)
+                            if firing:
+                                await ble.write_blank()
+                                if recorder is not None:
+                                    recorder.record(adv, BLANK_FRAME)
+                                firing = False
+                        elif col > frontier:
+                            # advancing into new territory: print each new column
+                            # once, filling any columns skipped by a fast feed.
+                            start = col if frontier < 0 else frontier + 1
+                            cols = list(range(start, col + 1))
+                            tw = loop.time()
+                            # One write per MTU-worth of columns: the firmware queues
+                            # them and prints them in order, so this is equivalent to
+                            # writing them one at a time but no longer depends on the
+                            # connection interval carrying that many packets.
+                            await ble.write_columns([self.frames[c] for c in cols])
+                            per_col = (loop.time() - tw) / len(cols)
+                            for c in cols:
+                                if profiler is not None:
+                                    profiler.record_write(c, adv, per_col, speed)
+                                if recorder is not None:
+                                    recorder.record(adv, self.frames[c])
+                            frontier = col
+                            firing = True
+                        elif col < frontier:
+                            # moving back over already-printed columns: do NOT
+                            # reprint -> blank so no ink is deposited on the return.
+                            if firing:
+                                await ble.write_blank()
+                                if recorder is not None:
+                                    recorder.record(adv, BLANK_FRAME)
+                                firing = False
+                        # col == frontier while moving: keep the leading column firing
+
+                if now - t_start > t.timeout_s:
+                    print("Position pass timed out.")
+                    break
                 await asyncio.sleep(interval)
-                continue
-
-            pos = tracker.read_position()
-            if pos is not None:
-                pos = pos_filter.update(pos, now)   # low-pass the noisy signal
-                if np.linalg.norm(pos - ref_pos) >= t.min_move_mm:
-                    ref_pos, ref_t = pos, now        # accumulated real movement
-                moving = (now - ref_t) <= _STALL_GRACE_S
-
-                adv = mapper.advance(pos)            # None while auto-calibrating
-                if adv is not None:
-                    # Along-travel speed (mm/s) for the profiler.
-                    speed = None
-                    if prev_adv is not None and now > prev_t:
-                        speed = abs(adv - prev_adv) / (now - prev_t)
-                    prev_adv, prev_t = adv, now
-
-                    col = int(round(adv / t.mm_per_column))
-                    if col >= self.width:
-                        break                        # reached the end of the text
-                    col = max(0, col)
-
-                    if not moving:
-                        # head stopped -> stop firing (avoid an ink blob)
-                        if firing:
-                            await ble.write_blank()
-                            if recorder is not None:
-                                recorder.record(adv, BLANK_FRAME)
-                            firing = False
-                    elif col > frontier:
-                        # advancing into new territory: print each new column
-                        # once, filling any columns skipped by a fast feed.
-                        start = col if frontier < 0 else frontier + 1
-                        cols = list(range(start, col + 1))
-                        tw = loop.time()
-                        # One write per MTU-worth of columns: the firmware queues
-                        # them and prints them in order, so this is equivalent to
-                        # writing them one at a time but no longer depends on the
-                        # connection interval carrying that many packets.
-                        await ble.write_columns([self.frames[c] for c in cols])
-                        per_col = (loop.time() - tw) / len(cols)
-                        for c in cols:
-                            if profiler is not None:
-                                profiler.record_write(c, adv, per_col, speed)
-                            if recorder is not None:
-                                recorder.record(adv, self.frames[c])
-                        frontier = col
-                        firing = True
-                    elif col < frontier:
-                        # moving back over already-printed columns: do NOT
-                        # reprint -> blank so no ink is deposited on the return.
-                        if firing:
-                            await ble.write_blank()
-                            if recorder is not None:
-                                recorder.record(adv, BLANK_FRAME)
-                            firing = False
-                    # col == frontier while moving: keep the leading column firing
-
-            if now - t_start > t.timeout_s:
-                print("Position pass timed out.")
-                break
-            await asyncio.sleep(interval)
-
-        if profiler is not None:
-            profiler.finish()
-        if recorder is not None:
-            if recorder.render(self.record, self._ink):
-                print(f"Reconstruction of what was sent -> {self.record}")
+        finally:
+            # Same cleanup-ordering bug as the freehand pass (defect 3): an
+            # exception out of the loop above (KeyboardInterrupt included)
+            # must not skip closing the profiler CSV or rendering --record.
+            # write_blank() alone is allowed to fail here (link may already
+            # be down) without masking whatever is already propagating.
+            if profiler is not None:
+                profiler.finish()
+            if recorder is not None:
+                if recorder.render(self.record, self._ink):
+                    print(f"Reconstruction of what was sent -> {self.record}")
+                else:
+                    print("Nothing was recorded (no columns sent).")
+            try:
+                await ble.write_blank()
+            except Exception as exc:
+                print(f"[warn] could not send final blank frame: {exc}")
             else:
-                print("Nothing was recorded (no columns sent).")
-        await ble.write_blank()
-        print("Finished pass; sent blank frame.")
+                print("Finished pass; sent blank frame.")
 
     async def _wait_for_position(self, tracker, loop, timeout=5.0):
         """Block until the tracker yields a first position sample."""
@@ -451,6 +461,21 @@ class PrintController:
         prev_u, prev_v, prev_t = None, None, None
         prev_printed = coverage.printed.copy() if pj else None
         done_reason = None
+
+        # Out-of-page visibility (defect 2): a pass whose (u, v) never lands
+        # inside the target image is otherwise indistinguishable from a
+        # normal pass at the API level -- `coverage.step()` just returns an
+        # all-zero pattern forever, `changed` goes False after the first
+        # sample, nothing gets sent, no profiler sample is recorded, and the
+        # pass exits 0 with "Covered 0/N". Track the observed extents and
+        # whether anything was ever in bounds so the end (and, in plain-text
+        # mode, a live warning) can tell the user *why* nothing happened
+        # instead of leaving them to guess.
+        u_min = u_max = v_min = v_max = None
+        in_bounds_samples = 0
+        samples = 0
+        last_warn_t = None
+
         try:
             while True:
                 now = loop.time()
@@ -459,6 +484,12 @@ class PrintController:
                     pos = pos_filter.update(pos, now)   # low-pass the noisy signal
                     u_mm, v_mm, _z_mm = mapper.project(pos)
 
+                    samples += 1
+                    u_min = u_mm if u_min is None else min(u_min, u_mm)
+                    u_max = u_mm if u_max is None else max(u_max, u_mm)
+                    v_min = v_mm if v_min is None else min(v_min, v_mm)
+                    v_max = v_mm if v_max is None else max(v_max, v_mm)
+
                     speed = None
                     if prev_u is not None and now > prev_t:
                         speed = ((u_mm - prev_u) ** 2 + (v_mm - prev_v) ** 2) ** 0.5 \
@@ -466,10 +497,26 @@ class PrintController:
                     prev_u, prev_v, prev_t = u_mm, v_mm, now
 
                     pattern, changed = coverage.step(u_mm, v_mm, now)
+                    if coverage.last_in_bounds:
+                        in_bounds_samples += 1
                     if changed:
                         sender.send(pattern)
                         if profiler is not None:
                             profiler.record_page_sample(u_mm, v_mm, speed)
+
+                    # Nothing has ever been in bounds yet: say so periodically
+                    # instead of running the whole pass in silence (plain-text
+                    # mode only -- progress-json carries this in coverage_done
+                    # for the UI instead, see below).
+                    if not pj and in_bounds_samples == 0:
+                        if last_warn_t is None or now - last_warn_t >= 2.0:
+                            last_warn_t = now
+                            req_u = self.width * t.mm_per_column
+                            req_v = (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM
+                            print(f"[warn] cart not over the target page yet: "
+                                  f"u={u_mm:7.2f} v={v_mm:7.2f} mm (need u in "
+                                  f"[0, {req_u:.1f}] mm, v within "
+                                  f"+/-{req_v:.1f} mm of the calibration origin)")
 
                     new_cells = []
                     if pj:
@@ -505,26 +552,62 @@ class PrintController:
                     break
                 await asyncio.sleep(interval)
         finally:
+            # Everything below must still run on a KeyboardInterrupt or any
+            # other exception raised out of the loop above (defect 3): the
+            # profiler CSV is otherwise never closed/flushed (0-byte file),
+            # --record is never rendered, and the head is left firing. Only
+            # write_blank() is allowed to fail here without derailing this --
+            # the link may already be down, and a secondary exception from
+            # cleanup must not mask whatever is already propagating out of
+            # the loop.
             await sender.close()
-        await ble.write_blank()
+            try:
+                await ble.write_blank()
+            except Exception as exc:
+                print(f"[warn] could not send final blank frame: {exc}")
 
-        if profiler is not None:
-            profiler.finish()
-        if self.record:
-            from .recording import render_coverage
-            if render_coverage(coverage.printed, coverage.ink, self.record):
-                if not pj:
-                    print(f"Coverage reconstruction -> {self.record}")
-            elif not pj:
-                print("Nothing was recorded (nothing printed).")
+            if profiler is not None:
+                profiler.finish()
+            if self.record:
+                from .recording import render_coverage
+                if render_coverage(coverage.printed, coverage.ink, self.record):
+                    if not pj:
+                        print(f"Coverage reconstruction -> {self.record}")
+                elif not pj:
+                    print("Nothing was recorded (nothing printed).")
 
-        covered = int(coverage.printed.sum())
-        total = int(coverage.ink.sum())
-        if pj:
-            print(json.dumps({"event": "coverage_done", "reason": done_reason,
-                              "covered": covered, "total": total}), flush=True)
-        else:
-            print(f"Finished pass; sent blank frame. Covered {covered}/{total} ink pixels.")
+            covered = int(coverage.printed.sum())
+            total = int(coverage.ink.sum())
+            if pj:
+                print(json.dumps({"event": "coverage_done", "reason": done_reason,
+                                  "covered": covered, "total": total,
+                                  "in_bounds_samples": in_bounds_samples,
+                                  "samples": samples,
+                                  "u_min": round(u_min, 3) if u_min is not None else None,
+                                  "u_max": round(u_max, 3) if u_max is not None else None,
+                                  "v_min": round(v_min, 3) if v_min is not None else None,
+                                  "v_max": round(v_max, 3) if v_max is not None else None}),
+                      flush=True)
+            elif in_bounds_samples == 0 and samples > 0:
+                req_u = self.width * t.mm_per_column
+                req_v = (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM
+                print("Finished pass; sent blank frame.")
+                print(f"Covered 0/{total} ink pixels -- the cart never overlapped "
+                      f"the target page during this pass.")
+                print(f"  observed u: {u_min:7.2f} .. {u_max:7.2f} mm "
+                      f"(page needs u in [0.0, {req_u:.1f}] mm)")
+                print(f"  observed v: {v_min:7.2f} .. {v_max:7.2f} mm "
+                      f"(page needs v within +/-{req_v:.1f} mm of the "
+                      f"calibration origin)")
+                print("  Likely cause: (1) the cart was physically somewhere "
+                      "else on the page, or (2) the calibration origin/axes "
+                      "do not correspond to where you think the page corner "
+                      "is.")
+                print("  Check with: --pos --page-calibration PATH to see live "
+                      "(u, v) against known hand motion before printing.")
+            else:
+                print(f"Finished pass; sent blank frame. Covered {covered}/{total} "
+                      f"ink pixels.")
 
     # ---------------------------------------------- dry-run simulation path
     async def _dry_run_line_pass(self) -> None:

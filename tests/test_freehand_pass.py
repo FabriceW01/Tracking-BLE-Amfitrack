@@ -271,6 +271,137 @@ def test_freehand_pass_with_record_writes_a_coverage_png():
         assert "Coverage reconstruction" in out.getvalue()
 
 
+# ==================================================== out-of-page diagnosis (defect 2)
+def _out_of_page_positions(n_cols=5, samples_per_col=12, v=500.0):
+    """Same shape as _sweep_positions, but at a v_mm far outside the reach of
+    the 152-nozzle bar for a 30-row image -- CoverageEngine can never see any
+    nozzle land in bounds no matter what u_mm is."""
+    positions = []
+    for c in range(n_cols):
+        positions += [(float(c), v, 0.0)] * samples_per_col
+    return positions
+
+
+def test_freehand_pass_out_of_page_reports_zero_coverage_and_diagnosis():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=0.2, poll_hz=500.0)
+    tracker = ScriptedTracker(_out_of_page_positions())
+    null = _NullPrinthead()
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(null, tracker))
+    text = out.getvalue()
+
+    assert "Covered 0/" in text
+    assert "cart never overlapped" in text, text
+    assert "--pos --page-calibration" in text, text
+
+    # The pass-level assertions above only prove the *symptom* (0 covered);
+    # confirm the actual signal the fix depends on -- CoverageEngine itself
+    # reporting no nozzle was ever in bounds for this position.
+    mapper = PageMapper(_identity_calibration())
+    coverage = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
+    u, v, _z = mapper.project(np.array([2.0, 500.0, 0.0]))
+    coverage.step(u, v, 0.0)
+    assert coverage.last_in_bounds is False
+    assert coverage.printed.sum() == 0
+
+
+def test_freehand_pass_in_bounds_does_not_print_out_of_page_diagnosis():
+    # Guard against a false positive: a normal, fully-covered pass must never
+    # trigger the out-of-page diagnosis text.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    assert "cart never overlapped" not in text, text
+    assert "Covered 150/150" in text, text
+
+
+def test_progress_json_out_of_page_carries_bounds_fields():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=0.2, poll_hz=500.0, progress_json=True)
+    tracker = ScriptedTracker(_out_of_page_positions())
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    events = _ndjson_events(out.getvalue())
+
+    done = events[-1]
+    assert done["event"] == "coverage_done"
+    assert done["covered"] == 0
+    assert done["in_bounds_samples"] == 0
+    assert done["samples"] > 0
+    assert done["u_min"] is not None and done["u_max"] is not None
+    assert done["v_min"] == done["v_max"] == 500.0
+
+
+# ================================================== interrupted pass cleanup (defect 3)
+class _RaisingTracker:
+    """Like ScriptedTracker, but raises a distinct exception after
+    ``fail_after`` successful reads -- stands in for a KeyboardInterrupt (or
+    any other mid-loop failure) landing inside _print_freehand_pass without
+    relying on a real KeyboardInterrupt, which is fragile to deliver
+    precisely under asyncio. Any exception takes the same cleanup path."""
+
+    class Boom(Exception):
+        pass
+
+    def __init__(self, positions, fail_after):
+        self._seq = [np.asarray(p, dtype=float) for p in positions]
+        self._i = 0
+        self._fail_after = fail_after
+
+    def open(self):
+        pass
+
+    def close(self):
+        pass
+
+    def read_position(self):
+        if self._i >= self._fail_after:
+            raise _RaisingTracker.Boom("simulated interruption")
+        value = self._seq[self._i] if self._i < len(self._seq) else self._seq[-1]
+        self._i += 1
+        return value
+
+
+def test_freehand_pass_interrupted_still_closes_profiler_csv_and_attempts_record():
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "profile.csv")
+        png_path = os.path.join(tmp, "coverage.png")
+        # dose_hold_s=0.0 -> the very first in-bounds sample already dozes
+        # its pixels, so coverage.printed is non-empty even though only a
+        # few samples run before the simulated interruption -- keeps the
+        # "record was attempted and had something to draw" check deterministic.
+        ctrl = _controller(ink, timeout_s=5.0, dose_hold_s=0.0,
+                           profile=True, profile_csv=csv_path, record=png_path)
+        tracker = _RaisingTracker(_sweep_positions(n_cols=5, samples_per_col=12),
+                                  fail_after=3)
+        null = _NullPrinthead()
+
+        try:
+            asyncio.run(ctrl._print_freehand_pass(null, tracker))
+            raise AssertionError("expected the simulated interruption to propagate")
+        except _RaisingTracker.Boom:
+            pass          # this is the whole point: cleanup ran, then it propagated
+
+        assert os.path.exists(csv_path), "profiler CSV must still be closed/flushed"
+        with open(csv_path) as fh:
+            header = fh.readline().strip()
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s"
+
+        assert os.path.exists(png_path), "coverage PNG must still be attempted"
+
+
 # ==================================================== dry-run simulation path
 def test_dry_run_freehand_pass_runs_without_crashing():
     ink = np.ones((10, 3), dtype=bool)

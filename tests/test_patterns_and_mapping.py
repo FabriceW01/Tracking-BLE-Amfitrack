@@ -11,10 +11,15 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from printhead import cli, patterns                       # noqa: E402
-from printhead.geometry import IMAGE_HEIGHT                # noqa: E402
-from printhead.nozzle_map import parse_order, remap_rows   # noqa: E402
-from printhead.rendering import frames_from_ink            # noqa: E402
+from printhead import cli, patterns                         # noqa: E402
+from printhead.geometry import IMAGE_HEIGHT, NOZZLE_PITCH_MM  # noqa: E402
+from printhead.nozzle_map import parse_order, remap_rows     # noqa: E402
+from printhead.rendering import frames_from_ink              # noqa: E402
+
+# All six generators that must honour an explicit rows= override (Change 2):
+# the five PATTERNS presets plus ruler_pattern, which isn't in that dict
+# because --calibrate reaches it directly rather than through --pattern NAME.
+_ALL_GENERATORS = list(patterns.PATTERNS.values()) + [patterns.ruler_pattern]
 
 
 # ============================================================================
@@ -184,6 +189,98 @@ def test_cli_still_accepts_nozzle_block_remap_in_line_mode():
                            "--nozzle-order", "2,3,4,1,5", "--dry-run"])
     assert args.nozzle_block_size == 5
     assert args.nozzle_order == "2,3,4,1,5"
+
+
+# ============================================================================
+# --pattern-height-mm / rows= (page mode's taller-than-IMAGE_HEIGHT patterns)
+# ============================================================================
+def test_all_generators_honour_rows_override():
+    # Page mode's whole point is a target image that is NOT capped at
+    # IMAGE_HEIGHT rows -- every generator must actually use an explicit
+    # rows=, not silently keep producing IMAGE_HEIGHT regardless.
+    mm_per_column = 0.2
+    for fn in _ALL_GENERATORS:
+        ink = fn(20.0, mm_per_column, rows=300)
+        assert ink.shape[0] == 300, fn.__name__
+
+
+def test_all_generators_default_rows_to_image_height():
+    # Backward compatibility: line/time mode (and any caller that doesn't
+    # pass rows=) must keep getting exactly IMAGE_HEIGHT rows, matching
+    # rendering.render_text and frames_from_ink()'s fixed-frame packing.
+    mm_per_column = 0.2
+    for fn in _ALL_GENERATORS:
+        ink = fn(20.0, mm_per_column)
+        assert ink.shape[0] == IMAGE_HEIGHT, fn.__name__
+
+
+def test_ruler_pattern_rows_scales_baseline_position():
+    # The baseline must track rows, not stay pinned to the old fixed
+    # IMAGE_HEIGHT // 2 -- proves the parameter is actually wired in, not
+    # just accepted and ignored.
+    n = 300
+    ink = patterns.ruler_pattern(10.0, 1.0, rows=n)
+    assert ink.shape[0] == n
+    mid = n // 2
+    assert ink[mid, :].all(), "baseline row must be continuous across the width"
+
+    old_mid = IMAGE_HEIGHT // 2
+    assert old_mid != mid
+    assert not ink[old_mid, :].all(), (
+        "baseline still sitting at the old fixed IMAGE_HEIGHT // 2 position "
+        "-- rows= is not actually driving it")
+
+
+def test_diagonal_pattern_rows_reaches_top_and_bottom():
+    # diagonal_pattern's y formula uses (rows - 1); with a taller image it
+    # must still span the full height (top row at x % period == 0, bottom
+    # row at x % period == period - 1) and stay in bounds while doing so.
+    n = 300
+    ink = patterns.diagonal_pattern(60.0, 1.0, square_mm=20.0, rows=n)
+    assert ink.shape[0] == n
+    assert ink[0, :].any(), "diagonal never reaches the top row of the taller image"
+    assert ink[n - 1, :].any() or ink[n - 2, :].any(), (
+        "diagonal never reaches the bottom of the taller image")
+
+
+def test_cli_pattern_height_mm_requires_page_mode():
+    args = cli.parse_args(["--pattern", "checkerboard", "--dry-run", "--mode", "page",
+                           "--page-calibration", "cal.json", "--pattern-height-mm", "100"])
+    assert args.pattern_height_mm == 100.0
+
+    try:
+        cli.parse_args(["--pattern", "checkerboard", "--dry-run",
+                        "--pattern-height-mm", "100"])
+        assert False, "expected SystemExit: --pattern-height-mm needs --mode page"
+    except SystemExit:
+        pass
+
+
+def test_cli_pattern_square_height_mm_overrides_square_rows():
+    # square_height_mm must actually change the produced ink's row-banding
+    # period, not just be accepted into the namespace and dropped.
+    square_rows_equiv = 4
+    square_height_mm = NOZZLE_PITCH_MM * square_rows_equiv
+    args = cli.parse_args(["--pattern", "checkerboard", "--dry-run",
+                           "--pattern-length-mm", "4", "--mm-per-column", "1.0",
+                           "--pattern-square-mm", "2",
+                           "--pattern-square-height-mm", str(square_height_mm)])
+    ink, _label = cli.build_ink(args, args.mm_per_column)
+
+    # Column 0's tile band is XOR'd with cols[0] == 0, so it reflects the row
+    # band directly: the first row it flips at IS the effective square_rows.
+    col0 = ink[:, 0]
+    flips = np.nonzero(np.diff(col0.astype(int)))[0]
+    assert flips.size > 0, "no banding at all -- override did not take effect"
+    first_flip_row = flips[0] + 1
+    assert first_flip_row == square_rows_equiv, (
+        f"expected banding period {square_rows_equiv}, got {first_flip_row}")
+
+
+def test_cli_advance_axis_defaults_to_x():
+    # Guards Change 1 against a silent regression back to "y".
+    args = cli.parse_args(["Hi", "--dry-run"])
+    assert args.advance_axis == "x"
 
 
 if __name__ == "__main__":

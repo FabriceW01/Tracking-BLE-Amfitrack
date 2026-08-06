@@ -13,9 +13,9 @@ Three pieces:
     drop-in replacement that fakes motion so the closed loop can be tested
     without hardware.
   * :class:`AdvanceMapper` - the 1D pipeline's mapper: converts a 3-D position
-    into travel distance along the print direction, handling the *rotated*
-    sensor (travel in Y/Z instead of X/Y) either by picking a fixed axis or by
-    auto-calibrating the direction.
+    into travel distance along the print direction. The rig's measured travel
+    axis is X (the default), but the sensor may be mounted rotated on a given
+    rig, so this either picks a fixed axis or auto-calibrates the direction.
   * :class:`PageMapper` - the 2-D counterpart for freehand page printing:
     projects a position onto a calibrated page plane (see ``calibration.py``)
     instead of a single travel scalar.

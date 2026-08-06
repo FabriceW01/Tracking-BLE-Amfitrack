@@ -76,6 +76,16 @@ class CoverageEngine:
         self._nozzle_since: List[Optional[float]] = [None] * NUM_NOZZLES
         self._last_pattern: Optional[bytes] = None
 
+        # Whether the most recent step() had ANY nozzle in bounds of the
+        # target image. A fully out-of-page pass (cart never over the page
+        # at all) and a fully-covered pass both end up with an all-zero
+        # `active` pattern and no further `changed` updates -- from the
+        # pattern alone a caller cannot tell "nothing left to do" from
+        # "nothing here was ever reachable". This is the cheap signal that
+        # lets a caller (controller._print_freehand_pass) tell them apart
+        # and warn instead of silently finishing with 0 pixels covered.
+        self.last_in_bounds: bool = False
+
     @property
     def height(self) -> int:
         return self.ink.shape[0]
@@ -100,14 +110,21 @@ class CoverageEngine:
         and ``changed`` is True if it differs from the pattern returned by
         the previous call, so a caller only needs to send a BLE update when
         this is True.
+
+        Also updates ``self.last_in_bounds`` as a side effect (see its
+        docstring) -- kept as an attribute rather than a third return value
+        so this signature stays untouched for existing callers/tests.
         """
         col = int(round(u_mm / self.mm_per_column))
         base_row = int(round(v_mm / NOZZLE_PITCH_MM))
 
         active = np.zeros(NUM_NOZZLES, dtype=bool)
+        in_bounds_any = False
         for p in range(NUM_NOZZLES):
             row = base_row + p
             in_bounds = 0 <= row < self.height and 0 <= col < self.width
+            if in_bounds:
+                in_bounds_any = True
             wanted = in_bounds and bool(self.ink[row, col]) and not self.printed[row, col]
 
             if not wanted:
@@ -124,6 +141,7 @@ class CoverageEngine:
             if t - self._nozzle_since[p] >= self.dose_hold_s:
                 self.printed[row, col] = True
 
+        self.last_in_bounds = in_bounds_any
         pattern = pack_nozzle_bits(active)
         changed = pattern != self._last_pattern
         self._last_pattern = pattern
