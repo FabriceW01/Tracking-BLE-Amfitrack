@@ -25,6 +25,7 @@ Three pieces:
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Callable, Optional
 
@@ -37,6 +38,7 @@ from .geometry import (
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
+from .rotation import yaw_about_normal
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 
@@ -150,11 +152,25 @@ class PageMapper:
          ``SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM``/``SENSOR_TO_NOZZLE_COL_MM``),
          so without this the reported ``(u, v)`` would be off by exactly that
          offset from where ink is actually deposited.
+
+    That sensor->nozzle offset is a vector in the CART's own frame, not the
+    page's -- it stays pointing "from the sensor towards the bar" no matter
+    which way the cart is rotated. Treating it as a constant page-frame
+    shift (the pre-rotation-correction behaviour) is only correct at zero
+    yaw; measured from a real pass (``pass5.csv``), cart yaw about the page
+    normal spans 75.6 deg, which turns a 62.36mm offset into up to ~76mm of
+    position error. ``project()`` therefore rotates the offset by the
+    cart's current yaw -- see ``rotation.yaw_about_normal`` -- whenever a
+    ``PageCalibration.boresight_quat`` reference pose is available; with no
+    boresight captured (every calibration saved before this feature existed)
+    it falls back to exactly the old constant-shift behaviour, since there
+    is no reference pose to measure yaw against.
     """
 
     def __init__(self, calibration: PageCalibration,
                  sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
-                 sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM):
+                 sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
+                 boresight_offset_rad: float = 0.0):
         self.calibration = calibration
         # Convert the measured bar-CENTRE-referenced offset to the nozzle-0-
         # referenced one CoverageEngine actually needs: CoverageEngine places
@@ -166,16 +182,67 @@ class PageMapper:
         # SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM for the measurement itself.
         self._row_offset_mm = sensor_offset_row_mm - NOZZLE_BAR_WIDTH_MM / 2.0
         self._col_offset_mm = sensor_offset_col_mm
+        # Additive fine-tune on top of the yaw computed from the captured
+        # boresight (see cli.py's --boresight-deg): lets a print that comes
+        # out rotated be corrected without re-capturing the boresight, same
+        # "adjust rather than rebuild" idea as sensor_offset_row_mm/-col_mm
+        # above. No effect when boresight_quat is None (there is no captured
+        # yaw to fine-tune in the first place).
+        self.boresight_offset_rad = boresight_offset_rad
+        # Yaw about the page normal (radians), most recently computed by
+        # project() below -- 0.0 (assume the boresight pose) until either a
+        # live orientation sample arrives or forever, if the calibration has
+        # no boresight_quat at all. Exposed as a plain attribute (mirrors
+        # CoverageEngine.last_in_bounds) rather than a getter method so a
+        # caller computes it exactly ONCE per sample, inside project(), and
+        # reuses this value for CoverageEngine.step()'s yaw_rad instead of
+        # calling yaw_about_normal a second time (see controller.py's
+        # _print_freehand_pass).
+        self.last_yaw_rad = 0.0
 
-    def project(self, pos) -> "tuple[float, float, float]":
+    def project(self, pos, quat=None) -> "tuple[float, float, float]":
         """
         World position (mm) -> nozzle-0-referenced page-plane
         ``(u_mm, v_mm, z_mm)``. Feed it an already-filtered position (see
         :class:`PositionFilter`) -- this does no smoothing of its own, only
-        the fixed geometric projection plus the fixed sensor->nozzle offset.
+        the fixed geometric projection plus the (possibly yaw-rotated)
+        sensor->nozzle offset.
+
+        ``quat`` is the live orientation sample for this tick (``(qx, qy,
+        qz, qw)``, see ``AmfitrackTracker.read_pose``), or ``None`` if this
+        tick's packet carried no orientation. Three cases:
+
+          * no ``boresight_quat`` on this calibration at all -> no rotation
+            correction, ever (``self.last_yaw_rad`` stays 0.0 forever): this
+            is every calibration saved before boresight capture existed, and
+            deliberately does NOT fall back to guessing a reference pose
+            from whatever orientation the cart happened to have at pass
+            start -- see the class docstring / README for why.
+          * boresight present and ``quat`` given -> compute the current yaw
+            (``rotation.yaw_about_normal``) and use it.
+          * boresight present but ``quat is None`` this tick (a dropped
+            orientation packet) -> reuse the last computed yaw rather than
+            snapping to 0. An intermittent quaternion dropout must not make
+            the correction flicker between corrected and uncorrected pixel
+            placement sample to sample.
         """
         u, v, z = self.calibration.project(pos)
-        return u + self._col_offset_mm, v + self._row_offset_mm, z
+        if self.calibration.boresight_quat is not None and quat is not None:
+            self.last_yaw_rad = yaw_about_normal(
+                quat, self.calibration.boresight_quat,
+                self.calibration.e_col, self.calibration.e_row
+            ) + self.boresight_offset_rad
+
+        # cos(0.0) == 1.0 and sin(0.0) == 0.0 exactly in IEEE 754, so at
+        # yaw == 0.0 (no boresight, ever, or a boresight pose sample) this
+        # reduces bit-for-bit to the pre-rotation "u + col_offset_mm,
+        # v + row_offset_mm" formula -- no separate zero-yaw code path
+        # needed to keep that identical.
+        cos_y = math.cos(self.last_yaw_rad)
+        sin_y = math.sin(self.last_yaw_rad)
+        du = self._col_offset_mm * cos_y - self._row_offset_mm * sin_y
+        dv = self._col_offset_mm * sin_y + self._row_offset_mm * cos_y
+        return u + du, v + dv, z
 
 
 # ============================================================================

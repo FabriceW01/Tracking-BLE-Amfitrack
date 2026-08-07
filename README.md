@@ -99,6 +99,55 @@ sollte jetzt nahe **0** liegen — vor diesem Fix hätte es (je nach
 Zentrum-vs.-Düse-0-Bezug) eher um **-62.36 mm** oder einen ähnlich
 verschobenen Wert gelegen.
 
+**Wagen-Rotation / Boresight (`--boresight-deg`):** Der Wagen wird beim
+freihändigen Drucken nicht nur verschoben, sondern auch gedreht. An einem
+echten Druck gemessen (`pass5.csv`, Achsen-Winkel-Zerlegung der relativen
+Rotation gegen die Seitennormale) spannt die Gier-Rotation (Yaw) um die
+Seitennormale **75,6°** über einen normalen Durchlauf, während Neigung
+(Pitch/Roll) klein bleibt (Median 2,7°, Maximum 7,8°) — deshalb wird bewusst
+**nur Yaw** korrigiert, Pitch/Roll nicht. Unkorrigiert bedeutet das zwei
+konkrete Fehler:
+
+- Der 62,36 mm Hebelarm Sensor→Düsenleiste (`--sensor-offset-row-mm`, s. o.)
+  ist ein Vektor im Wagen-Koordinatensystem, dreht sich also mit dem Wagen
+  mit. Als fester Seiten-Versatz behandelt (wie bisher), erzeugt das bei
+  75,6° Yaw bis zu **76 mm** Positionsfehler.
+- Die 15 mm breite Düsenleiste selbst fächert bei Drehung über mehrere
+  Spalten auf: bei 75° sind das ca. **14,5 mm** (≈72 Spalten bei
+  0,2 mm/Spalte) statt einer einzigen Spalte für alle 152 Düsen.
+
+Voraussetzung für die Korrektur ist eine **Boresight-Aufnahme** — die
+Referenz-Orientierung, bei der die Düsenleiste exakt entlang der
+abgefahrenen Zeilenkante (Kante 2) liegt, gegen die der aktuelle Yaw während
+des Drucks gemessen wird. Aufnahme im **Calibration**-Tab der Web-UI: Sensor
+verbinden, beide Kanten wie gewohnt abfahren, den Wagen dann **flach auf das
+Papier legen**, Düsenleiste entlang Kante 2 ausrichten, still halten und
+"Capture boresight" drücken — übernimmt automatisch das zuletzt vom
+laufenden `--pos-json`-Stream gelieferte Quaternion. Die Statuszeile zeigt
+vorher deutlich "not captured" an; erst danach "Compute calibration"
+drücken, damit das Quaternion mit gespeichert wird.
+
+⚠️ **Bestehende Kalibrierungen ohne Boresight** (alles, was vor dieser
+Funktion gespeichert wurde) funktionieren unverändert weiter — **ohne**
+Rotationskorrektur, exakt wie bisher. Das wird beim Druckstart laut gemeldet
+(`[warn] page calibration has no boresight ...`), nie still übernommen: ein
+Druck darf nicht davon abhängen, wie der Wagen zufällig zu Beginn gehalten
+wurde (genau die Art unsichtbarer Fehler, die dieses Projekt schon einmal
+gebissen hat). Neu kalibrieren mit Boresight-Aufnahme schaltet die Korrektur
+ein.
+
+`--boresight-deg GRAD` feintunt die aufgenommene Boresight-Rotation additiv,
+ohne neu zu kalibrieren — kommt ein Druck verdreht heraus, lässt sich das
+direkt per Flag nachjustieren, dasselbe "anpassen statt neu bauen"-Prinzip
+wie `--sensor-offset-row-mm` oben. Hat keine Wirkung, wenn keine Kalibrierung
+einen Boresight trägt.
+
+**Verifikation:** `--pos --page-calibration PATH` zeigt jetzt zusätzlich das
+live `yaw` in Grad an. Wird der Wagen exakt in der Referenzpose gehalten
+(Düsenleiste entlang der abgefahrenen Zeilenkante), sollte `yaw` nahe **0°**
+liegen — weicht es deutlich ab, per `--boresight-deg` nachjustieren oder neu
+kalibrieren (Boresight neu aufnehmen).
+
 **Größeres, richtig proportioniertes Testmuster in `--mode page`:** Genau weil
 `--mode page` nicht auf die ~15 mm der 152 Düsen begrenzt ist, lohnt sich für
 den Bring-up ein deutlich größeres `--calibrate`/`--pattern`-Bild als die
@@ -447,13 +496,17 @@ Spalte `t, column, advance, write_latency, speed` für die Offline-Analyse.
 
 Im Seitenmodus (`--mode page`) enthält dieselbe `--profile-csv`-Datei zusätzlich
 `qx,qy,qz,qw` — das rohe Orientierungs-Quaternion des Sensors, sofern die Hardware es
-gerade geliefert hat (sonst leer, nicht `0,0,0,0`). Reine Diagnosedaten für die
-nachträgliche, manuelle Auswertung eines echten Druckdurchlaufs: die Hypothese ist,
-dass eine Rotation des Wagens zusammen mit dem festen Hebelarm Sensor→Düsenleiste
+gerade geliefert hat (sonst leer, nicht `0,0,0,0`). Ursprünglich reine Diagnosedaten
+für die nachträgliche, manuelle Auswertung eines echten Druckdurchlaufs: die Hypothese
+war, dass eine Rotation des Wagens zusammen mit dem festen Hebelarm Sensor→Düsenleiste
 (`--sensor-offset-row-mm`, s. o.) die beobachteten Verzerrungen (nicht-parallele
-Linien, Versatz bei mehreren Durchgängen) erklären könnte. Aktuell fließt das
-Quaternion in nichts Live ein — `PageMapper.project()` korrigiert nach wie vor nur
-einen festen Versatz, keine Rotation.
+Linien, Versatz bei mehreren Durchgängen) erklären könnte. Diese Hypothese hat sich an
+echten Daten bestätigt (`pass5.csv`, siehe Abschnitt "Wagen-Rotation / Boresight"
+oben) und ist inzwischen live korrigiert: `PageMapper.project()` rotiert den
+Hebelarm-Versatz mit dem gemessenen Yaw, `CoverageEngine.step()` platziert jede der
+152 Düsen einzeln entsprechend verteilt. Das Quaternion bleibt zusätzlich als
+Rohdaten in `--profile-csv` erhalten, unabhängig davon, ob eine Boresight-Kalibrierung
+vorliegt.
 
 **3. `--record BILD.png`** – rekonstruiert, was **tatsächlich aufs Papier geht**:
 jeder gesendete Frame wird mit der Kopfposition aufgezeichnet und danach als Bild

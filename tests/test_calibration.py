@@ -143,6 +143,35 @@ def test_calibrate_page_defaults_to_unit_scale_without_sheet_size():
     assert cal.scale_row == 1.0
 
 
+def test_calibrate_page_defaults_boresight_quat_to_none():
+    # No procedure existed to capture it before this feature -- every saved
+    # calibration up to now, and any calibrate_page() call that doesn't pass
+    # boresight_quat explicitly, must keep producing one with no boresight,
+    # so rotation correction stays off rather than silently guessing a
+    # reference pose (see tracking.PageMapper).
+    col_samples, row_samples = _page_traces()
+    cal = calibrate_page(col_samples, row_samples)
+    assert cal.boresight_quat is None
+
+
+def test_calibrate_page_accepts_and_stores_a_boresight_quat():
+    col_samples, row_samples = _page_traces()
+    quat = np.array([0.0, 0.0, 0.1305, 0.9914])       # ~15 deg about Z, arbitrary
+    cal = calibrate_page(col_samples, row_samples, boresight_quat=quat)
+    assert np.allclose(cal.boresight_quat, quat)
+
+
+def test_calibrate_page_boresight_quat_survives_a_save_load_roundtrip():
+    col_samples, row_samples = _page_traces()
+    quat = [0.0, 0.0, 0.1305, 0.9914]                 # plain list, not ndarray
+    cal = calibrate_page(col_samples, row_samples, boresight_quat=quat)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "cal.json")
+        cal.save(path)
+        loaded = PageCalibration.load(path)
+    assert np.allclose(loaded.boresight_quat, quat)
+
+
 def test_calibrate_page_rejects_parallel_traces():
     col_samples, row_samples = _page_traces(row_dir=(1.0, 0.0, 0.0), noise_mm=0.0)
     with warnings.catch_warnings():

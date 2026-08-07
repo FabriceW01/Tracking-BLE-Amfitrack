@@ -64,11 +64,20 @@ _COVERAGE_EVENTS = {"coverage_start", "coverage", "coverage_done"}
 # functions, no pytest/httpx.
 def compute_calibration(col_samples, row_samples,
                         sheet_width_mm: Optional[float] = None,
-                        sheet_height_mm: Optional[float] = None) -> dict:
-    """Business logic behind ``POST /api/calibration/compute``."""
+                        sheet_height_mm: Optional[float] = None,
+                        boresight_quat=None) -> dict:
+    """Business logic behind ``POST /api/calibration/compute``.
+
+    ``boresight_quat``, if given (the browser's most recently captured
+    ``(qx, qy, qz, qw)`` from the live ``--pos-json`` sensor stream -- see
+    the Calibration tab's "Capture boresight" button), is threaded straight
+    into ``calibrate_page()`` and stored on the resulting calibration.
+    ``has_boresight`` in the return value mirrors that back so the UI can
+    confirm what actually got saved, not just what it thinks it sent."""
     try:
         col = np.asarray(col_samples, dtype=float)
         row = np.asarray(row_samples, dtype=float)
+        bore = np.asarray(boresight_quat, dtype=float) if boresight_quat is not None else None
     except (TypeError, ValueError) as exc:
         return {"ok": False, "error": f"invalid samples: {exc}"}
 
@@ -77,7 +86,8 @@ def compute_calibration(col_samples, row_samples,
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", CalibrationAngleWarning)
             cal = calibrate_page(col, row, sheet_width_mm=sheet_width_mm,
-                                 sheet_height_mm=sheet_height_mm)
+                                 sheet_height_mm=sheet_height_mm,
+                                 boresight_quat=bore)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     for w in caught:
@@ -86,7 +96,8 @@ def compute_calibration(col_samples, row_samples,
 
     return {"ok": True, "angle_error_deg": cal.angle_error_deg,
             "scale_col": cal.scale_col, "scale_row": cal.scale_row,
-            "warning": warning_msg, "calibration": cal.to_dict()}
+            "warning": warning_msg, "has_boresight": cal.boresight_quat is not None,
+            "calibration": cal.to_dict()}
 
 
 def save_calibration(calibration: dict, path: str) -> dict:
@@ -123,6 +134,7 @@ class CalibrationComputeRequest(BaseModel):
     row_samples: List[List[float]]
     sheet_width_mm: Optional[float] = None
     sheet_height_mm: Optional[float] = None
+    boresight_quat: Optional[List[float]] = None
 
 
 class CalibrationSaveRequest(BaseModel):
@@ -340,7 +352,8 @@ async def record_png():
 @app.post("/api/calibration/compute")
 async def calibration_compute_endpoint(req: CalibrationComputeRequest) -> dict:
     return compute_calibration(req.col_samples, req.row_samples,
-                               req.sheet_width_mm, req.sheet_height_mm)
+                               req.sheet_width_mm, req.sheet_height_mm,
+                               req.boresight_quat)
 
 
 @app.post("/api/calibration/save")

@@ -9,6 +9,7 @@ Run with:  python tests/test_freehand_pass.py
 import asyncio
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from printhead.controller import (                                    # noqa: E4
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
 from printhead.geometry import (                                      # noqa: E402
     NOZZLE_BAR_WIDTH_MM,
+    NUM_NOZZLES,
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
@@ -475,6 +477,12 @@ def test_freehand_pass_does_not_warn_with_a_normally_configured_dose_hold():
     # interval at poll_hz=200) must never trigger the quantization-cliff
     # warning -- this is the "normally configured" case the guard must stay
     # out of the way of.
+    #
+    # NOTE: _controller() -> _identity_calibration() has no boresight_quat,
+    # so the SEPARATE "no rotation correction" warning (see
+    # test_freehand_pass_warns_about_a_missing_boresight below) is still
+    # expected in this output -- this test only pins the absence of the
+    # dose-hold/poll-interval warning specifically, not "[warn]" in general.
     ink = np.zeros((5, 5), dtype=bool)
     ctrl = _controller(ink, dose_hold_s=DEFAULT_DOSE_HOLD_S, poll_hz=200.0,
                        timeout_s=1.0)
@@ -485,7 +493,56 @@ def test_freehand_pass_does_not_warn_with_a_normally_configured_dose_hold():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
     text = out.getvalue()
 
-    assert "[warn]" not in text, text
+    assert "dose_hold_s" not in text and "poll interval" not in text, text
+
+
+# ==================================================== boresight-missing warning
+def test_freehand_pass_warns_about_a_missing_boresight():
+    # _identity_calibration() (used throughout this file via _controller())
+    # has no boresight_quat -- current behaviour (no rotation correction at
+    # all) still applies, but it must be loudly announced rather than kept
+    # silent: this is the exact situation every calibration saved before
+    # this feature existed is in.
+    ink = np.zeros((5, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=1.0)
+    tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    assert "[warn]" in text and "boresight" in text.lower(), text
+
+
+def test_freehand_pass_does_not_warn_about_boresight_when_one_is_captured():
+    ink = np.zeros((5, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=1.0)
+    ctrl.page_calibration.boresight_quat = np.array([0.0, 0.0, 0.0, 1.0])
+    tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    assert "boresight" not in text.lower(), text
+
+
+def test_progress_json_suppresses_the_boresight_warning_too():
+    # --progress-json must stay pure NDJSON (mirrors how the dose-hold and
+    # out-of-page warnings are suppressed in that mode) even when the
+    # calibration has no boresight.
+    ink = np.zeros((5, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=1.0, progress_json=True)
+    tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    for line in out.getvalue().splitlines():
+        if line.strip():
+            json.loads(line)          # every non-blank line must be valid JSON
 
 
 def test_progress_json_suppresses_the_dose_hold_warning_too():
@@ -503,6 +560,69 @@ def test_progress_json_suppresses_the_dose_hold_warning_too():
     for line in out.getvalue().splitlines():
         if line.strip():
             json.loads(line)          # every non-blank line must be valid JSON
+
+
+# ============================== end-to-end: rotation correction reaches the output
+def _identity_calibration_with_boresight():
+    return PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                           e_row=np.array([0.0, 1.0, 0.0]),
+                           boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]))
+
+
+def _run_freehand_pass_collect_covered_cells(quats):
+    """Drive a real _print_freehand_pass (via ScriptedTracker(quats=...)) and
+    return the full set of (row, col) cells CoverageEngine ever marked
+    printed, reconstructed from --progress-json's new_cells events -- the
+    same mechanism test_progress_json_reports_newly_covered_cells already
+    relies on, rather than reaching into the pass's private CoverageEngine."""
+    ink = np.ones((NUM_NOZZLES + 20, 60), dtype=bool)
+    render = RenderSettings(text="rotation e2e")
+    ble = BleSettings()
+    trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
+                           poll_hz=500.0, timeout_s=5.0)
+    ctrl = PrintController(render, ble, trk, ink=ink,
+                           page_calibration=_identity_calibration_with_boresight(),
+                           dose_hold_s=0.01, progress_json=True,
+                           sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                           sensor_offset_col_mm=0.0)
+    positions = _sweep_positions(n_cols=5, samples_per_col=12)
+    tracker = ScriptedTracker(positions, quats=quats)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    events = _ndjson_events(out.getvalue())
+
+    cells = set()
+    for e in events:
+        if e.get("event") == "coverage":
+            cells.update(tuple(c) for c in e["new_cells"])
+    return cells
+
+
+def test_freehand_pass_rotation_correction_changes_the_printed_mask():
+    # Same path, same target image, same dose-hold -- the ONLY difference is
+    # the orientation quaternion the tracker reports each sample: identical
+    # to the boresight pose (no yaw) vs. rotated 20 degrees the whole pass.
+    # If the correction genuinely reaches CoverageEngine (not just PageMapper
+    # in isolation), the two runs must cover DIFFERENT cells -- a bar tilted
+    # 20 degrees sweeps the 15mm nozzle bar across ~5mm (sin(20deg)*15mm) of
+    # extra columns nozzle 0 alone never reaches.
+    n_samples = len(_sweep_positions(n_cols=5, samples_per_col=12))
+    boresight = (0.0, 0.0, 0.0, 1.0)
+    quats_level = [boresight] * n_samples
+    half = math.radians(20.0) / 2.0
+    quat_rotated = (0.0, 0.0, math.sin(half), math.cos(half))
+    quats_rotated = [quat_rotated] * n_samples
+
+    level_cells = _run_freehand_pass_collect_covered_cells(quats_level)
+    rotated_cells = _run_freehand_pass_collect_covered_cells(quats_rotated)
+
+    assert level_cells, "expected the level pass to cover something"
+    assert rotated_cells, "expected the rotated pass to cover something"
+    assert level_cells != rotated_cells, (
+        "a rotating pass must print a different mask than the same path "
+        "held level -- the yaw correction is not reaching CoverageEngine")
 
 
 # ================================================== interrupted pass cleanup (defect 3)
@@ -632,6 +752,28 @@ def test_cli_sensor_offset_flags_default_to_the_geometry_constants_unset():
     ctrl = cli.build_controller(args)
     assert ctrl.sensor_offset_row_mm == SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM
     assert ctrl.sensor_offset_col_mm == SENSOR_TO_NOZZLE_COL_MM
+
+
+# =============================================================== --boresight-deg
+def test_cli_boresight_deg_defaults_to_none_and_parses():
+    args = cli.parse_args(["Hi", "--dry-run"])
+    assert args.boresight_deg is None
+    args = cli.parse_args(["Hi", "--dry-run", "--boresight-deg", "3.5"])
+    assert args.boresight_deg == 3.5
+
+
+def test_cli_boresight_deg_reaches_the_controller_when_given():
+    args = cli.parse_args(["Hi", "--dry-run", "--boresight-deg", "-7.25"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.boresight_deg == -7.25
+
+
+def test_cli_boresight_deg_defaults_to_zero_unset():
+    # Same "default None on the CLI -> 0.0 (neutral) on the controller"
+    # pattern as the other page-mode fine-tune flags.
+    args = cli.parse_args(["Hi", "--dry-run"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.boresight_deg == 0.0
 
 
 def test_build_page_calibration_loads_a_saved_file():

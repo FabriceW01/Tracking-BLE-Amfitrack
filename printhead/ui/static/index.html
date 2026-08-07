@@ -252,6 +252,19 @@
               <span class="live-badge" id="rowSampleCount">0 samples</span></div>
           </div>
         </div>
+        <div class="row">
+          <div class="field">
+            <label>Boresight (cart-rotation reference pose)</label>
+            <div class="btnrow"><button class="btn" id="btnCaptureBoresight">Capture boresight</button>
+              <span class="live-badge" id="boresightStatus">not captured -- rotation correction will be disabled</span></div>
+          </div>
+        </div>
+        <div class="hint">Lay the cart <b>flat on the page</b> with the nozzle bar aligned along
+          the <b>edge 2</b> trace (the row edge) above, hold still, then press "Capture boresight".
+          This becomes the reference pose cart yaw is measured against while printing (fine-tune
+          afterwards with <code>--boresight-deg</code> instead of re-capturing). Skipping this is
+          fine -- printing then stays exactly as before, uncorrected, with a warning at print
+          start rather than a silent wrong rotation.</div>
         <div class="btnrow" style="margin:4px 0 16px">
           <button class="btn primary" id="btnCalCompute">Compute calibration</button>
           <button class="btn ghost" id="btnCalReset">Reset traces</button>
@@ -604,10 +617,27 @@ function onCoverageEvent(m){
 
 /* ---------- calibration tab ---------- */
 let colSamples=[], rowSamples=[], tracingCol=false, tracingRow=false, lastCalibration=null;
+// Most recent (qx,qy,qz,qw) seen on the live position stream -- only present
+// when the connected hardware/SDK actually reports orientation (see
+// diagnostics.monitor_position's --pos-json event); null on a sensor that
+// never sends one (e.g. --simulate, which never fakes orientation).
+let lastQuat=null, boresightQuat=null;
 function onCalibrationPosition(o){
   if(tracingCol){ colSamples.push([o.x,o.y,o.z]); $('colSampleCount').textContent=colSamples.length+' samples'; }
   if(tracingRow){ rowSamples.push([o.x,o.y,o.z]); $('rowSampleCount').textContent=rowSamples.length+' samples'; }
+  if(o.qx!==undefined) lastQuat=[o.qx,o.qy,o.qz,o.qw];
 }
+function setBoresightStatus(text){ $('boresightStatus').textContent=text; }
+$('btnCaptureBoresight').onclick=()=>{
+  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
+  if(!lastQuat){
+    setBoresightStatus('no orientation received yet -- hold the cart still and try again');
+    return;
+  }
+  boresightQuat=lastQuat.slice();
+  const [qx,qy,qz,qw]=boresightQuat;
+  setBoresightStatus(`captured: qx=${qx.toFixed(3)} qy=${qy.toFixed(3)} qz=${qz.toFixed(3)} qw=${qw.toFixed(3)}`);
+};
 function setTracing(which,on){
   if(which==='col'){ tracingCol=on; $('btnTraceCol').textContent=on?'■ Stop tracing edge 1':'● Trace edge 1'; $('btnTraceCol').classList.toggle('danger',on); }
   else { tracingRow=on; $('btnTraceRow').textContent=on?'■ Stop tracing edge 2':'● Trace edge 2'; $('btnTraceRow').classList.toggle('danger',on); }
@@ -623,9 +653,10 @@ $('btnTraceRow').onclick=()=>{
   setTracing('row',!tracingRow);
 };
 $('btnCalReset').onclick=()=>{
-  colSamples=[]; rowSamples=[]; lastCalibration=null;
+  colSamples=[]; rowSamples=[]; lastCalibration=null; boresightQuat=null;
   setTracing('col',false); setTracing('row',false);
   $('colSampleCount').textContent='0 samples'; $('rowSampleCount').textContent='0 samples';
+  setBoresightStatus('not captured -- rotation correction will be disabled');
   $('calResult').style.display='none'; $('btnCalSave').disabled=true;
 };
 $('btnCalCompute').onclick=async()=>{
@@ -635,11 +666,13 @@ $('btnCalCompute').onclick=async()=>{
   const body={col_samples:colSamples, row_samples:rowSamples};
   if(val('cal_sheet_w')) body.sheet_width_mm=parseFloat(val('cal_sheet_w'));
   if(val('cal_sheet_h')) body.sheet_height_mm=parseFloat(val('cal_sheet_h'));
+  if(boresightQuat) body.boresight_quat=boresightQuat;
   const r=await post('/api/calibration/compute',body);
   if(!r.ok){ log('! '+r.error,'err'); return; }
   lastCalibration=r.calibration;
   $('calResult').style.display='';
   let txt=`angle error: ${r.angle_error_deg.toFixed(1)}°  |  scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}`;
+  txt+=`\nboresight: ${r.has_boresight ? 'captured (rotation correction enabled)' : 'NOT captured (rotation correction disabled)'}`;
   if(r.warning) txt+='\n⚠ '+r.warning;
   $('calSummary').textContent=txt;
   $('btnCalSave').disabled=false;
@@ -654,9 +687,15 @@ $('btnCalLoad').onclick=async()=>{
   const r=await post('/api/calibration/load',{path:val('cal_load_path')});
   if(!r.ok){ log('! '+r.error,'err'); return; }
   lastCalibration=r.calibration;
+  const hasBoresight=!!(r.calibration && r.calibration.boresight_quat);
+  boresightQuat=hasBoresight ? r.calibration.boresight_quat : null;
+  setBoresightStatus(hasBoresight
+    ? 'loaded from file (rotation correction enabled)'
+    : 'not captured -- rotation correction will be disabled');
   $('calResult').style.display='';
   $('calSummary').textContent=`loaded '${val('cal_load_path')}'  |  angle error: ${r.angle_error_deg.toFixed(1)}°  |  `+
-    `scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}`;
+    `scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}  |  `+
+    `boresight: ${hasBoresight ? 'yes' : 'no'}`;
   $('btnCalSave').disabled=false;
   $('page_calibration').value=val('cal_load_path');
 };

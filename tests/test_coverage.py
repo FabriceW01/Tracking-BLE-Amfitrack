@@ -6,6 +6,7 @@ pipeline, generalised to CoverageEngine's per-nozzle, per-pixel model.
 Run with:  python tests/test_coverage.py
 """
 
+import math
 import os
 import sys
 
@@ -14,7 +15,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S     # noqa: E402
-from printhead.geometry import NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES  # noqa: E402
+from printhead.geometry import (                                       # noqa: E402
+    NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
+)
 
 DOSE_HOLD_S = 0.1
 
@@ -252,6 +255,103 @@ def test_done_is_true_for_a_blank_target():
     ink = np.zeros((10, 5), dtype=bool)
     eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
     assert eng.done                 # nothing wanted -> trivially done
+
+
+# ============================================== yaw / cart-rotation correction
+def test_step_default_yaw_rad_reduces_exactly_to_the_pre_rotation_behaviour():
+    # Regression guard (every test above depends on this): calling step()
+    # without yaw_rad at all must place every nozzle at the same column and
+    # at row = base_row + p, exactly as before this feature existed.
+    ink = np.ones((NUM_NOZZLES + 10, 5), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.0)
+    eng.step(u_mm=2.0, v_mm=0.0, t=0.0)
+    assert eng.printed[0:NUM_NOZZLES, 2].all()
+    assert not eng.printed[:, [0, 1, 3, 4]].any()
+
+
+def test_step_zero_yaw_is_bit_identical_across_a_sweep_of_v_offsets_incl_rounding_boundaries():
+    # Floating-point drift guard: recomputing row_p as
+    # round((v_mm + p*NOZZLE_PITCH_MM) / NOZZLE_PITCH_MM) instead of the
+    # exact integer base_row + p measurably drifts by one nozzle right at
+    # rounding boundaries (empirically confirmed while building this fix --
+    # about half of exact .5-boundary v_mm values disagree). Sweep including
+    # those boundaries and require BIT-IDENTICAL row placement between
+    # explicit yaw_rad=0.0 and the pre-rotation base_row + p formula.
+    height = NUM_NOZZLES + 5
+    for k in range(-50, 50):
+        v_mm = (k + 0.5) * NOZZLE_PITCH_MM        # exact rounding boundary
+        ink = np.ones((height, 3), dtype=bool)
+        eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.0)
+        eng.step(u_mm=1.0, v_mm=v_mm, t=0.0, yaw_rad=0.0)
+        base_row = int(round(v_mm / NOZZLE_PITCH_MM))
+        expected_rows = {r for r in range(base_row, base_row + NUM_NOZZLES) if 0 <= r < height}
+        actual_rows = set(np.nonzero(eng.printed[:, 1])[0].tolist())
+        assert actual_rows == expected_rows, (v_mm, base_row, actual_rows, expected_rows)
+
+
+def test_step_nonzero_yaw_spreads_nozzles_across_columns_by_the_expected_amount():
+    mm_per_column = 0.5
+    width_cols = 200
+    height_rows = 300
+    ink = np.ones((height_rows, width_cols), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    yaw = math.radians(45.0)
+
+    eng.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=yaw)
+
+    touched_cols = np.nonzero(eng.printed.any(axis=0))[0]
+    assert touched_cols.size > 1, "a nonzero yaw must spread ink across more than one column"
+    spread_cols = int(touched_cols.max() - touched_cols.min())
+
+    # bar_length == (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM == NOZZLE_BAR_WIDTH_MM
+    # exactly (see geometry.py) -- the u-extent across the whole bar is
+    # bar_length * sin(yaw_rad), converted to columns.
+    expected_spread_cols = NOZZLE_BAR_WIDTH_MM * math.sin(yaw) / mm_per_column
+    assert abs(spread_cols - expected_spread_cols) <= 1.0, (spread_cols, expected_spread_cols)
+
+
+def test_step_yaw_sign_flips_the_column_spread_direction():
+    mm_per_column = 0.5
+    ink = np.ones((300, 200), dtype=bool)
+    yaw = math.radians(30.0)
+
+    eng_pos = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng_pos.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=yaw)
+    cols_pos = np.nonzero(eng_pos.printed.any(axis=0))[0]
+
+    eng_neg = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng_neg.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=-yaw)
+    cols_neg = np.nonzero(eng_neg.printed.any(axis=0))[0]
+
+    # Opposite yaw signs must spread to opposite sides of nozzle 0's column
+    # (u_mm=50 -> col 100): +yaw spreads to higher columns, -yaw to lower.
+    assert cols_pos.max() > 100 and cols_neg.min() < 100
+    assert cols_pos.min() >= 100 and cols_neg.max() <= 100
+
+
+# =============================================== mutation check (see PR body)
+def test_step_MUTATION_check_ignoring_yaw_rad_breaks_the_spread_test():
+    # Inlines the mutation described in the PR: a step() that accepts
+    # yaw_rad but never uses it (drops back to the single shared `col`)
+    # would place every nozzle in the same column regardless of yaw --
+    # reproduced here directly rather than by editing coverage.py, so the
+    # regression stays covered by the test suite.
+    mm_per_column = 0.5
+    ink = np.ones((300, 200), dtype=bool)
+    yaw = math.radians(45.0)
+    u_mm, v_mm = 50.0, 5.0
+
+    col_ignoring_yaw = int(round(u_mm / mm_per_column))
+    mutated_touched_cols = {col_ignoring_yaw}          # every nozzle, same column
+
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
+    real_touched_cols = set(np.nonzero(eng.printed.any(axis=0))[0].tolist())
+
+    assert real_touched_cols != mutated_touched_cols, (
+        "the mutated (yaw-ignoring) engine must disagree with the real one "
+        "-- if this ever matches, the spread test above has stopped "
+        "actually exercising yaw_rad")
 
 
 if __name__ == "__main__":

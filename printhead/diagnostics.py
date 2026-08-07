@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from typing import Optional
 
@@ -39,7 +40,8 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                            hz: float = 15.0, ndjson: bool = False,
                            page_calibration_path: Optional[str] = None,
                            sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
-                           sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM) -> None:
+                           sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
+                           boresight_deg: float = 0.0) -> None:
     """Continuously print the sensor position (x/y/z), the travel-axis value and
     the resulting column, until Ctrl+C. Doubles as an axis / mm-per-column aid.
 
@@ -53,11 +55,15 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
     anything is printed with it. A bad/missing path aborts the same way a
     failed tracker connection does, since the caller asked for it explicitly.
 
-    ``sensor_offset_row_mm``/``sensor_offset_col_mm`` are forwarded into the
-    same :class:`~printhead.tracking.PageMapper` a real pass builds (see
-    ``PrintController._print_freehand_pass``), so this diagnostic reports the
-    exact same ``(page_u, page_v)`` a real pass would use -- otherwise it
-    would stop being trustworthy for the sanity-check it exists for."""
+    ``sensor_offset_row_mm``/``sensor_offset_col_mm``/``boresight_deg`` are
+    forwarded into the same :class:`~printhead.tracking.PageMapper` a real
+    pass builds (see ``PrintController._print_freehand_pass``), so this
+    diagnostic reports the exact same ``(page_u, page_v)`` -- and, when a
+    boresight has been captured, the exact same live yaw -- a real pass
+    would use. Reporting the live yaw (``yaw_deg`` below) is exactly what
+    lets a boresight be verified before printing with it: held in the
+    reference pose (nozzle bar along the traced row edge), ``yaw_deg``
+    should read close to 0."""
     tracker = make_tracker(tracking, simulate)
     try:
         tracker.open()
@@ -73,7 +79,8 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
         try:
             page_mapper = PageMapper(PageCalibration.load(page_calibration_path),
                                      sensor_offset_row_mm=sensor_offset_row_mm,
-                                     sensor_offset_col_mm=sensor_offset_col_mm)
+                                     sensor_offset_col_mm=sensor_offset_col_mm,
+                                     boresight_offset_rad=math.radians(boresight_deg))
         except Exception as exc:
             if ndjson:
                 print(json.dumps({"event": "error",
@@ -105,7 +112,15 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                 # quat (qx,qy,qz,qw) -- see AmfitrackTracker._extract_pose -- is
                 # included only when the connected hardware/SDK actually reports it,
                 # so this line looks exactly as before on setups that don't.
-                page_uvz = page_mapper.project(pos) if page_mapper is not None else None
+                # page_mapper.project() applies the same rotation correction
+                # (or lack of it -- see PageMapper.project's docstring) as a
+                # real freehand pass, and caches this sample's yaw on
+                # page_mapper.last_yaw_rad as a side effect (read below) --
+                # see controller._print_freehand_pass for the identical
+                # "compute once, reuse" pattern.
+                page_uvz = page_mapper.project(pos, quat) if page_mapper is not None else None
+                yaw_deg = (math.degrees(page_mapper.last_yaw_rad)
+                          if page_mapper is not None else None)
                 if ndjson:
                     event = {
                         "event": "position",
@@ -118,7 +133,8 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                     if page_uvz is not None:
                         event.update(page_u=round(page_uvz[0], 3),
                                      page_v=round(page_uvz[1], 3),
-                                     page_z=round(page_uvz[2], 3))
+                                     page_z=round(page_uvz[2], 3),
+                                     yaw_deg=round(yaw_deg, 3))
                     print(json.dumps(event), flush=True)
                 else:
                     line = (f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
@@ -128,7 +144,7 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                                 f"{quat[2]:+.2f} {quat[3]:+.2f}]")
                     if page_uvz is not None:
                         line += (f"  |  page u={page_uvz[0]:8.2f}  v={page_uvz[1]:8.2f}  "
-                                f"z={page_uvz[2]:6.2f} mm")
+                                f"z={page_uvz[2]:6.2f} mm  yaw={yaw_deg:+6.2f} deg")
                     print(line, end="\r", flush=True)
             await asyncio.sleep(1.0 / hz)
     except (KeyboardInterrupt, asyncio.CancelledError):

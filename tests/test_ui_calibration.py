@@ -78,6 +78,24 @@ def test_compute_calibration_returns_an_error_for_malformed_input():
     assert result["ok"] is False
 
 
+# ==================================================================== boresight
+def test_compute_calibration_stores_a_given_boresight_quat():
+    col, row = _page_traces()
+    quat = [0.0, 0.0, 0.1305, 0.9914]
+    result = compute_calibration(col, row, boresight_quat=quat)
+    assert result["ok"] is True
+    assert result["has_boresight"] is True
+    assert np.allclose(result["calibration"]["boresight_quat"], quat)
+
+
+def test_compute_calibration_has_no_boresight_when_not_given():
+    col, row = _page_traces()
+    result = compute_calibration(col, row)
+    assert result["ok"] is True
+    assert result["has_boresight"] is False
+    assert "boresight_quat" not in result["calibration"]
+
+
 # =================================================== save_calibration / load
 def test_save_and_load_calibration_round_trip():
     col, row = _page_traces()
