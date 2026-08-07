@@ -179,6 +179,27 @@ class CoverageEngine:
         bar's CURRENT direction from nozzle 0 -- rather than sharing nozzle
         0's column the way a zero-yaw bar (perpendicular to travel) does.
 
+        Sign derivation (check this before ever touching it again): in the
+        right-handed page basis ``{e_col, e_row, n}`` with ``n = e_col x
+        e_row``, a rotation by ``+theta`` about ``n`` maps an in-plane vector
+        ``(a, b)`` to ``(a*cos(theta) - b*sin(theta), a*sin(theta) +
+        b*cos(theta))``. At ``yaw_rad == 0`` the bar points along ``+e_row``
+        -- that follows directly from the ``row = base_row + p`` convention
+        below (increasing nozzle index ``p`` -> increasing ``row`` ->
+        increasing ``v``), i.e. the bar's direction vector is ``(0, 1)`` in
+        ``(u, v)``. Rotating ``(0, 1)`` by ``+theta`` gives ``(-sin(theta),
+        cos(theta))``, so nozzle ``p`` at distance ``d = p * NOZZLE_PITCH_MM``
+        along the bar sits at ``u_p = u_mm - d*sin(yaw_rad)``, ``v_p = v_mm +
+        d*cos(yaw_rad)`` -- MINUS on the u term. This must match
+        ``tracking.PageMapper``'s offset rotation (``du = col_offset*cos(yaw)
+        - row_offset*sin(yaw)``, same minus sign on the sin term for a
+        row-offset vector): both describe body-fixed vectors on the same
+        cart, so both must rotate the same way, or a rotating pass has the
+        bar-tilt correction here pulling one way while the lever-arm
+        correction in PageMapper pulls the other -- see
+        ``tests/test_coverage.py``'s cross-consistency test against
+        PageMapper, which exists specifically to catch that.
+
         Returns ``(pattern, changed)``: ``pattern`` is the current 19-byte /
         152-bit nozzle frame (same format as ``rendering.frames_from_ink``),
         and ``changed`` is True if it differs from the pattern returned by
@@ -216,7 +237,7 @@ class CoverageEngine:
                 row = base_row + p
             else:
                 offset_along_bar = p * NOZZLE_PITCH_MM
-                u_p = u_mm + offset_along_bar * sin_yaw
+                u_p = u_mm - offset_along_bar * sin_yaw
                 v_p = v_mm + offset_along_bar * cos_yaw
                 col = int(round(u_p / self.mm_per_column))
                 row = int(round(v_p / NOZZLE_PITCH_MM))

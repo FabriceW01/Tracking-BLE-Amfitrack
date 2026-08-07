@@ -14,10 +14,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from printhead.calibration import PageCalibration                      # noqa: E402
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S     # noqa: E402
 from printhead.geometry import (                                       # noqa: E402
     NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
 )
+from printhead.tracking import PageMapper                              # noqa: E402
 
 DOSE_HOLD_S = 0.1
 
@@ -310,23 +312,95 @@ def test_step_nonzero_yaw_spreads_nozzles_across_columns_by_the_expected_amount(
     assert abs(spread_cols - expected_spread_cols) <= 1.0, (spread_cols, expected_spread_cols)
 
 
-def test_step_yaw_sign_flips_the_column_spread_direction():
+def test_step_90deg_yaw_swings_the_bar_to_lower_columns_not_higher():
+    # Absolute-geometry pin, not just "the two signs disagree" (that weaker
+    # property is what the old, WRONG version of this test checked, and it
+    # would have passed just as happily with the sign inverted -- see the
+    # PR body / coverage.py's step() docstring for the derivation this
+    # value is checked against).
+    #
+    # In the right-handed page basis {e_col, e_row, n=e_col x e_row}, the
+    # bar points along +e_row at yaw_rad==0 (from the row = base_row + p
+    # convention: increasing nozzle index p -> increasing row -> increasing
+    # v), i.e. its direction vector is (0, 1) in (u, v). Rotating (0, 1) by
+    # +theta gives (-sin(theta), cos(theta)) -- so a POSITIVE yaw must swing
+    # the far end of the bar to LOWER u (lower columns), not higher.
+    #
+    # yaw = +90 deg makes this exact and hand-checkable: sin(90deg) == 1.0,
+    # cos(90deg) == 0.0 (both exact in IEEE 754), so nozzle NUM_NOZZLES-1
+    # (the far end of the bar, offset_along_bar == NOZZLE_BAR_WIDTH_MM
+    # exactly -- see geometry.py) lands at u = u_mm - NOZZLE_BAR_WIDTH_MM,
+    # v == v_mm unchanged -- the whole bar stays on nozzle 0's row and
+    # spreads purely in u.
     mm_per_column = 0.5
-    ink = np.ones((300, 200), dtype=bool)
+    u_mm, v_mm = 50.0, 0.0
+    yaw = math.pi / 2.0
+
+    ink = np.ones((10, 200), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
+
+    row0 = int(round(v_mm / NOZZLE_PITCH_MM))
+    col0 = int(round(u_mm / mm_per_column))
+    assert eng.printed[row0, col0], "nozzle 0 must stay at its un-rotated (row, col)"
+
+    expected_last_col = col0 - int(round(NOZZLE_BAR_WIDTH_MM / mm_per_column))
+    touched_cols = np.nonzero(eng.printed[row0])[0]
+    actual_last_col = int(touched_cols.min())        # bar swept toward LOWER columns
+
+    assert touched_cols.max() == col0, "nozzle 0 must be the HIGHEST column touched"
+    assert abs(actual_last_col - expected_last_col) <= 1, (
+        actual_last_col, expected_last_col, "within one column of rounding")
+    # explicitly reject the old (wrong) direction, so a re-inversion of the
+    # sign fails loudly here even if the tolerance above were ever loosened
+    assert actual_last_col < col0
+
+
+def test_step_and_page_mapper_rotate_a_body_fixed_row_vector_the_same_direction():
+    # The property that actually broke here: PageMapper's sensor->nozzle
+    # lever-arm offset and CoverageEngine's per-nozzle bar placement are
+    # both body-fixed vectors on the same cart (a fixed offset along the
+    # +row/+p direction from a reference point on the cart), so under the
+    # SAME yaw they must shift u the SAME way -- left uncorrected, the two
+    # rotating corrections would pull u in opposite directions on a
+    # rotating pass, which is worse than applying neither.
     yaw = math.radians(30.0)
+    offset_mm = 10.0
 
-    eng_pos = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
-    eng_pos.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=yaw)
-    cols_pos = np.nonzero(eng_pos.printed.any(axis=0))[0]
+    # PageMapper side: du for a pure +row-offset vector (col offset 0) at
+    # this yaw -- same construction as test_page_mapper.py's 90-degree test.
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]),
+                          boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]))
+    mapper = PageMapper(cal, sensor_offset_row_mm=offset_mm + NOZZLE_BAR_WIDTH_MM / 2.0,
+                        sensor_offset_col_mm=0.0)
+    half = yaw / 2.0
+    quat = (0.0, 0.0, math.sin(half), math.cos(half))
+    pos = np.zeros(3)
+    u_raw, _, _ = cal.project(pos)
+    u_mapped, _, _ = mapper.project(pos, quat=quat)
+    mapper_du = u_mapped - u_raw
+    assert mapper_du != 0.0, "test is vacuous if the offset doesn't move u at all"
 
-    eng_neg = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
-    eng_neg.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=-yaw)
-    cols_neg = np.nonzero(eng_neg.printed.any(axis=0))[0]
+    # CoverageEngine side: at zero yaw the bar points along +e_row (the same
+    # sense as the positive row offset above -- see step()'s docstring), so
+    # the far end of the bar (nozzle NUM_NOZZLES-1, the largest along-bar
+    # offset) must shift u the same SIGN as mapper_du under the same yaw.
+    mm_per_column = 0.5
+    u_mm, v_mm = 50.0, 5.0
+    ink = np.ones((300, 200), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
+    col0 = int(round(u_mm / mm_per_column))
+    touched_cols = np.nonzero(eng.printed.any(axis=0))[0]
+    farthest_col = int(touched_cols[np.argmax(np.abs(touched_cols - col0))])
+    engine_du_sign_negative = farthest_col < col0
 
-    # Opposite yaw signs must spread to opposite sides of nozzle 0's column
-    # (u_mm=50 -> col 100): +yaw spreads to higher columns, -yaw to lower.
-    assert cols_pos.max() > 100 and cols_neg.min() < 100
-    assert cols_pos.min() >= 100 and cols_neg.max() <= 100
+    assert (mapper_du < 0.0) == engine_du_sign_negative, (
+        mapper_du, farthest_col, col0,
+        "PageMapper and CoverageEngine disagree about which way a "
+        "body-fixed row-axis vector on the cart rotates -- exactly the "
+        "inconsistency the original sign error introduced")
 
 
 # =============================================== mutation check (see PR body)
