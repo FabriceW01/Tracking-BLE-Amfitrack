@@ -290,6 +290,94 @@ def test_page_mapper_boresight_offset_has_no_effect_without_a_boresight():
     assert mapper.last_yaw_rad == 0.0
 
 
+# ============================================== roll / pitch (diagnostic only)
+def _quat_about_axis(axis, deg: float):
+    """Same helper as tests/test_rotation.py, reimplemented here so this file
+    stays independently runnable (no cross-test-file imports)."""
+    axis = np.asarray(axis, dtype=float)
+    axis = axis / np.linalg.norm(axis)
+    half = math.radians(deg) / 2.0
+    s = math.sin(half)
+    return (axis[0] * s, axis[1] * s, axis[2] * s, math.cos(half))
+
+
+def test_page_mapper_defaults_last_roll_and_pitch_to_zero():
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]))
+    mapper = PageMapper(cal)
+    assert mapper.last_roll_rad == 0.0
+    assert mapper.last_pitch_rad == 0.0
+
+
+def test_page_mapper_last_roll_and_pitch_stay_zero_without_boresight():
+    # No boresight_quat on the calibration -> project() must not touch
+    # last_roll_rad/last_pitch_rad at all, even with a live quat, mirroring
+    # last_yaw_rad's documented behaviour in this situation.
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]))          # no boresight
+    mapper = PageMapper(cal)
+    mapper.project(np.zeros(3), quat=_quat_about_axis((1.0, 0.0, 0.0), 30.0))
+    assert mapper.last_roll_rad == 0.0
+    assert mapper.last_pitch_rad == 0.0
+
+
+def test_page_mapper_last_roll_and_pitch_stay_zero_when_quat_is_none():
+    # Boresight present but this tick's quat is None (dropped orientation
+    # packet) -> same "reuse the last value" behaviour as last_yaw_rad;
+    # starting from the 0.0 default, they stay 0.0.
+    cal = _cal_with_boresight()
+    mapper = PageMapper(cal)
+    mapper.project(np.zeros(3), quat=None)
+    assert mapper.last_roll_rad == 0.0
+    assert mapper.last_pitch_rad == 0.0
+
+
+def test_page_mapper_updates_last_roll_and_pitch_from_a_live_quat():
+    # Boresight + live quat present -> last_roll_rad/last_pitch_rad update
+    # from cart_rotation_angles, using the SAME e_col/e_row/boresight_quat
+    # arguments as last_yaw_rad.
+    cal = _cal_with_boresight()
+    mapper = PageMapper(cal)
+    roll_quat = _quat_about_axis((1.0, 0.0, 0.0), 12.0)     # about e_col -> roll
+    mapper.project(np.zeros(3), quat=roll_quat)
+    assert abs(math.degrees(mapper.last_roll_rad) - 12.0) < 1e-6
+    assert abs(mapper.last_pitch_rad) < 1e-9
+    assert abs(mapper.last_yaw_rad) < 1e-9
+
+    pitch_quat = _quat_about_axis((0.0, 1.0, 0.0), -8.0)    # about e_row -> pitch
+    mapper.project(np.zeros(3), quat=pitch_quat)
+    assert abs(mapper.last_roll_rad) < 1e-9
+    assert abs(math.degrees(mapper.last_pitch_rad) - (-8.0)) < 1e-6
+    assert abs(mapper.last_yaw_rad) < 1e-9
+
+
+def test_page_mapper_boresight_offset_rad_does_not_leak_into_roll_or_pitch():
+    # boresight_offset_rad (--boresight-deg) is a yaw-only fine-tune; it must
+    # show up in last_yaw_rad but have NO effect on last_roll_rad/last_pitch_rad.
+    cal = _cal_with_boresight()
+    mapper = PageMapper(cal, boresight_offset_rad=math.radians(20.0))
+    mapper.project(np.zeros(3), quat=IDENTITY_QUAT)
+    assert abs(math.degrees(mapper.last_yaw_rad) - 20.0) < 1e-9   # yaw: offset applied
+    assert mapper.last_roll_rad == 0.0                             # roll: unaffected
+    assert mapper.last_pitch_rad == 0.0                            # pitch: unaffected
+
+
+# =========================================== mutation check: roll/pitch axes
+def test_page_mapper_MUTATION_check_swapping_roll_and_pitch_axes_is_detected():
+    # Inlines a "swap which axis feeds roll vs pitch" mutation (the one
+    # described in the PR body) and confirms it disagrees with the real
+    # wiring -- proof the assignment in project() is actually pinned by
+    # test_page_mapper_updates_last_roll_and_pitch_from_a_live_quat above.
+    from printhead.rotation import cart_rotation_angles
+    cal = _cal_with_boresight()
+    roll_quat = _quat_about_axis((1.0, 0.0, 0.0), 12.0)
+    correct_roll, correct_pitch, _ = cart_rotation_angles(
+        roll_quat, cal.boresight_quat, cal.e_col, cal.e_row)
+    mutated_roll, mutated_pitch = correct_pitch, correct_roll   # swapped
+    assert (mutated_roll, mutated_pitch) != (correct_roll, correct_pitch)
+    assert abs(correct_roll) > 1e-6 and abs(mutated_roll) < 1e-9
+
+
 # =============================================== mutation check (see PR body)
 def test_page_mapper_MUTATION_check_dropping_the_offset_rotation_breaks_the_90deg_case():
     # Inlines the mutation described in the PR: if project() applied the
@@ -427,6 +515,34 @@ def test_monitor_position_omits_yaw_deg_without_calibration():
     positions = [e for e in _events(output) if e.get("event") == "position"]
     assert positions, output
     assert "yaw_deg" not in positions[-1]
+
+
+def test_monitor_position_reports_roll_and_pitch_deg_alongside_page_uvz():
+    # Same reasoning as test_monitor_position_reports_yaw_deg_alongside_page_uvz:
+    # SimulatedTracker never fakes orientation, so roll_deg/pitch_deg stay at
+    # their 0.0 defaults -- this pins their PRESENCE in the NDJSON event.
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]),
+                          boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "cal.json")
+        cal.save(path)
+        output = asyncio.run(_run_monitor_briefly(page_calibration_path=path))
+
+    positions = [e for e in _events(output) if e.get("event") == "position"]
+    assert positions, output
+    last = positions[-1]
+    assert "roll_deg" in last and "pitch_deg" in last
+    assert abs(last["roll_deg"]) < 1e-6
+    assert abs(last["pitch_deg"]) < 1e-6
+
+
+def test_monitor_position_omits_roll_and_pitch_deg_without_calibration():
+    output = asyncio.run(_run_monitor_briefly())
+    positions = [e for e in _events(output) if e.get("event") == "position"]
+    assert positions, output
+    assert "roll_deg" not in positions[-1]
+    assert "pitch_deg" not in positions[-1]
 
 
 def test_monitor_position_reports_an_error_for_a_bad_calibration_path():

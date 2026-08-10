@@ -136,6 +136,8 @@
       <div class="metric page-only" style="display:none"><div class="k">Page V</div><div class="v"><span id="posPageV">–</span><span class="u">mm</span></div></div>
       <div class="metric page-only" style="display:none"><div class="k">Page Z</div><div class="v"><span id="posPageZ">–</span><span class="u">mm</span></div></div>
       <div class="metric page-only" style="display:none"><div class="k">Yaw</div><div class="v"><span id="posYaw">–</span><span class="u">deg</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Roll</div><div class="v"><span id="posRoll">–</span><span class="u">deg</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Pitch</div><div class="v"><span id="posPitch">–</span><span class="u">deg</span></div></div>
     </div>
     <div class="spark" id="sparkWrap"><canvas id="spark" width="1100" height="90"></canvas></div>
     <div class="spark" id="coverageWrap" style="display:none">
@@ -584,7 +586,7 @@ function setSensor(on){
   $('sensorPill').classList.toggle('on',on);
   $('sensorPillText').textContent=on?'sensor live':'sensor offline';
   $('liveBadge').innerHTML=on?'<b>● streaming</b>':'not connected';
-  if(!on){ ['posX','posY','posZ','posAdv','posCol','posQuat','posPageU','posPageV','posPageZ','posYaw'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
+  if(!on){ ['posX','posY','posZ','posAdv','posCol','posQuat','posPageU','posPageV','posPageZ','posYaw','posRoll','posPitch'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
 }
 
 /* ---------- sparkline ---------- */
@@ -614,6 +616,8 @@ function onPosition(o){
   $('posPageV').textContent = o.page_v!==undefined ? o.page_v.toFixed(2) : '–';
   $('posPageZ').textContent = o.page_z!==undefined ? o.page_z.toFixed(2) : '–';
   $('posYaw').textContent = o.yaw_deg!==undefined ? fmtSigned(o.yaw_deg,2) : '–';
+  $('posRoll').textContent = o.roll_deg!==undefined ? fmtSigned(o.roll_deg,2) : '–';
+  $('posPitch').textContent = o.pitch_deg!==undefined ? fmtSigned(o.pitch_deg,2) : '–';
   onCalibrationPosition(o);
 }
 

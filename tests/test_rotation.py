@@ -15,7 +15,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from printhead.rotation import quat_to_matrix, yaw_about_normal  # noqa: E402
+from printhead.rotation import (  # noqa: E402
+    cart_rotation_angles, quat_to_matrix, yaw_about_normal,
+)
 
 IDENTITY_QUAT = (0.0, 0.0, 0.0, 1.0)
 E_COL = np.array([1.0, 0.0, 0.0])
@@ -185,6 +187,94 @@ def test_quat_to_matrix_rejects_a_zero_quaternion():
 def test_yaw_about_normal_rejects_a_degenerate_page_frame():
     try:
         yaw_about_normal(IDENTITY_QUAT, IDENTITY_QUAT, E_COL, E_COL)   # parallel
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for parallel e_col/e_row")
+
+
+# =============================================================== cart_rotation_angles
+def test_cart_rotation_angles_pure_roll_about_e_col_isolates_to_roll():
+    # A rotation purely about e_col (the column/travel axis) is pure "roll"
+    # by this module's aircraft-style convention -- must show up entirely as
+    # roll, with pitch and yaw both ~0.
+    for deg in (10.0, 45.0, -30.0):
+        roll, pitch, yaw = cart_rotation_angles(
+            _quat_about_axis(E_COL, deg), IDENTITY_QUAT, E_COL, E_ROW)
+        assert abs(math.degrees(roll) - deg) < 1e-6, (deg, roll)
+        assert abs(pitch) < 1e-9, (deg, pitch)
+        assert abs(yaw) < 1e-9, (deg, yaw)
+
+
+def test_cart_rotation_angles_pure_pitch_about_e_row_isolates_to_pitch():
+    # Symmetric case: a rotation purely about e_row (the row axis, along the
+    # nozzle bar) is pure "pitch" -- must show up entirely as pitch, with
+    # roll and yaw both ~0.
+    for deg in (10.0, 45.0, -30.0):
+        roll, pitch, yaw = cart_rotation_angles(
+            _quat_about_axis(E_ROW, deg), IDENTITY_QUAT, E_COL, E_ROW)
+        assert abs(roll) < 1e-9, (deg, roll)
+        assert abs(math.degrees(pitch) - deg) < 1e-6, (deg, pitch)
+        assert abs(yaw) < 1e-9, (deg, yaw)
+
+
+def test_cart_rotation_angles_pure_roll_relative_to_a_nonidentity_boresight():
+    # Same idea as yaw_about_normal's non-identity-boresight test: only the
+    # RELATIVE rotation (current vs. boresight) should matter for roll too.
+    boresight = _quat_about_axis(E_COL, 15.0)
+    current = _quat_about_axis(E_COL, 55.0)
+    roll, pitch, yaw = cart_rotation_angles(current, boresight, E_COL, E_ROW)
+    assert abs(math.degrees(roll) - 40.0) < 1e-6
+    assert abs(pitch) < 1e-9
+    assert abs(yaw) < 1e-9
+
+
+def test_cart_rotation_angles_yaw_only_matches_yaw_about_normal():
+    # Cross-check required by the PR: for a yaw-only rotation, this
+    # function's yaw component must be IDENTICAL to yaw_about_normal called
+    # with the same inputs -- the two must never disagree.
+    for deg in (10.0, 45.0, -60.0, 89.0):
+        quat = _quat_about_z(deg)
+        roll, pitch, yaw = cart_rotation_angles(quat, IDENTITY_QUAT, E_COL, E_ROW)
+        expected_yaw = yaw_about_normal(quat, IDENTITY_QUAT, E_COL, E_ROW)
+        assert yaw == expected_yaw, (deg, yaw, expected_yaw)
+        assert abs(roll) < 1e-9, (deg, roll)
+        assert abs(pitch) < 1e-9, (deg, pitch)
+
+
+def test_cart_rotation_angles_combined_tilt_and_yaw_yaw_component_still_matches():
+    # Same cross-check but with roll/pitch/yaw all simultaneously nonzero
+    # (combined tilt+yaw, like the naive-projection-disagreement case above)
+    # -- the yaw component must still agree with yaw_about_normal exactly.
+    tilt_axis = (1.0, 1.0, 0.0)
+    q_tilt = _quat_about_axis(tilt_axis, 35.0)
+    q_yaw = _quat_about_z(20.0)
+    q_combo = _qmul(q_yaw, q_tilt)
+    roll, pitch, yaw = cart_rotation_angles(q_combo, IDENTITY_QUAT, E_COL, E_ROW)
+    expected_yaw = yaw_about_normal(q_combo, IDENTITY_QUAT, E_COL, E_ROW)
+    assert yaw == expected_yaw, (yaw, expected_yaw)
+    # And with genuine combined tilt, roll/pitch are no longer both ~0.
+    assert abs(roll) > 1e-6 or abs(pitch) > 1e-6
+
+
+def test_cart_rotation_angles_identity_boresight_and_quat_is_all_zero():
+    roll, pitch, yaw = cart_rotation_angles(IDENTITY_QUAT, IDENTITY_QUAT, E_COL, E_ROW)
+    assert abs(roll) < 1e-9 and abs(pitch) < 1e-9 and abs(yaw) < 1e-9
+
+
+def test_cart_rotation_angles_normalises_non_unit_e_col_e_row():
+    # Defensive re-normalisation: scaling e_col/e_row must not change the
+    # returned angles (mirrors yaw_about_normal's defensive normalisation of
+    # the page normal).
+    roll, pitch, yaw = cart_rotation_angles(
+        _quat_about_axis(E_COL, 30.0), IDENTITY_QUAT, E_COL * 5.0, E_ROW * 0.2)
+    assert abs(math.degrees(roll) - 30.0) < 1e-6
+    assert abs(pitch) < 1e-9
+    assert abs(yaw) < 1e-9
+
+
+def test_cart_rotation_angles_rejects_a_degenerate_page_frame():
+    try:
+        cart_rotation_angles(IDENTITY_QUAT, IDENTITY_QUAT, E_COL, E_COL)   # parallel
     except ValueError:
         return
     raise AssertionError("expected ValueError for parallel e_col/e_row")

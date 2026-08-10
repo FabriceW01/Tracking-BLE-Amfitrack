@@ -38,7 +38,7 @@ from .geometry import (
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
-from .rotation import yaw_about_normal
+from .rotation import cart_rotation_angles, yaw_about_normal
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
 
@@ -199,6 +199,17 @@ class PageMapper:
         # calling yaw_about_normal a second time (see controller.py's
         # _print_freehand_pass).
         self.last_yaw_rad = 0.0
+        # Roll/pitch about the page normal's in-plane axes (radians), same
+        # "0.0 until a live sample arrives, or forever with no boresight"
+        # semantics as last_yaw_rad above -- see cart_rotation_angles.
+        # DIAGNOSTIC ONLY: unlike last_yaw_rad, these two never feed the
+        # sensor->nozzle offset rotation below or CoverageEngine.step(), see
+        # project()'s docstring and cart_rotation_angles's own docstring for
+        # why (measured tilt is small, correcting it is a deliberate
+        # non-goal). Exposed as plain attributes for the same "compute once
+        # in project(), reuse from here" reason as last_yaw_rad.
+        self.last_roll_rad = 0.0
+        self.last_pitch_rad = 0.0
 
     def project(self, pos, quat=None) -> "tuple[float, float, float]":
         """
@@ -232,6 +243,17 @@ class PageMapper:
                 quat, self.calibration.boresight_quat,
                 self.calibration.e_col, self.calibration.e_row
             ) + self.boresight_offset_rad
+            # Diagnostic-only roll/pitch (see cart_rotation_angles's
+            # docstring) -- last_yaw_rad above, from the untouched
+            # yaw_about_normal path, stays the single source of truth for
+            # yaw; this function's own yaw component is discarded rather
+            # than replacing it, even though the two are mathematically
+            # identical. boresight_offset_rad (--boresight-deg) is a
+            # yaw-only fine-tune and must NOT be added to roll/pitch.
+            self.last_roll_rad, self.last_pitch_rad, _ = cart_rotation_angles(
+                quat, self.calibration.boresight_quat,
+                self.calibration.e_col, self.calibration.e_row
+            )
 
         # cos(0.0) == 1.0 and sin(0.0) == 0.0 exactly in IEEE 754, so at
         # yaw == 0.0 (no boresight, ever, or a boresight pose sample) this
