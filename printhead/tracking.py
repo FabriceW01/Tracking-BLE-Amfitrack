@@ -231,6 +231,26 @@ class PageMapper:
         """
         self.calibration.origin = np.asarray(pos, dtype=float).copy()
 
+    def capture_boresight(self, quat) -> None:
+        """
+        Adopt ``quat`` as the reference pose yaw is measured against.
+
+        Used by the calibration-free simple frame, which has no traced
+        boresight: the pose held at START becomes "0 deg", so a subsequent
+        flat turn of the cart reads out as exactly that turn. Without this
+        the frame would have to assume the sensor is mounted square with the
+        tracker axes -- it generally is not (measured: 120 deg off), and
+        assuming so corrupts yaw badly and non-linearly. See
+        ``PageCalibration.simple_frame`` for the measured before/after.
+
+        Calling it with ``None`` is a no-op, leaving ``boresight_quat``
+        unset so ``project()`` applies no rotation correction at all
+        (the same safe fallback as a pre-boresight traced calibration)
+        rather than silently referencing a wrong pose.
+        """
+        if quat is not None:
+            self.calibration.boresight_quat = np.asarray(quat, dtype=float).copy()
+
     def zero_at_nozzle(self, pos, quat=None) -> None:
         """
         Re-zero the page frame so that ``project(pos, quat)`` returns

@@ -51,7 +51,7 @@ Fehlermeldung ab, statt stillschweigend das falsche Verhalten zu zeigen.
 python main.py "Hallo" --dry-run --preview vorschau.png --mode line
 
 # Freihändig drucken OHNE Kalibrierung (einfachster Einstieg): Seitenachsen
-# = Tracker-x/y, Gierwinkel um Tracker-z, Nullpunkt beim START-Druck:
+# = Tracker-x/y, Gierwinkel relativ zur Pose beim START-Druck:
 python main.py "Hallo" --page-frame simple
 
 # Freihändig drucken MIT kalibrierter Seite (genauer), auf START-Taster
@@ -85,7 +85,7 @@ direkt das Amfitrack-Koordinatensystem als Seiten-Rahmen:
 |---|---|---|
 | Spaltenachse `u` | Tracker-**x** | abgefahrene Spaltenkante |
 | Zeilenachse `v` | Tracker-**y** | abgefahrene Zeilenkante |
-| Gierwinkel | direkt um Tracker-**z** | relativ zur aufgenommenen Boresight-Pose |
+| Gierwinkel | um die Seitennormale, relativ zur Pose beim **START** | um die Seitennormale, relativ zur abgefahrenen Boresight-Pose |
 | Nullpunkt | wo der Wagen beim **START**-Druck steht | abgefahrene Seitenecke |
 | Skalenkorrektur | keine (Tracker-mm = echte mm) | optional aus bekannter Blattgröße |
 | Vorbereitung | keine | zwei Kanten abfahren + Boresight aufnehmen |
@@ -121,11 +121,28 @@ Live prüfen lässt sich der Rahmen ohne Druck mit:
 python main.py --pos --page-frame simple
 ```
 
-— das meldet fortlaufend `page_u`/`page_v` und `yaw_deg` (Gierwinkel um
-Tracker-z), sodass eine bekannte Handbewegung bzw. ein angezeichneter Winkel
-direkt gegengeprüft werden kann. Hinweis: Im `--pos`-Diagnosemodus wird der
-Nullpunkt bewusst **nicht** neu gesetzt, `page_u`/`page_v` sind dort also
-absolute Tracker-Koordinaten (plus Sensor→Düsen-Versatz).
+— das meldet fortlaufend `page_u`/`page_v` und `yaw_deg`, sodass eine bekannte
+Handbewegung bzw. ein angezeichneter Winkel direkt gegengeprüft werden kann.
+Die Gier-Referenz wird dabei aus der **ersten** Orientierungsmessung
+übernommen: `yaw_deg` startet also bei 0° für die Pose, in der der Wagen beim
+Start von `--pos` steht, und zeigt danach die Drehung relativ dazu. Hinweis:
+Der *Nullpunkt* wird im Diagnosemodus bewusst **nicht** neu gesetzt,
+`page_u`/`page_v` sind dort also absolute Tracker-Koordinaten (plus
+Sensor→Düsen-Versatz).
+
+**Warum eine Referenzpose nötig ist (und keine feste Tracker-Achse):** Der
+erste Wurf dieses Modus hat den Gierwinkel direkt gegen die Tracker-z-Achse
+gemessen (Identitäts-Boresight). Das ist falsch, sobald der Sensor verdreht am
+Wagen sitzt — auf dieser Anlage gemessen 120,1° um [0,553 0,589 −0,590], also
+Sensor-x → Welt-−z, Sensor-y → Welt-+x, Sensor-z → Welt-−y. Diese
+Montagedrehung steckt dann dauerhaft im gemeldeten Winkel: Eine **flache**
+Wagendrehung von 90° wurde als nur ~70° Gieränderung gemeldet, stark
+nichtlinear, während Roll und Nick um Dutzende Grad mitwanderten. Mit der beim
+START aufgenommenen Referenzpose kommt exakt 0/15/30/45/60/90° heraus und
+Roll/Nick bleiben bei 0,000°. Das war kein reines Anzeigeproblem: Derselbe
+Gierwinkel dreht den Sensor→Düsen-Versatz, die Identitäts-Variante hat also
+auch die Tinte falsch platziert. Festgehalten in
+`tests/test_calibration.py` / `tests/test_page_mapper.py`.
 
 ⚠️ **Wichtig:** Beim ersten echten Hardware-Bring-up ist der Modus ohne
 Fehlermeldung leer durchgelaufen (`active=0` die ganze Zeit, Exit-Code 0,
@@ -440,7 +457,7 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 
 | Option | Bedeutung |
 |---|---|
-| `--page-frame calibrated\|simple` | Welchen 2D-Rahmen `--mode page` benutzt (Default `calibrated`). `simple` braucht keine Kalibrierung: Seitenachsen = Tracker-x/y, Gierwinkel um Tracker-z, Nullpunkt beim START-Druck auf der Düsenleiste. Schließt `--page-calibration` aus. Siehe Abschnitt „Einfacher Modus" oben. |
+| `--page-frame calibrated\|simple` | Welchen 2D-Rahmen `--mode page` benutzt (Default `calibrated`). `simple` braucht keine Kalibrierung: Seitenachsen = Tracker-x/y, Nullpunkt beim START-Druck auf der Düsenleiste, Gierwinkel relativ zur beim START gehaltenen Pose. Schließt `--page-calibration` aus. Siehe Abschnitt „Einfacher Modus" oben. |
 | `--origin button\|startpoint` | Was den Nullpunkt setzt (START-Taster oder Startpoint-Charakteristik) |
 | `--smooth-ms MS` | Tiefpass-Zeitkonstante (ms) gegen das verrauschte Amfitrack-Signal; `0` = aus, größer = glatter aber mehr Nachlauf (Default 12). Reduziert unregelmäßige Linien/Lücken. |
 | `--min-move MM` | Deadband; darunter gilt der Kopf als stehend (Default 0.05) |

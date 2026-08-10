@@ -35,6 +35,16 @@ from printhead.tracking import PageMapper                    # noqa: E402
 IDENTITY_QUAT = (0.0, 0.0, 0.0, 1.0)
 
 
+def _quat_mul(a, b):
+    """Hamilton product in (qx, qy, qz, qw) order -- `a` applied after `b`."""
+    x1, y1, z1, w1 = a
+    x2, y2, z2, w2 = b
+    return np.array([w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                     w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                     w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+                     w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2])
+
+
 def _quat_about_z(deg: float):
     """Same helper as tests/test_rotation.py: a quaternion for a rotation of
     ``deg`` about +Z, which coincides with the page normal for the
@@ -603,12 +613,45 @@ def test_zero_at_nozzle_accounts_for_the_start_yaw():
 
 
 def test_zero_at_nozzle_does_not_disturb_yaw_readout():
-    # Zeroing touches the origin only; the identity boresight must still make
-    # yaw read as the raw tracker-z rotation afterwards.
+    # Zeroing touches the origin only; yaw must still read as the turn from
+    # the captured reference afterwards.
     mapper = PageMapper(PageCalibration.simple_frame())
+    mapper.capture_boresight(IDENTITY_QUAT)
     mapper.zero_at_nozzle(np.array([1.0, 2.0, 3.0]), IDENTITY_QUAT)
     mapper.project(np.array([1.0, 2.0, 3.0]), _quat_about_z(37.5))
     assert abs(math.degrees(mapper.last_yaw_rad) - 37.5) < 1e-9
+
+
+def test_simple_frame_without_a_captured_reference_applies_no_rotation():
+    # No orientation at START (tracker reported none): rather than reference
+    # a wrong pose, the frame must fall back to no rotation correction at all
+    # -- the same safe behaviour as a pre-boresight traced calibration.
+    mapper = PageMapper(PageCalibration.simple_frame())
+    mapper.capture_boresight(None)                  # explicit no-op
+    assert mapper.calibration.boresight_quat is None
+    mapper.project(np.array([1.0, 2.0, 3.0]), _quat_about_z(37.5))
+    assert mapper.last_yaw_rad == 0.0
+
+
+def test_captured_reference_makes_a_flat_turn_read_out_exactly():
+    # REGRESSION with the real rig's mounting pose (120 deg off the tracker
+    # axes, from the hardware boresight capture): after capturing the START
+    # pose, a flat turn about tracker z must report exactly that turn, with
+    # roll/pitch staying at zero. The earlier identity-boresight version
+    # reported a 90 deg turn as ~70 deg and swung roll/pitch by tens of
+    # degrees, which also misplaced ink via the offset rotation.
+    q_mount = np.array([0.479, 0.510, -0.511, 0.499])
+    q_mount = q_mount / np.linalg.norm(q_mount)
+    mapper = PageMapper(PageCalibration.simple_frame())
+    mapper.capture_boresight(q_mount)
+    pos = np.array([50.0, 20.0, 0.0])
+    mapper.zero_at_nozzle(pos, q_mount)
+
+    for deg in (0.0, 15.0, 45.0, 90.0, -30.0):
+        mapper.project(pos, _quat_mul(_quat_about_z(deg), q_mount))
+        assert abs(math.degrees(mapper.last_yaw_rad) - deg) < 1e-6, deg
+        assert abs(math.degrees(mapper.last_roll_rad)) < 1e-6, deg
+        assert abs(math.degrees(mapper.last_pitch_rad)) < 1e-6, deg
 
 
 def test_simple_frame_pos_stream_reports_page_uv_without_a_calibration():

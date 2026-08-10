@@ -233,13 +233,14 @@ def test_cli_page_frame_simple_conflicts_with_page_calibration():
 
 def test_cli_build_page_calibration_synthesises_the_simple_frame():
     # build_page_calibration must produce the frame itself for simple (no
-    # file is read), and the identity boresight has to survive -- without it
-    # PageMapper disables rotation correction entirely.
+    # file is read). boresight_quat stays None here on purpose -- the yaw
+    # reference is captured from the cart's actual pose at START, not baked
+    # in (see PageCalibration.simple_frame).
     args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
     cal = cli.build_page_calibration(args)
     assert cal is not None
     assert np.allclose(cal.e_col, [1, 0, 0]) and np.allclose(cal.e_row, [0, 1, 0])
-    assert cal.boresight_quat is not None
+    assert cal.boresight_quat is None
 
 
 def test_cli_page_frame_reaches_tracking_settings():

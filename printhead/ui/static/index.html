@@ -206,8 +206,9 @@
         </div>
         <div class="hint page-only calibrated-only" style="display:none">Build a page calibration on the <b>Calibration</b> tab first, or point this at a previously saved one.</div>
         <div class="hint page-only simple-only" style="display:none">No calibration needed: the page axes are the tracker's own <b>x</b> (columns) and <b>y</b> (rows),
-          cart yaw is measured about the tracker's <b>z</b> axis, and the page origin is zeroed wherever the cart sits when you press
-          <b>START</b>. Lay the sheet square with the tracker axes for this to line up.</div>
+          the page origin is zeroed wherever the cart sits when you press <b>START</b>, and cart yaw is measured
+          relative to the pose held at that moment (so hold the cart the way you want to count as 0&deg;). Lay the sheet square
+          with the tracker axes for this to line up.</div>
         <div class="row line-only">
           <div class="field"><label>Advance axis</label><select id="advance_axis"><option selected>x</option><option>y</option><option>z</option></select></div>
           <div class="field"><label>Axis sign</label><select id="axis_sign"><option value="1">+1</option><option value="-1">−1</option></select></div>
