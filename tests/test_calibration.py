@@ -261,6 +261,16 @@ def _quat_about(axis: str, deg: float) -> np.ndarray:
             "z": np.array([0.0, 0.0, s, c])}[axis]
 
 
+def _quat_mul(a, b):
+    """Hamilton product in (qx, qy, qz, qw) order -- `a` applied after `b`."""
+    x1, y1, z1, w1 = a
+    x2, y2, z2, w2 = b
+    return np.array([w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                     w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                     w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+                     w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2])
+
+
 def test_simple_frame_projects_tracker_axes_unchanged():
     # The whole promise of --page-frame simple: u is the tracker's x, v its
     # y, z its z -- no rotation, no scaling, no traced calibration.
@@ -272,24 +282,46 @@ def test_simple_frame_projects_tracker_axes_unchanged():
         assert np.allclose(cal.project(pos), pos), pos
 
 
-def test_simple_frame_yaw_is_rotation_about_tracker_z():
-    # simple_frame's identity boresight is what makes yaw_about_normal read
-    # out the raw tracker-z rotation; assert that equivalence directly,
-    # since it is the reason the identity quaternion is used rather than None.
+def test_simple_frame_starts_without_a_boresight():
+    # Must be None, NOT identity. Identity means "the reference pose is the
+    # world frame", but the sensor is mounted rotated on the cart (measured:
+    # 120 deg), so identity leaves that whole mounting rotation inside every
+    # reported angle. The reference is captured at START instead --
+    # PageMapper.capture_boresight.
     cal = PageCalibration.simple_frame()
-    for deg in (-90.0, -30.0, 0.0, 15.0, 45.0, 90.0, 120.0):
-        yaw = yaw_about_normal(_quat_about("z", deg), cal.boresight_quat,
-                               cal.e_col, cal.e_row)
-        assert abs(math.degrees(yaw) - deg) < 1e-9, (deg, math.degrees(yaw))
+    assert cal.boresight_quat is None
 
 
-def test_simple_frame_boresight_is_identity_not_none():
-    # None would disable rotation correction entirely (see PageMapper's
-    # docstring: no boresight => yaw stays 0.0 forever), which would silently
-    # turn the simple frame into an uncorrected print. Pin the distinction.
+def test_simple_frame_yaw_is_the_turn_from_the_captured_reference():
+    # REGRESSION (real-rig numbers): with the measured 120 deg mounting pose
+    # as the reference, turning the cart FLAT about tracker z must report
+    # exactly that turn. The earlier identity-boresight version reported a
+    # 90 deg turn as ~70 deg of yaw change, non-linearly -- and since yaw
+    # also drives the sensor->nozzle offset rotation, it misplaced ink too.
+    q_mount = np.array([0.479, 0.510, -0.511, 0.499])
+    q_mount = q_mount / np.linalg.norm(q_mount)
     cal = PageCalibration.simple_frame()
-    assert cal.boresight_quat is not None
-    assert np.allclose(cal.boresight_quat, [0.0, 0.0, 0.0, 1.0])
+    for deg in (-30.0, 0.0, 15.0, 45.0, 90.0):
+        q_now = _quat_mul(_quat_about("z", deg), q_mount)   # flat turn
+        yaw = yaw_about_normal(q_now, q_mount, cal.e_col, cal.e_row)
+        assert abs(math.degrees(yaw) - deg) < 1e-6, (deg, math.degrees(yaw))
+
+
+def test_simple_frame_identity_boresight_would_be_wrong():
+    # Pins WHY the identity shortcut was abandoned, so it cannot quietly come
+    # back: against the real mounting pose it gets a flat 90 deg turn wrong
+    # by tens of degrees.
+    q_mount = np.array([0.479, 0.510, -0.511, 0.499])
+    q_mount = q_mount / np.linalg.norm(q_mount)
+    cal = PageCalibration.simple_frame()
+    identity = np.array([0.0, 0.0, 0.0, 1.0])
+    at_0 = yaw_about_normal(q_mount, identity, cal.e_col, cal.e_row)
+    at_90 = yaw_about_normal(_quat_mul(_quat_about("z", 90.0), q_mount),
+                             identity, cal.e_col, cal.e_row)
+    reported_turn = abs(math.degrees(at_90 - at_0))
+    assert abs(reported_turn - 90.0) > 15.0, (
+        f"identity boresight unexpectedly accurate ({reported_turn:.1f} deg "
+        f"for a 90 deg turn) -- if this now holds, revisit the design note")
 
 
 def test_simple_frame_is_independent_between_calls():

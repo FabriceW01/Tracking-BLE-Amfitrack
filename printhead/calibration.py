@@ -117,13 +117,31 @@ class PageCalibration:
 
         ``e_col``/``e_row`` are the raw Amfitrack **x** and **y** axes, so
         ``project()`` degenerates to "u = x, v = y, z = z" (minus the origin,
-        which ``tracking.PageMapper.set_origin`` zeroes at pass start -- see
-        there). ``boresight_quat`` is the IDENTITY quaternion, which makes
-        ``rotation.yaw_about_normal`` return exactly the cart's rotation
-        about the tracker's **z** axis: with ``R(identity) == I`` the
-        relative rotation ``R_rel`` reduces to ``R(quat)`` itself, and the
-        page normal ``e_col x e_row`` is exactly ``z``. Verified bit-exact
-        against pure z-rotations in ``tests/test_calibration.py``.
+        which ``tracking.PageMapper.zero_at_nozzle`` zeroes at pass start --
+        see there).
+
+        ``boresight_quat`` starts as **None** and is captured at pass start
+        from the cart's actual pose (``PageMapper.capture_boresight``). It is
+        deliberately NOT the identity quaternion, which was the first
+        (wrong) attempt: identity means "the reference pose is the world
+        frame itself", but the sensor is mounted rotated on the cart, so the
+        whole mounting rotation stays inside every reported angle. Measured
+        on the real rig (mounting pose 120.1 deg about [0.553, 0.589,
+        -0.590], i.e. body x -> world -z, body y -> world +x, body z ->
+        world -y), rotating the cart FLAT through 0..90 deg then reported:
+
+            flat turn   identity boresight        captured at START
+                        roll   pitch    yaw       roll  pitch   yaw
+              0 deg    66.41   70.71  -70.85      0.00   0.00    0.00
+             15 deg    55.12   76.69  -59.60      0.00   0.00   15.00
+             90 deg    -2.78   88.78   -1.08      0.00   0.00   90.00
+
+        -- i.e. with identity a 90 deg turn read as ~70 deg of yaw change,
+        non-linearly, with roll/pitch swinging tens of degrees; with a
+        captured reference it is exact and roll/pitch stay at zero. Since
+        that yaw also drives the sensor->nozzle offset rotation, the
+        identity version placed ink wrongly, not just displayed a wrong
+        number. Pinned by ``tests/test_calibration.py``.
 
         The trade-off versus a traced calibration is explicit: this assumes
         the sheet is laid out square with the tracker's x/y axes, and that
@@ -137,7 +155,7 @@ class PageCalibration:
             origin=np.zeros(3, dtype=float),
             e_col=np.array([1.0, 0.0, 0.0]),
             e_row=np.array([0.0, 1.0, 0.0]),
-            boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]),
+            boresight_quat=None,
         )
 
     def project(self, pos) -> "tuple[float, float, float]":

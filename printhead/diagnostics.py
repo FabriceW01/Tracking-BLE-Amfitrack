@@ -132,6 +132,16 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                 # page_mapper.last_yaw_rad as a side effect (read below) --
                 # see controller._print_freehand_pass for the identical
                 # "compute once, reuse" pattern.
+                # Simple frame: adopt the first orientation sample as the yaw
+                # reference, mirroring what a real pass captures at START --
+                # so yaw_deg reads 0 for the pose the cart is in now and then
+                # shows the turn from it, which is the whole point of watching
+                # it live. Without a reference the reported angle would carry
+                # the sensor's (large, ~120 deg) mounting rotation instead.
+                if (page_mapper is not None and quat is not None
+                        and tracking.page_frame == "simple"
+                        and page_mapper.calibration.boresight_quat is None):
+                    page_mapper.capture_boresight(quat)
                 page_uvz = page_mapper.project(pos, quat) if page_mapper is not None else None
                 yaw_deg = (math.degrees(page_mapper.last_yaw_rad)
                           if page_mapper is not None else None)

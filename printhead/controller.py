@@ -440,6 +440,25 @@ class PrintController:
             else:
                 print("Finished pass; sent blank frame.")
 
+    async def _wait_for_pose(self, tracker, loop, timeout=5.0):
+        """Block until the tracker yields a first position, returning
+        ``(pos, quat)`` from that same read.
+
+        The simple page frame needs both from the SAME sample: the position
+        anchors the origin and the orientation becomes the yaw reference, and
+        pairing a position with a quaternion read at some other instant would
+        mis-reference the yaw. ``quat`` may still be ``None`` -- not every
+        tracker/packet carries orientation -- which callers must handle
+        rather than assume."""
+        t0 = loop.time()
+        while True:
+            pos, quat = tracker.read_pose()
+            if pos is not None:
+                return pos, quat
+            if loop.time() - t0 > timeout:
+                raise RuntimeError("No position from tracker (is it in range?).")
+            await asyncio.sleep(0.005)
+
     async def _wait_for_position(self, tracker, loop, timeout=5.0):
         """Block until the tracker yields a first position sample."""
         t0 = loop.time()
@@ -567,9 +586,13 @@ class PrintController:
         # page corner meant to outlive a single pass (see PageMapper.
         # set_origin).
         if t.page_frame == "simple":
-            _sp, start_quat = tracker.read_pose()
-            start_pos = pos_filter.update(
-                await self._wait_for_position(tracker, loop), loop.time())
+            raw_pos, start_quat = await self._wait_for_pose(tracker, loop)
+            start_pos = pos_filter.update(raw_pos, loop.time())
+            # Reference pose FIRST: yaw is measured against the pose held at
+            # START, so a flat turn of the cart reads out as exactly that
+            # turn. Skipping this (assuming the sensor is mounted square with
+            # the tracker) corrupts yaw badly -- see capture_boresight.
+            mapper.capture_boresight(start_quat)
             # zero_at_nozzle, not set_origin: the origin has to land under the
             # NOZZLE BAR, not the sensor ~62mm away, or every sample reads
             # out of bounds and nothing prints -- see zero_at_nozzle.
@@ -578,7 +601,15 @@ class PrintController:
                 print(f"[simple] page origin zeroed at the nozzle bar's current "
                       f"position (sensor at {start_pos[0]:.1f}, "
                       f"{start_pos[1]:.1f}, {start_pos[2]:.1f} mm); page axes "
-                      f"= tracker x/y, yaw about tracker z")
+                      f"= tracker x/y")
+                if start_quat is None:
+                    print("[warn] no orientation from the tracker at START: "
+                          "yaw reference not captured, printing with NO "
+                          "rotation correction (cart must stay at the START "
+                          "angle for the whole pass).")
+                else:
+                    print("[simple] yaw reference captured; the pose held now "
+                          "counts as 0 deg.")
 
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None
