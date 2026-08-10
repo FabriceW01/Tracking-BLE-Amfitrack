@@ -107,13 +107,20 @@ class SendRecorder:
 
 _SENSOR_PATH_RGB = (30, 100, 220)     # blue: raw sensor centre
 _NOZZLE_PATH_RGB = (230, 90, 20)      # orange: nozzle-bar centre
-_PATH_START_RGB = (30, 160, 60)       # green dot: pass start
+_PATH_START_RGB = (30, 160, 60)       # green dot: pass start (no sample_times)
 _PATH_END_RGB = (40, 40, 40)          # dark dot: pass end
+_MARKER_TEXT_RGB = (20, 20, 20)
+
+DEFAULT_RECORD_SCALE = 3              # upscale factor for the whole PNG
+DEFAULT_MARKER_INTERVAL_S = 2.0       # seconds between numbered path markers
 
 
 def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
                     sensor_path: Optional[List[Tuple[int, int]]] = None,
-                    nozzle_path: Optional[List[Tuple[int, int]]] = None) -> bool:
+                    nozzle_path: Optional[List[Tuple[int, int]]] = None,
+                    sample_times: Optional[List[float]] = None,
+                    scale: int = DEFAULT_RECORD_SCALE,
+                    marker_interval_s: float = DEFAULT_MARKER_INTERVAL_S) -> bool:
     """
     Write a PNG comparing the intended page-mode image to what
     ``CoverageEngine`` actually covered. Returns False if nothing was
@@ -140,9 +147,25 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
     ``--dose-hold-s`` to complete. Points outside the page are drawn
     anyway (PIL clips automatically) rather than dropped, since a path
     leaving/re-entering the page is itself useful information. Omitting
-    both keeps this call byte-for-byte identical to the pre-path-tracking
-    behaviour (3 grayscale panels, unchanged), for any caller that doesn't
+    both keeps this call's PATH panel omitted, for any caller that doesn't
     have the trajectory available.
+
+    ``sample_times``, if given, is the elapsed pass time (seconds) at each
+    of those same points -- same index/length as both path lists. Every
+    ``marker_interval_s`` seconds (default 2.0), a bigger, numbered marker
+    (1, 2, 3, ... starting at the very first point) is drawn at the nearest
+    actual sample on BOTH paths at once, so a MISSED patch or an unexpected
+    detour can be pinned to roughly when it happened, not just where.
+    Without ``sample_times`` the path still draws, just with a plain
+    (unlabelled) start/end dot instead, same as before markers existed.
+
+    ``scale`` upscales the whole PNG (all four panels, nearest-neighbour for
+    the boolean mask panels so each block still represents exactly one
+    real nozzle-row/column cell, native drawing resolution for the PATH
+    panel so its lines/dots/text stay crisp rather than blocky) -- makes the
+    path easier to follow on a print job whose native column/row resolution
+    would otherwise render it tiny. ``scale=1`` reproduces the pre-scaling
+    pixel dimensions exactly.
     """
     printed = np.asarray(printed, dtype=bool)
     ink = np.asarray(ink, dtype=bool)
@@ -161,33 +184,77 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
         # the printed pattern itself (see test_render_coverage_path_panel_
         # label_still_fits_a_narrow_image), unlike a fixed-width UI label.
         label = f"PATH ({n_pts} pts) blue=sensor orange=nozzles"
+        if sample_times:
+            label += f", numbered every {marker_interval_s:g}s"
         extra_rgb_panels.append(
-            (label, _render_path_panel(ink.shape, sensor_path, nozzle_path)))
-    _save_panels(panels, path, ink.shape[1], extra_rgb_panels=extra_rgb_panels)
+            (label, _render_path_panel(ink.shape, sensor_path, nozzle_path,
+                                       sample_times, scale, marker_interval_s)))
+    _save_panels(panels, path, ink.shape[1], extra_rgb_panels=extra_rgb_panels,
+                scale=scale)
     return True
+
+
+def _marker_indices(sample_times: List[float],
+                    interval_s: float) -> List[Tuple[int, int]]:
+    """``(index, marker_number)`` pairs: marker 1 at index 0 (t=0), then one
+    every ``interval_s`` seconds of elapsed pass time, each placed at
+    whichever recorded sample is closest to that target time (poll samples
+    essentially never land on an exact 2.000s boundary). ``sample_times``
+    must be non-decreasing (true of elapsed wall-clock time from a single
+    pass). Never returns two markers on the same index -- a pass shorter
+    than ``interval_s`` gets only marker 1."""
+    if not sample_times:
+        return []
+    times = np.asarray(sample_times, dtype=float)
+    n_markers = int(times[-1] // interval_s) + 1
+    out = []
+    last_idx = -1
+    for k in range(n_markers):
+        target = k * interval_s
+        idx = int(np.searchsorted(times, target))
+        if idx > 0 and (idx >= len(times)
+                        or (target - times[idx - 1]) <= (times[idx] - target)):
+            idx -= 1
+        idx = min(idx, len(times) - 1)
+        if idx != last_idx:
+            out.append((idx, k + 1))
+            last_idx = idx
+    return out
 
 
 def _render_path_panel(shape: Tuple[int, int],
                        sensor_path: Optional[List[Tuple[int, int]]],
-                       nozzle_path: Optional[List[Tuple[int, int]]]) -> Image.Image:
-    """A white RGB panel of ``shape`` (height, width) with each given path
-    drawn as a thin polyline plus a start/end marker dot, so direction of
-    travel is visible (a plain line alone doesn't show which end is which).
+                       nozzle_path: Optional[List[Tuple[int, int]]],
+                       sample_times: Optional[List[float]],
+                       scale: int, marker_interval_s: float) -> Image.Image:
+    """An RGB panel, ``scale`` times the size of ``shape`` (height, width),
+    with each given path drawn as a polyline. With ``sample_times``, bigger
+    numbered markers replace the plain start/end dots (see
+    ``render_coverage``'s docstring); without, a plain start (green) / end
+    (dark) dot marks direction of travel, same as before markers existed.
     """
     height, width = shape
-    arr = np.full((height, width, 3), 255, dtype=np.uint8)
+    arr = np.full((height * scale, width * scale, 3), 255, dtype=np.uint8)
     img = Image.fromarray(arr, mode="RGB")
     draw = ImageDraw.Draw(img)
+    font = load_font(None, 13)
+    markers = _marker_indices(sample_times, marker_interval_s) if sample_times else []
 
     def _draw(pts: Optional[List[Tuple[int, int]]], colour) -> None:
         if not pts:
             return
-        # (row, col) -> PIL's (x, y) = (col, row).
-        xy = [(c, r) for r, c in pts]
+        # (row, col) -> PIL's (x, y) = (col, row), scaled up to match the
+        # mask panels' own nearest-neighbour upscale.
+        xy = [(c * scale, r * scale) for r, c in pts]
         if len(xy) >= 2:
-            draw.line(xy, fill=colour, width=1)
-        _dot(draw, xy[0], _PATH_START_RGB)
-        _dot(draw, xy[-1], _PATH_END_RGB)
+            draw.line(xy, fill=colour, width=max(1, scale // 2))
+        if markers:
+            for idx, number in markers:
+                if idx < len(xy):
+                    _marker(draw, xy[idx], colour, str(number), font)
+        else:
+            _dot(draw, xy[0], _PATH_START_RGB, r=3 * scale)
+            _dot(draw, xy[-1], _PATH_END_RGB, r=3 * scale)
 
     _draw(sensor_path, _SENSOR_PATH_RGB)
     _draw(nozzle_path, _NOZZLE_PATH_RGB)
@@ -199,18 +266,36 @@ def _dot(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], colour, r: int = 3) -> 
     draw.ellipse([x - r, y - r, x + r, y + r], fill=colour)
 
 
-def _save_panels(panels, path: str, width: int, extra_rgb_panels=None) -> None:
+def _marker(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], colour,
+           text: str, font, r: int = 7) -> None:
+    """A bigger filled dot in the path's own colour (so it's obvious which
+    path a marker belongs to where paths cross) with its number just above
+    and to the right, in a neutral dark colour for legibility against
+    either path's colour."""
+    x, y = xy
+    draw.ellipse([x - r, y - r, x + r, y + r], fill=colour, outline=(255, 255, 255))
+    draw.text((x + r + 2, y - r - 2), text, font=font, fill=_MARKER_TEXT_RGB)
+
+
+def _save_panels(panels, path: str, width: int, extra_rgb_panels=None,
+                 scale: int = 1) -> None:
     """``panels`` are ``(label, boolean_mask)`` pairs rendered in grayscale
-    (black-on-white), same as before path overlays existed. ``extra_rgb_panels``
+    (black-on-white), upscaled ``scale``x with nearest-neighbour (so each
+    block still represents exactly one real nozzle-row/column cell -- no
+    blur/anti-aliasing implying false sub-cell precision). ``extra_rgb_panels``
     are ``(label, PIL.Image in RGB mode)`` pairs appended below them, for
-    panels (like the path overlay) that need colour -- the whole canvas is
-    built as RGB either way so a grayscale panel (via .convert) and a colour
-    one can share one image; a pure grayscale panel still LOOKS identical to
-    the pre-colour version, R==G==B."""
+    panels (like the path overlay) that need colour and are already built at
+    the target (scaled) resolution by the caller -- the whole canvas is RGB
+    either way so a grayscale panel (via .convert) and a colour one can
+    share one image; a pure grayscale panel still LOOKS identical to the
+    pre-colour version, R==G==B. ``scale=1`` (the default, used by
+    SendRecorder.render's line-mode call) reproduces the pre-scaling pixel
+    dimensions exactly."""
     label_h = 18
     gap = 12
+    width *= scale
     extra_rgb_panels = extra_rgb_panels or []
-    total_h = (sum(label_h + p.shape[0] + gap for _, p in panels)
+    total_h = (sum(label_h + p.shape[0] * scale + gap for _, p in panels)
               + sum(label_h + img.height + gap for _, img in extra_rgb_panels))
     canvas = Image.new("RGB", (width, total_h), (255, 255, 255))
     draw = ImageDraw.Draw(canvas)
@@ -221,8 +306,11 @@ def _save_panels(panels, path: str, width: int, extra_rgb_panels=None) -> None:
         draw.text((3, y + 2), label, font=font, fill=(0, 0, 0))
         y += label_h
         img = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8), mode="L")
+        if scale != 1:
+            img = img.resize((mask.shape[1] * scale, mask.shape[0] * scale),
+                             Image.NEAREST)
         canvas.paste(img.convert("RGB"), (0, y))
-        y += mask.shape[0] + gap
+        y += mask.shape[0] * scale + gap
     for label, img in extra_rgb_panels:
         draw.text((3, y + 2), label, font=font, fill=(0, 0, 0))
         y += label_h

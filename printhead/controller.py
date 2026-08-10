@@ -665,8 +665,14 @@ class PrintController:
         # physically went, not just what got covered. Only collected when
         # actually recording -- a multi-minute pass at up to --poll-hz
         # samples/s has no reason to grow these lists otherwise.
+        # sample_times is the elapsed pass time (seconds since t_start) at
+        # each of those same points -- same index space as both path lists,
+        # since all three are appended together once per sample below -- so
+        # render_coverage can place a timestamped marker at, say, the sample
+        # nearest 2.0s/4.0s/6.0s... on both paths at once.
         sensor_path: Optional[List[Tuple[int, int]]] = [] if self.record else None
         nozzle_path: Optional[List[Tuple[int, int]]] = [] if self.record else None
+        sample_times: Optional[List[float]] = [] if self.record else None
 
         try:
             while True:
@@ -705,6 +711,7 @@ class PrintController:
                         nozzle_path.append(
                             (int(round((v_mm + ndv) / NOZZLE_PITCH_MM)),
                              int(round((u_mm + ndu) / t.mm_per_column))))
+                        sample_times.append(now - t_start)
 
                     samples += 1
                     u_min = u_mm if u_min is None else min(u_min, u_mm)
@@ -817,7 +824,8 @@ class PrintController:
             if self.record:
                 from .recording import render_coverage
                 if render_coverage(coverage.printed, coverage.ink, self.record,
-                                   sensor_path=sensor_path, nozzle_path=nozzle_path):
+                                   sensor_path=sensor_path, nozzle_path=nozzle_path,
+                                   sample_times=sample_times):
                     if not pj:
                         print(f"Coverage reconstruction -> {self.record}")
                 elif not pj:

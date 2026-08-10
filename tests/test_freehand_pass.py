@@ -265,11 +265,14 @@ def test_simple_frame_pass_records_sensor_and_nozzle_paths_for_record():
     captured = {}
     real_render_coverage = recording_module.render_coverage
 
-    def fake_render_coverage(printed, ink, path, sensor_path=None, nozzle_path=None):
+    def fake_render_coverage(printed, ink, path, sensor_path=None, nozzle_path=None,
+                             sample_times=None, **kwargs):
         captured["sensor_path"] = sensor_path
         captured["nozzle_path"] = nozzle_path
-        return real_render_coverage(printed, ink, path,
-                                    sensor_path=sensor_path, nozzle_path=nozzle_path)
+        captured["sample_times"] = sample_times
+        return real_render_coverage(printed, ink, path, sensor_path=sensor_path,
+                                    nozzle_path=nozzle_path, sample_times=sample_times,
+                                    **kwargs)
 
     recording_module.render_coverage = fake_render_coverage
     try:
@@ -300,6 +303,17 @@ def test_simple_frame_pass_records_sensor_and_nozzle_paths_for_record():
     sensor_path, nozzle_path = captured["sensor_path"], captured["nozzle_path"]
     assert sensor_path and nozzle_path
     assert len(sensor_path) == len(nozzle_path) > 0
+
+    sample_times = captured["sample_times"]
+    assert len(sample_times) == len(sensor_path), (
+        "sample_times must be recorded at the same index as both paths")
+    # Not exactly 0.0: t_start is set, then read_pose()/pos_filter.update()
+    # etc. run before the first sample_times.append() below, so a little
+    # real wall-clock time has already elapsed by the first sample -- assert
+    # "small and non-negative", not bit-exact zero.
+    assert 0.0 <= sample_times[0] < 1.0, sample_times[0]
+    assert all(b >= a for a, b in zip(sample_times, sample_times[1:])), (
+        "elapsed time must be non-decreasing")
 
     # ScriptedTracker never fakes orientation (quat always None -- same
     # contract as SimulatedTracker), so yaw stays 0 for the whole pass and

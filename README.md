@@ -687,9 +687,24 @@ Drucks live Buch, welches Pixel getroffen wurde. Das PNG zeigt drei übereinande
 gestapelte Panels — INTENDED (Zielbild), COVERED (tatsächlich getroffen) und MISSED
 (gewollt, aber nie getroffen) — plus ein viertes, farbiges **PATH**-Panel: die blau
 gezeichnete Spur ist der **Sensor-Mittelpunkt**, orange die **Düsenleisten-Mitte**
-(nicht Düse 0), je mit grünem Start- und dunklem Endpunkt. Damit lässt sich eine
-MISSED-Stelle direkt gegen die Fahrspur prüfen — ist der Wagen dort nie
-vorbeigekommen, oder war er zu schnell für `--dose-hold-s`?
+(nicht Düse 0). Damit lässt sich eine MISSED-Stelle direkt gegen die Fahrspur
+prüfen — ist der Wagen dort nie vorbeigekommen, oder war er zu schnell für
+`--dose-hold-s`?
+
+Das ganze PNG wird dabei standardmäßig **3-fach vergrößert** (`recording.
+DEFAULT_RECORD_SCALE`) — INTENDED/COVERED/MISSED blockig (jeder Block bleibt exakt
+eine reale Düsenzeile/-spalte, kein Weichzeichnen, das eine falsche
+Sub-Pixel-Genauigkeit vortäuschen würde), das PATH-Panel direkt in voller
+Zielauflösung gezeichnet (keine verpixelten Linien/Zahlen).
+
+Auf beiden Spuren wird zusätzlich alle **2 Sekunden** (`recording.
+DEFAULT_MARKER_INTERVAL_S`) ein größerer, durchnummerierter Punkt gesetzt — 1 beim
+allerersten Sample, dann 2, 3, 4 … im 2-Sekunden-Takt, auf Sensor- und
+Düsenleisten-Spur jeweils zur **exakt gleichen** Pass-Zeit. Damit lässt sich direkt
+ablesen, wo Sensor und Düsenleiste zu welchem Zeitpunkt standen — z. B. um eine
+MISSED-Stelle einem bestimmten Moment im Pass zuzuordnen. Ohne Zeitstempel (Aufrufer
+ohne `sample_times`) bleibt es beim einfachen grünen Start-/dunklen End-Punkt wie
+zuvor.
 
 ```bash
 python main.py --pattern checkerboard --mode page --page-frame simple \
