@@ -106,7 +106,7 @@ kalibrierten Rahmen selbst — genau den umgeht dieser Modus.
 liegen soll, dann START drücken. Der Nullpunkt wird auf die **Düsenleiste**
 gelegt, nicht auf den Sensor — die beiden liegen
 `SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM` ≈ 62 mm auseinander, und ohne diese
-Korrektur läge die Leiste rund 54,9 mm neben der Seite, sodass gar nichts
+Korrektur läge die Leiste rund 70 mm neben der Seite, sodass gar nichts
 gedruckt würde (siehe `PageMapper.zero_at_nozzle`).
 
 In der Web-UI steht dafür im **Tracking & scale**-Tab das Feld **Page frame**
@@ -207,7 +207,7 @@ Die Default-Werte sind eine echte Messung, kein Schätzwert:
 
 | Option | Bedeutung | Default |
 |---|---|---|
-| `--sensor-offset-row-mm MM` | Abstand Sensor → **Mitte** der Düsenleiste entlang der Zeilenachse (entlang der Düsenreihe, senkrecht zur Fahrtrichtung) | `62.36` mm (gemessen: "Die Mitte der Nozzle-Reihe ist 62,36 mm verschoben von der Y-Koordinate des Amfitrack") |
+| `--sensor-offset-row-mm MM` | Abstand Sensor → **Mitte** der Düsenleiste entlang der Zeilenachse (entlang der Düsenreihe, senkrecht zur Fahrtrichtung) | `-62.36` mm (Betrag gemessen: "Die Mitte der Nozzle-Reihe ist 62,36 mm verschoben von der Y-Koordinate des Amfitrack"; Vorzeichen an echtem Testdruck auf dieser Anlage bestätigt — siehe Warnhinweis direkt darunter) |
 | `--sensor-offset-col-mm MM` | Dasselbe entlang der Spaltenachse (Fahrtrichtung) | `0.0` mm (bisher keine gegenteilige Messung; explizit als eigener, überschreibbarer Wert geführt, falls sich das noch ändert) |
 
 Beide Defaults stecken als `SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM` /
@@ -215,15 +215,18 @@ Beide Defaults stecken als `SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM` /
 Eigenschaft des Wagens, unabhängig von jeder einzelnen `PageCalibration`
 (eine neue Seite kalibrieren erfordert diesen Wert also nie erneut).
 
-⚠️ **Falsche Richtung nach dem Testdruck?** Einfach den Flag-Wert **negieren**
-(z. B. `--sensor-offset-row-mm -62.36`), sonst muss nichts geändert werden.
+⚠️ **Falsche Richtung nach dem Testdruck?** Einfach den aktuellen Default-Wert
+**negieren** (z. B. `--sensor-offset-row-mm 62.36`, um testweise zum
+ursprünglich gemessenen Vorzeichen zurückzukehren), sonst muss nichts
+geändert werden — siehe der Kommentar direkt über der Konstante in
+`geometry.py`.
 
 **Verifikation:** Nach dieser Änderung `--pos --page-calibration PATH`
 starten und den Wagen so halten, dass **die Düsenleiste** (nicht der Sensor!)
 exakt auf der zuvor abgefahrenen Seitenecke steht. Das live angezeigte `v`
-sollte jetzt nahe **0** liegen — vor diesem Fix hätte es (je nach
-Zentrum-vs.-Düse-0-Bezug) eher um **-62.36 mm** oder einen ähnlich
-verschobenen Wert gelegen.
+sollte jetzt nahe **0** liegen — bei falschem Vorzeichen liegt es (je nach
+Zentrum-vs.-Düse-0-Bezug) stattdessen um **±62.36 mm** oder einen ähnlich
+verschobenen Wert daneben.
 
 **Wagen-Rotation / Boresight (`--boresight-deg`):** Der Wagen wird beim
 freihändigen Drucken nicht nur verschoben, sondern auch gedreht. An einem
