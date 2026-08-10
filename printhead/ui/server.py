@@ -10,6 +10,7 @@ FastAPI app that serves the single-page UI and exposes:
   * ``POST /api/sensor/start`` -> start the continuous position stream
   * ``POST /api/sensor/stop``  -> stop the position stream
   * ``GET  /api/state``        -> current running state
+  * ``POST /api/shutdown``     -> stop everything and terminate this server process
 
 Actions and the position stream are ``main.py`` subprocesses (see runner.py);
 their stdout is broadcast to every connected browser over the WebSocket.
@@ -19,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import tempfile
 import warnings
 from pathlib import Path
@@ -321,6 +324,27 @@ async def run(req: RunRequest) -> dict:
 @app.post("/api/stop")
 async def stop() -> dict:
     return await hub.stop_action()
+
+
+@app.post("/api/shutdown")
+async def shutdown() -> dict:
+    """Stop the running action + sensor stream (clean SIGINT so subprocesses
+    blank the printhead / close the tracker), then terminate this server
+    process itself -- unlike /api/stop, which only cancels the current action.
+
+    The actual termination is deferred to just after this coroutine returns,
+    so the HTTP response reaches the browser before the process (and its
+    connections) go away. uvicorn installs its own SIGTERM handler and shuts
+    down gracefully, so we signal rather than os._exit."""
+    await hub.stop_action()
+    await hub.stop_sensor()
+
+    async def _terminate() -> None:
+        await asyncio.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_terminate())
+    return {"ok": True}
 
 
 @app.post("/api/preview")

@@ -39,11 +39,12 @@
   .hero-head h2{margin:0}
   .live-badge{font-size:11px;color:var(--muted)}
   .live-badge b{color:var(--good)}
-  .readout{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+  .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px}
   @media(max-width:760px){.readout{grid-template-columns:repeat(2,1fr)}}
   .metric{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
   .metric .k{font-size:11px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
   .metric .v{font-family:var(--mono);font-size:26px;font-weight:600;margin-top:4px}
+  .metric .v.small{font-size:16px}
   .metric .u{font-size:12px;color:var(--muted);margin-left:4px}
   .metric.accent .v{color:var(--accent)}
   .spark{margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
@@ -110,8 +111,7 @@
     <div class="brand"><span class="dot"></span> Printhead Control</div>
     <div class="spacer"></div>
     <div id="sensorPill" class="pill"><span class="status-dot"></span><span id="sensorPillText">sensor offline</span></div>
-    <label class="toggle"><input type="checkbox" id="gSimulate"> Simulate (no hardware)</label>
-    <label class="toggle"><input type="checkbox" id="gDryRun"> Dry-run</label>
+    <button class="btn danger" id="btnShutdown" title="Stop the running action/sensor and terminate the whole printhead.ui server process">⏻ Shutdown server</button>
   </header>
 
   <!-- LIVE POSITION -->
@@ -131,6 +131,11 @@
       <div class="metric"><div class="k">Z</div><div class="v"><span id="posZ">–</span><span class="u">mm</span></div></div>
       <div class="metric accent"><div class="k">Advance</div><div class="v"><span id="posAdv">–</span><span class="u">mm</span></div></div>
       <div class="metric accent"><div class="k">Column · speed</div><div class="v"><span id="posCol">–</span><span class="u" id="posVel"></span></div></div>
+      <div class="metric"><div class="k">Quat [x y z w]</div><div class="v small"><span id="posQuat">–</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Page U</div><div class="v"><span id="posPageU">–</span><span class="u">mm</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Page V</div><div class="v"><span id="posPageV">–</span><span class="u">mm</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Page Z</div><div class="v"><span id="posPageZ">–</span><span class="u">mm</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Yaw</div><div class="v"><span id="posYaw">–</span><span class="u">deg</span></div></div>
     </div>
     <div class="spark" id="sparkWrap"><canvas id="spark" width="1100" height="90"></canvas></div>
     <div class="spark" id="coverageWrap" style="display:none">
@@ -166,9 +171,7 @@
           <select id="pattern"><option>checkerboard</option><option>h-stripes</option><option>v-stripes</option><option selected>diagonal</option><option>solid</option></select></div>
         <div class="row">
           <div class="field"><label>Render size (px)</label><input id="render_size" type="number" value="220"></div>
-          <div class="field"><label>Threshold 0–255</label><input id="threshold" type="number" value="128"></div>
         </div>
-        <div class="field"><label>Font path (.ttf, optional)</label><input id="font" placeholder="default"></div>
         <div class="row">
           <label class="check"><input type="checkbox" id="invert"> Invert</label>
           <label class="check"><input type="checkbox" id="flip_y"> Flip Y</label>
@@ -204,10 +207,6 @@
         <div class="row">
           <div class="field"><label>mm per column</label><input id="mm_per_column" type="number" step="0.01" value="0.2"></div>
           <div class="field"><label>DPI (overrides mm/col)</label><input id="dpi" type="number" placeholder="–"></div>
-        </div>
-        <div class="row line-only">
-          <label class="check"><input type="checkbox" id="auto_calibrate"> Auto-calibrate direction</label>
-          <div class="field"><label>Calib distance (mm)</label><input id="calib_distance" type="number" value="5"></div>
         </div>
         <div class="row">
           <div class="field"><label>Origin</label><select id="origin"><option>button</option><option>startpoint</option></select></div>
@@ -316,7 +315,7 @@
 
       <!-- DIAGNOSTICS -->
       <div class="panel" data-p="diag">
-        <div class="hint">Each runs a standalone check and exits. Output appears in the console. Toggle <b>Simulate</b> up top to test without hardware.</div>
+        <div class="hint">Each runs a standalone check and exits. Output appears in the console.</div>
         <div class="diag">
           <button class="btn" onclick="runDiag('--list-nodes')">List Amfitrack nodes</button>
           <button class="btn" onclick="runDiag('--scan-ble')">Scan BLE devices</button>
@@ -337,6 +336,13 @@
         <button class="btn danger" id="btnStop" disabled>■ Stop</button>
         <span class="spacer"></span>
         <span class="pill" id="runPill"><span class="status-dot"></span><span id="runPillText">idle</span></span>
+      </div>
+      <div class="field" style="margin-bottom:16px">
+        <label>Custom command (raw CLI args, as on the command line)</label>
+        <div class="btnrow">
+          <input id="customCmd" placeholder="--pattern checkerboard --mode page --page-calibration page_calibration.json --record coverage.png" style="flex:1;min-width:220px">
+          <button class="btn" id="btnCustomRun">▶ Run custom</button>
+        </div>
       </div>
       <div id="previewWrap" style="display:none;margin-bottom:16px">
         <div class="conhead"><h2 style="margin:0">Preview <span id="previewDim" class="live-badge"></span></h2>
@@ -399,8 +405,6 @@ function trackingArgs(a){
   } else {
     pushIf(a, val('advance_axis')!=='x', '--advance-axis', val('advance_axis'));
     pushIf(a, val('axis_sign')!=='1', '--axis-sign', val('axis_sign'));
-    pushIf(a, chk('auto_calibrate'), '--auto-calibrate');
-    pushIf(a, chk('auto_calibrate') && val('calib_distance')!=='5', '--calib-distance', val('calib_distance'));
   }
   if(val('dpi')) { a.push('--dpi', val('dpi')); }
   else pushIf(a, val('mm_per_column')!=='0.2', '--mm-per-column', val('mm_per_column'));
@@ -432,9 +436,7 @@ function renderArgs(a){
     pushIf(a, !!val('pattern_square_height_mm'),'--pattern-square-height-mm',val('pattern_square_height_mm'));
   } else {
     a.push(val('text') || 'Text');
-    pushIf(a, !!val('font'), '--font', val('font'));
     pushIf(a, val('render_size')!=='220','--render-size',val('render_size'));
-    pushIf(a, val('threshold')!=='128','--threshold',val('threshold'));
     pushIf(a, val('margin')!=='0','--margin',val('margin'));
     pushIf(a, chk('invert'),'--invert');
     pushIf(a, chk('flip_y'),'--flip-y');
@@ -455,21 +457,18 @@ function bleArgs(a){
   pushIf(a, isPageMode(),'--progress-json');
   pushIf(a, val('period')!=='0.03' && (chk('no_track')||val('mode')==='time'),'--period',val('period'));
 }
-function globalArgs(a){ pushIf(a, chk('gSimulate'),'--simulate'); pushIf(a, chk('gDryRun'),'--dry-run'); }
-
 function printArgs(){
-  const a=[]; renderArgs(a); trackingArgs(a); nozzleArgs(a); bleArgs(a); globalArgs(a); return a;
+  const a=[]; renderArgs(a); trackingArgs(a); nozzleArgs(a); bleArgs(a); return a;
 }
 function diagArgs(flag){
   const a=[flag];
   if(flag==='--list-nodes'||flag==='--ble-benchmark'){ trackingArgs(a); }
   if(flag==='--scan-ble'){ pushIf(a, val('scan_timeout')!=='10','--scan-timeout',val('scan_timeout')); }
   if(flag==='--nozzle-test'){ nozzleArgs(a); pushIf(a, val('device_name')!=='PrintheadBLE','--device-name',val('device_name')); pushIf(a, !!val('address'),'--address',val('address')); }
-  globalArgs(a); return a;
+  return a;
 }
 function sensorArgs(){
   const a=[];
-  pushIf(a, chk('gSimulate'),'--simulate');
   pushIf(a, val('advance_axis')!=='x','--advance-axis',val('advance_axis'));
   pushIf(a, val('axis_sign')!=='1','--axis-sign',val('axis_sign'));
   if(val('dpi')) a.push('--dpi', val('dpi')); else pushIf(a, val('mm_per_column')!=='0.2','--mm-per-column',val('mm_per_column'));
@@ -495,6 +494,29 @@ function clearLog(){ con.innerHTML=''; }
 /* ---------- run / stop ---------- */
 async function post(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
 async function runArgs(args){ const r=await post('/api/run',{args}); if(!r.ok) log('! '+r.error,'err'); }
+
+/* ---------- custom command (typed CLI args, sent as-is via runArgs) ---------- */
+// Small hand-rolled tokenizer: whitespace-split with support for
+// double-quoted substrings (so paths with spaces work), not a full shell
+// parser (no escapes, no single quotes).
+function tokenizeArgs(str){
+  const out=[]; let cur=''; let inQuotes=false; let has=false;
+  for(let i=0;i<str.length;i++){
+    const c=str[i];
+    if(c==='"'){ inQuotes=!inQuotes; has=true; continue; }
+    if(!inQuotes && /\s/.test(c)){ if(has){ out.push(cur); cur=''; has=false; } continue; }
+    cur+=c; has=true;
+  }
+  if(has) out.push(cur);
+  return out;
+}
+function runCustomCmd(){
+  const raw=val('customCmd');
+  if(!raw){ log('! type a command first (e.g. --pattern checkerboard --mode page)','err'); return; }
+  runArgs(tokenizeArgs(raw));
+}
+$('btnCustomRun').onclick=runCustomCmd;
+$('customCmd').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); runCustomCmd(); } });
 $('btnRun').onclick=()=>{
   if(isPageMode() && !chk('no_track') && !val('page_calibration')){
     log('! page mode needs a page calibration -- build one on the Calibration tab, or enter a path (Tracking & scale tab)','err');
@@ -503,6 +525,22 @@ $('btnRun').onclick=()=>{
   runArgs(printArgs());
 };
 $('btnStop').onclick=()=>post('/api/stop');
+
+/* ---------- shutdown (stop server + web UI, not just the current action) ---------- */
+let shutdownRequested=false;
+$('btnShutdown').onclick=async()=>{
+  if(!confirm('Shut down the printhead server?')) return;
+  shutdownRequested=true;
+  $('btnShutdown').disabled=true;
+  await post('/api/shutdown');
+  con.innerHTML='';
+  const d=document.createElement('div');
+  d.className='l done';
+  d.style.cssText='font-size:16px;font-weight:700;padding:24px 0;text-align:center';
+  d.textContent='⏻ Server shut down — you can close this tab.';
+  con.appendChild(d);
+  document.querySelectorAll('.btn,input,select').forEach(el=>{ if(el.id!=='btnShutdown') el.disabled=true; });
+};
 function runDiag(flag){ runArgs(diagArgs(flag)); }
 $('btnPreview').onclick=async()=>{
   const btn=$('btnPreview'); btn.disabled=true; btn.textContent='… rendering';
@@ -515,7 +553,7 @@ $('btnPreview').onclick=async()=>{
 let pendingRecord=false;
 $('btnRecord').onclick=async()=>{
   const r=await post('/api/record',{args:printArgs()});
-  if(r && r.ok){ pendingRecord=true; log('recording… run the pass (press START, or use Auto-start/Simulate)','done'); }
+  if(r && r.ok){ pendingRecord=true; log('recording… run the pass (press START, or use Auto-start)','done'); }
   else { log('! '+(r&&r.error||'record failed'),'err'); }
 };
 function showImage(url,kind){
@@ -546,7 +584,7 @@ function setSensor(on){
   $('sensorPill').classList.toggle('on',on);
   $('sensorPillText').textContent=on?'sensor live':'sensor offline';
   $('liveBadge').innerHTML=on?'<b>● streaming</b>':'not connected';
-  if(!on){ ['posX','posY','posZ','posAdv','posCol'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
+  if(!on){ ['posX','posY','posZ','posAdv','posCol','posQuat','posPageU','posPageV','posPageZ','posYaw'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
 }
 
 /* ---------- sparkline ---------- */
@@ -561,6 +599,7 @@ function draw(){
   cx.strokeStyle='#2dd4bf'; cx.lineWidth=2; cx.stroke();
   cx.lineTo(w,h); cx.lineTo(0,h); cx.closePath(); cx.fillStyle='#2dd4bf14'; cx.fill();
 }
+function fmtSigned(n,d){ return (n<0?'':'+')+n.toFixed(d); }
 function onPosition(o){
   $('posX').textContent=o.x.toFixed(2); $('posY').textContent=o.y.toFixed(2); $('posZ').textContent=o.z.toFixed(2);
   $('posAdv').textContent=o.advance.toFixed(2); $('posCol').textContent=o.col;
@@ -568,6 +607,13 @@ function onPosition(o){
   if(lastT!==null){ const dt=now-lastT; if(dt>0){ const v=Math.abs(o.advance-lastAdv)/dt; $('posVel').textContent=' col · '+v.toFixed(1)+' mm/s'; } }
   lastT=now; lastAdv=o.advance;
   hist.push(o.advance); if(hist.length>240) hist.shift(); draw();
+  $('posQuat').textContent = o.qx!==undefined
+    ? `[${fmtSigned(o.qx,2)} ${fmtSigned(o.qy,2)} ${fmtSigned(o.qz,2)} ${fmtSigned(o.qw,2)}]`
+    : '–';
+  $('posPageU').textContent = o.page_u!==undefined ? o.page_u.toFixed(2) : '–';
+  $('posPageV').textContent = o.page_v!==undefined ? o.page_v.toFixed(2) : '–';
+  $('posPageZ').textContent = o.page_z!==undefined ? o.page_z.toFixed(2) : '–';
+  $('posYaw').textContent = o.yaw_deg!==undefined ? fmtSigned(o.yaw_deg,2) : '–';
   onCalibrationPosition(o);
 }
 
@@ -722,7 +768,7 @@ function connect(){
       if(pendingRecord){ pendingRecord=false; setTimeout(()=>showImage('/api/record.png','record'),400); } }
     else if(m.type==='status'){ setRun(m.action_running,m.action_cmd); setSensor(m.sensor_running); }
   };
-  ws.onclose=()=>{ setTimeout(connect,1200); };
+  ws.onclose=()=>{ if(!shutdownRequested) setTimeout(connect,1200); };
 }
 connect(); updateSrc(); updateMode(); buildPreview(); draw();
 </script>
