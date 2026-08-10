@@ -133,6 +133,106 @@ def test_render_coverage_writes_a_taller_than_line_mode_png():
             os.remove(path)
 
 
+# ==================================================== render_coverage: path
+def test_render_coverage_without_paths_matches_the_pre_path_tracking_size():
+    # Backward compatibility: a caller that never passes sensor_path/
+    # nozzle_path (there was no such thing before this feature) must get
+    # byte-for-byte the same 3-panel layout as before -- no 4th panel, same
+    # height -- so this stays a safe default for any other caller.
+    h, w = 100, 8
+    ink = np.zeros((h, w), dtype=bool)
+    ink[5:15, 1:4] = True
+    printed = ink.copy()
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_nopaths.png")
+    try:
+        assert render_coverage(printed, ink, path) is True
+        from PIL import Image
+        with Image.open(path) as im:
+            h_no_paths = im.size[1]
+        assert render_coverage(printed, ink, path, sensor_path=[], nozzle_path=[]) is True
+        with Image.open(path) as im:
+            h_empty_paths = im.size[1]
+        # Empty lists are falsy same as None -- pushIf-style "nothing to draw"
+        # -- must not add a 4th panel either.
+        assert h_no_paths == h_empty_paths
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_render_coverage_with_paths_adds_a_taller_coloured_panel():
+    h, w = 100, 8
+    ink = np.zeros((h, w), dtype=bool)
+    ink[5:15, 1:4] = True
+    printed = ink.copy()
+    sensor_path = [(10, 1), (10, 2), (10, 3)]
+    nozzle_path = [(12, 1), (12, 2), (12, 3)]
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_paths.png")
+    try:
+        assert render_coverage(printed, ink, path,
+                               sensor_path=sensor_path, nozzle_path=nozzle_path) is True
+        from PIL import Image
+        with Image.open(path) as im:
+            w_out, h_out = im.size
+            assert im.mode == "RGB"
+        # 3 grayscale panels + 1 path panel, each h + label + gap
+        assert h_out > 4 * h
+        assert w_out >= w
+
+        assert render_coverage(printed, ink, path) is True   # no paths
+        with Image.open(path) as im:
+            h_no_paths = im.size[1]
+        assert h_out > h_no_paths, "the path panel must add real height"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_render_coverage_path_panel_draws_the_expected_colours():
+    h, w = 60, 60
+    ink = np.zeros((h, w), dtype=bool)
+    ink[10:20, 10:20] = True
+    printed = ink.copy()
+    sensor_path = [(5, 5), (5, 55)]      # horizontal line near the top
+    nozzle_path = [(50, 5), (50, 55)]    # horizontal line near the bottom
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_colours.png")
+    try:
+        assert render_coverage(printed, ink, path,
+                               sensor_path=sensor_path, nozzle_path=nozzle_path) is True
+        from PIL import Image
+        im = Image.open(path).convert("RGB")
+        arr = np.array(im)
+        # path panel is the last (4th) block; scan its full width for each colour.
+        blue = np.any(np.all(arr == (30, 100, 220), axis=-1))
+        orange = np.any(np.all(arr == (230, 90, 20), axis=-1))
+        green = np.any(np.all(arr == (30, 160, 60), axis=-1))
+        dark = np.any(np.all(arr == (40, 40, 40), axis=-1))
+        assert blue, "sensor path (blue) must be drawn"
+        assert orange, "nozzle path (orange) must be drawn"
+        assert green, "start marker (green) must be drawn"
+        assert dark, "end marker (dark) must be drawn"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_render_coverage_path_panel_tolerates_out_of_bounds_points():
+    # A path leaving/re-entering the page (or, for the sensor, simply never
+    # being over it -- see controller._print_freehand_pass) must not crash;
+    # PIL clips drawing operations outside the canvas automatically.
+    h, w = 40, 40
+    ink = np.ones((h, w), dtype=bool)
+    printed = ink.copy()
+    wild_path = [(-5000, -5000), (10, 10), (99999, 88888), (5, 5)]
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_wild.png")
+    try:
+        assert render_coverage(printed, ink, path,
+                               sensor_path=wild_path, nozzle_path=wild_path) is True
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

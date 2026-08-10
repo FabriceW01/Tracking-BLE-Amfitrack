@@ -15,7 +15,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printhead.calibration import PageCalibration                      # noqa: E402
-from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S     # noqa: E402
+from printhead.coverage import (                                       # noqa: E402
+    CoverageEngine, DEFAULT_DOSE_HOLD_S, bar_offset_uv,
+)
 from printhead.geometry import (                                       # noqa: E402
     NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
 )
@@ -354,6 +356,50 @@ def test_step_90deg_yaw_swings_the_bar_to_lower_columns_not_higher():
     # explicitly reject the old (wrong) direction, so a re-inversion of the
     # sign fails loudly here even if the tolerance above were ever loosened
     assert actual_last_col < col0
+
+
+# =============================================================== bar_offset_uv
+def test_bar_offset_uv_is_zero_at_zero_offset():
+    assert bar_offset_uv(0.0, math.radians(37.0)) == (0.0, 0.0)
+
+
+def test_bar_offset_uv_stays_pure_v_at_zero_yaw():
+    du, dv = bar_offset_uv(12.3, 0.0)
+    assert du == 0.0
+    assert dv == 12.3
+
+
+def test_bar_offset_uv_matches_the_bar_centre_of_steps_own_spread():
+    # Cross-consistency against CoverageEngine.step()'s own (independently
+    # written, NOT calling this function -- see bar_offset_uv's docstring)
+    # per-nozzle placement: NUM_NOZZLES is even, so no single nozzle sits
+    # exactly at the geometric bar centre (offset_along_bar_mm =
+    # NOZZLE_BAR_WIDTH_MM / 2, halfway between nozzles 75 and 76) -- but that
+    # centre must fall at the midpoint of the column range step() actually
+    # spreads across. Same 90 deg exact-arithmetic setup (sin=1, cos=0
+    # exactly in IEEE 754) as the "swings to lower columns" test above, so
+    # the comparison isn't itself blurred by rounding.
+    mm_per_column = 0.5
+    u_mm, v_mm = 50.0, 0.0
+    yaw = math.pi / 2.0
+
+    ink = np.ones((10, 200), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
+
+    row0 = int(round(v_mm / NOZZLE_PITCH_MM))
+    touched_cols = np.nonzero(eng.printed[row0])[0]
+    observed_centre_col = (touched_cols.min() + touched_cols.max()) / 2.0
+
+    du, dv = bar_offset_uv(NOZZLE_BAR_WIDTH_MM / 2.0, yaw)
+    predicted_centre_col = (u_mm + du) / mm_per_column
+    assert abs(predicted_centre_col - observed_centre_col) <= 1.0, (
+        predicted_centre_col, observed_centre_col)
+    # math.pi/2 isn't bit-exact (math.pi is a finite approximation of pi),
+    # so cos(yaw) is ~6e-17, not exactly 0.0 -- negligible against
+    # NOZZLE_PITCH_MM (~0.099mm) and rounds away in row0 above, but not
+    # literally zero; assert "negligible", not "==".
+    assert abs(dv) < 1e-9, "bar centre must stay on nozzle 0's row at 90 deg yaw"
 
 
 def test_step_and_page_mapper_rotate_a_body_fixed_row_vector_the_same_direction():

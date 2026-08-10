@@ -678,6 +678,33 @@ BLE-Paketverlust/Firmware; ist sie schon gestaucht, liegt es am Sende-/Positions
 > BLE-Strecke das Nadelöhr ist – dann helfen kürzeres Connection-Intervall, größere
 > MTU/mehr Nozzle-Bytes pro Write, größeres `--mm-per-column` oder langsamer verfahren.
 
+**`--record BILD.png` in `--mode page`** rekonstruiert anders als im Zeilen-Modus
+oben: Es gibt hier nichts nachzubilden, `CoverageEngine` führt schon während des
+Drucks live Buch, welches Pixel getroffen wurde. Das PNG zeigt drei übereinander
+gestapelte Panels — INTENDED (Zielbild), COVERED (tatsächlich getroffen) und MISSED
+(gewollt, aber nie getroffen) — plus ein viertes, farbiges **PATH**-Panel: die blau
+gezeichnete Spur ist der **Sensor-Mittelpunkt**, orange die **Düsenleisten-Mitte**
+(nicht Düse 0), je mit grünem Start- und dunklem Endpunkt. Damit lässt sich eine
+MISSED-Stelle direkt gegen die Fahrspur prüfen — ist der Wagen dort nie
+vorbeigekommen, oder war er zu schnell für `--dose-hold-s`?
+
+```bash
+python main.py --pattern checkerboard --mode page --page-frame simple \
+    --pattern-length-mm 60 --pattern-height-mm 100 --record coverage.png
+```
+
+⚠️ **Wichtig, damit der Sensor-Pfad überhaupt sichtbar wird:** Sensor und
+Düsenleiste sitzen ~62 mm auseinander (`SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM`). Bei
+konstanter Ausrichtung (kein Gieren während des Passes) liegt die blaue Sensor-Spur
+deshalb **komplett außerhalb** eines nur ~15–20 mm hohen Zielbilds — sie ist real
+vorhanden, nur schlicht nie im sichtbaren Canvas. Erst bei einem ausreichend hohen
+Zielbild (`--pattern-height-mm` deutlich über ~62 mm) oder bei einem Pass mit
+echtem Gieren (Wagen dreht sich während der Bewegung) laufen beide Spuren im
+selben Bildausschnitt zusammen.
+
+In der Web-UI erscheint das PATH-Panel automatisch im **🎞 Record**-Vergleichsbild,
+sobald `--mode page` aktiv ist — keine zusätzliche Option nötig.
+
 ## BLE-Protokoll (aus README_BLE_INTERFACE.md / Firmware)
 
 | | |

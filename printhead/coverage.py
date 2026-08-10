@@ -114,6 +114,34 @@ DEFAULT_DOSE_HOLD_S = 0.00405
 _Pixel = Optional[Tuple[int, int]]
 
 
+def bar_offset_uv(offset_along_bar_mm: float, yaw_rad: float) -> Tuple[float, float]:
+    """
+    ``(du, dv)`` from nozzle 0's ``(u, v)`` to a point ``offset_along_bar_mm``
+    further along the bar's CURRENT (yaw-rotated) direction.
+
+    Mirrors -- but is deliberately NOT called by -- the per-nozzle formula
+    inside :meth:`CoverageEngine.step`'s hot loop (nozzle ``p`` sits at this
+    evaluated at ``offset_along_bar_mm = p * NOZZLE_PITCH_MM``): that loop
+    runs all ``NUM_NOZZLES`` nozzles on every sample, up to ``poll_hz`` times
+    a second, and the "zero_yaw fast path" right above it already exists
+    purely to avoid a cheaper equivalent of the per-call overhead a shared
+    function here would add across 152 calls/sample -- not worth the
+    dedup for a formula this short. This standalone copy exists for a
+    caller that evaluates it only ONCE per sample instead: ``controller.
+    _print_freehand_pass``'s ``--record`` path tracking, which needs the
+    nozzle BAR's centre (a single point), not any specific nozzle.
+
+    See ``step``'s "Sign derivation" docstring note for the derivation this
+    must stay bit-for-bit consistent with; ``tests/test_coverage.py``
+    cross-checks that consistency directly (this function evaluated at the
+    bar's centre offset must match ``step()``'s own placement of the centre
+    nozzle).
+    """
+    sin_yaw = math.sin(yaw_rad)
+    cos_yaw = math.cos(yaw_rad)
+    return (-offset_along_bar_mm * sin_yaw, offset_along_bar_mm * cos_yaw)
+
+
 class CoverageEngine:
     """
     Tracks what has been printed onto a target image -- possibly taller than

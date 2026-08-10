@@ -32,6 +32,7 @@ from printhead.controller import (                                    # noqa: E4
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
 from printhead.geometry import (                                      # noqa: E402
     NOZZLE_BAR_WIDTH_MM,
+    NOZZLE_PITCH_MM,
     NUM_NOZZLES,
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
@@ -248,6 +249,68 @@ def test_simple_frame_pinned_boresight_is_not_overwritten_at_start():
         "pinned boresight was overwritten by auto-capture")
     assert "using pinned yaw reference" in text, text
     assert "auto-captured" not in text, text
+
+
+def test_simple_frame_pass_records_sensor_and_nozzle_paths_for_record():
+    # --record's path overlay (see recording.render_coverage): the controller
+    # must collect one (row, col) point per sample for both the raw sensor
+    # centre and the nozzle-BAR centre (not nozzle 0), and pass them into
+    # render_coverage. Patches render_coverage itself (a local import inside
+    # _print_freehand_pass, re-resolved from the module each call) to
+    # capture exactly what the controller handed it, rather than trying to
+    # infer the paths back out of pixel colours in a rendered PNG.
+    import printhead.recording as recording_module
+    captured = {}
+    real_render_coverage = recording_module.render_coverage
+
+    def fake_render_coverage(printed, ink, path, sensor_path=None, nozzle_path=None):
+        captured["sensor_path"] = sensor_path
+        captured["nozzle_path"] = nozzle_path
+        return real_render_coverage(printed, ink, path,
+                                    sensor_path=sensor_path, nozzle_path=nozzle_path)
+
+    recording_module.render_coverage = fake_render_coverage
+    try:
+        ink = np.ones((300, 5), dtype=bool)   # tall enough that the ~55mm sensor
+                                               # lag (see below) can still land
+                                               # on a valid (if empty) row
+        render = RenderSettings(text="path recording test")
+        # timeout_s short and real: ScriptedTracker HOLDS its last position
+        # once its scripted sequence is exhausted (see its own docstring)
+        # rather than ending the pass, so this always runs to the real-time
+        # timeout regardless of how many positions were scripted -- keep it
+        # short purely so the test itself stays fast, not to bound sample
+        # count (that assertion below is a ratio/relationship check, not an
+        # exact count, for exactly this reason).
+        trk = TrackingSettings(mode="page", page_frame="simple", mm_per_column=1.0,
+                               smooth_ms=0.0, poll_hz=500.0, timeout_s=0.05)
+        with tempfile.TemporaryDirectory() as tmp:
+            record_path = os.path.join(tmp, "coverage.png")
+            ctrl = PrintController(render, BleSettings(), trk, ink=ink,
+                                   page_calibration=PageCalibration.simple_frame(),
+                                   dose_hold_s=0.01, record=record_path)
+            tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+            asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    finally:
+        recording_module.render_coverage = real_render_coverage
+
+    assert "sensor_path" in captured, "render_coverage was never called"
+    sensor_path, nozzle_path = captured["sensor_path"], captured["nozzle_path"]
+    assert sensor_path and nozzle_path
+    assert len(sensor_path) == len(nozzle_path) > 0
+
+    # ScriptedTracker never fakes orientation (quat always None -- same
+    # contract as SimulatedTracker), so yaw stays 0 for the whole pass and
+    # every point differs only in v, by exactly SENSOR_TO_NOZZLE_BAR_CENTER_
+    # ROW_MM (sensor -> nozzle-bar-CENTRE is the full lever arm; sensor ->
+    # nozzle-0 alone would be a different, smaller distance -- see
+    # tracking.PageMapper's docstring / geometry.py).
+    row_diffs = [n[0] - s[0] for s, n in zip(sensor_path, nozzle_path)]
+    expected_row_diff = round(SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM / NOZZLE_PITCH_MM)
+    assert all(d == expected_row_diff for d in row_diffs), (row_diffs[:5], expected_row_diff)
+    # u (column) must match between the two paths at zero yaw -- the offset
+    # is purely along the row/v axis.
+    assert all(s[1] == n[1] for s, n in zip(sensor_path, nozzle_path))
 
 
 def test_freehand_pass_actually_covers_every_ink_pixel():
