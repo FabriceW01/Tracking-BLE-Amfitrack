@@ -194,7 +194,7 @@
       <!-- TRACKING -->
       <div class="panel" data-p="tracking">
         <div class="row">
-          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="page">page (freehand 2D)</option><option value="time">time</option></select></div>
+          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="page" selected>page (freehand 2D)</option><option value="time">time</option></select></div>
           <div class="field"><label>Period (s, time mode)</label><input id="period" type="number" step="0.005" value="0.03"></div>
         </div>
         <div class="row page-only" style="display:none">
@@ -219,7 +219,7 @@
           <div class="field"><label>Smoothing (ms)</label><input id="smooth_ms" type="number" step="1" value="12" title="Low-pass time constant for the Amfitrack position. 0 disables it."></div>
         </div>
         <div class="row">
-          <div class="field"><label>Poll rate (Hz)</label><input id="poll_hz" type="number" step="50" value="200" title="Position polling rate. A column crossing is only noticed once per poll, so this bounds how precisely a column is placed."></div>
+          <div class="field"><label>Poll rate (Hz)</label><input id="poll_hz" type="number" step="50" value="500" title="Position polling rate. A column crossing is only noticed once per poll, so this bounds how precisely a column is placed."></div>
         </div>
         <div class="row">
           <div class="field"><label>Sensor tx_id (optional)</label><input id="sensor_id" placeholder="all"></div>
@@ -400,7 +400,7 @@ function pushIf(a,cond,flag,v){ if(cond){ a.push(flag); if(v!==undefined && v!==
 
 function trackingArgs(a){
   if(chk('no_track')) a.push('--no-track');
-  else pushIf(a, val('mode')!=='line', '--mode', val('mode'));
+  else pushIf(a, val('mode')!=='page', '--mode', val('mode'));
   if(isPageMode() && !chk('no_track')){
     pushIf(a, !!val('page_calibration'), '--page-calibration', val('page_calibration'));
     pushIf(a, !!val('dose_hold_s'), '--dose-hold-s', val('dose_hold_s'));
@@ -414,7 +414,7 @@ function trackingArgs(a){
   pushIf(a, val('min_move')!=='0.05', '--min-move', val('min_move'));
   pushIf(a, val('timeout')!=='30', '--timeout', val('timeout'));
   pushIf(a, val('smooth_ms')!=='12', '--smooth-ms', val('smooth_ms'));
-  pushIf(a, val('poll_hz')!=='200', '--poll-hz', val('poll_hz'));
+  pushIf(a, val('poll_hz')!=='500', '--poll-hz', val('poll_hz'));
   pushIf(a, val('vendor_id')!=='0x0C17', '--vendor-id', val('vendor_id'));
   pushIf(a, val('product_id')!=='0x0D12', '--product-id', val('product_id'));
   pushIf(a, !!val('sensor_id'), '--sensor-id', val('sensor_id'));

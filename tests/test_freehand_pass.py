@@ -276,9 +276,10 @@ def test_progress_json_off_by_default_stays_plain_text():
 
 
 def test_cli_progress_json_flag():
-    args = cli.parse_args(["Hi", "--dry-run", "--progress-json"])
+    # --mode line: this test is about --progress-json, not mode selection.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line", "--progress-json"])
     assert args.progress_json is True
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.progress_json is False
 
 
@@ -719,26 +720,32 @@ def test_cli_no_track_bypasses_the_page_calibration_requirement():
 
 
 def test_cli_ble_write_ceiling_defaults_to_none_and_parses():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    # --mode line throughout this block: these tests are about the
+    # individual flags below, not mode selection, and pass no
+    # --page-calibration.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.ble_write_ceiling is None
-    args = cli.parse_args(["Hi", "--dry-run", "--ble-write-ceiling", "150"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--ble-write-ceiling", "150"])
     assert args.ble_write_ceiling == 150.0
 
 
 def test_cli_sensor_offset_flags_default_to_none_and_parse():
     # Same "default None -> controller falls back to the geometry constant"
     # pattern as --dose-hold-s / --ble-write-ceiling above.
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.sensor_offset_row_mm is None
     assert args.sensor_offset_col_mm is None
-    args = cli.parse_args(["Hi", "--dry-run", "--sensor-offset-row-mm", "70.0",
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--sensor-offset-row-mm", "70.0",
                            "--sensor-offset-col-mm", "-3.5"])
     assert args.sensor_offset_row_mm == 70.0
     assert args.sensor_offset_col_mm == -3.5
 
 
 def test_cli_sensor_offset_flags_reach_the_controller_when_given():
-    args = cli.parse_args(["Hi", "--dry-run", "--sensor-offset-row-mm", "70.0",
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--sensor-offset-row-mm", "70.0",
                            "--sensor-offset-col-mm", "-3.5"])
     ctrl = cli.build_controller(args)
     assert ctrl.sensor_offset_row_mm == 70.0
@@ -748,7 +755,7 @@ def test_cli_sensor_offset_flags_reach_the_controller_when_given():
 def test_cli_sensor_offset_flags_default_to_the_geometry_constants_unset():
     # When not given at all, the controller must fall back to the real
     # measured geometry constants, not to 0.0.
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     ctrl = cli.build_controller(args)
     assert ctrl.sensor_offset_row_mm == SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM
     assert ctrl.sensor_offset_col_mm == SENSOR_TO_NOZZLE_COL_MM
@@ -756,14 +763,16 @@ def test_cli_sensor_offset_flags_default_to_the_geometry_constants_unset():
 
 # =============================================================== --boresight-deg
 def test_cli_boresight_deg_defaults_to_none_and_parses():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.boresight_deg is None
-    args = cli.parse_args(["Hi", "--dry-run", "--boresight-deg", "3.5"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--boresight-deg", "3.5"])
     assert args.boresight_deg == 3.5
 
 
 def test_cli_boresight_deg_reaches_the_controller_when_given():
-    args = cli.parse_args(["Hi", "--dry-run", "--boresight-deg", "-7.25"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--boresight-deg", "-7.25"])
     ctrl = cli.build_controller(args)
     assert ctrl.boresight_deg == -7.25
 
@@ -771,7 +780,7 @@ def test_cli_boresight_deg_reaches_the_controller_when_given():
 def test_cli_boresight_deg_defaults_to_zero_unset():
     # Same "default None on the CLI -> 0.0 (neutral) on the controller"
     # pattern as the other page-mode fine-tune flags.
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     ctrl = cli.build_controller(args)
     assert ctrl.boresight_deg == 0.0
 
@@ -789,14 +798,18 @@ def test_build_page_calibration_loads_a_saved_file():
 
 
 def test_build_page_calibration_is_none_without_the_flag():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    # --mode line: the point here is exercising the "no --page-calibration
+    # given" path through build_page_calibration() itself; --mode page would
+    # instead be rejected earlier, by parse_args's own validation.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert cli.build_page_calibration(args) is None
 
 
 def test_cli_speed_warning_mm_s_defaults_to_none_and_parses():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.speed_warning_mm_s is None
-    args = cli.parse_args(["Hi", "--dry-run", "--speed-warning-mm-s", "30"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--speed-warning-mm-s", "30"])
     assert args.speed_warning_mm_s == 30.0
 
 

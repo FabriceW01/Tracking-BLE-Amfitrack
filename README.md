@@ -37,27 +37,40 @@ gebraucht. Rendering, `--dry-run` und `--simulate` laufen ohne sie (und ohne `bl
 
 ## Schnellstart
 
+**Wichtig:** Seit diesem Release ist `--mode page` (freihändiges 2D-Drucken)
+der Standard-Modus, nicht mehr `--mode line` — siehe Abschnitt
+`--mode page` unten. `--mode page` braucht eine vorher erstellte
+`PageCalibration` (`--page-calibration PATH`); ohne `--mode` *und* ohne
+`--page-calibration` bricht das Programm mit einer klaren Fehlermeldung ab,
+statt stillschweigend das falsche Verhalten zu zeigen. Die Beispiele unten,
+die keine Kalibrierung brauchen, setzen deshalb explizit `--mode line`.
+
 ```bash
-# Vorschau erzeugen, nichts senden:
-python main.py "Hallo" --dry-run --preview vorschau.png
+# Vorschau erzeugen, nichts senden (kein Hardware-/Kalibrierungs-Zugriff nötig):
+python main.py "Hallo" --dry-run --preview vorschau.png --mode line
 
-# Positionsbasiert drucken (Standard), auf START-Taster warten:
-python main.py "Hallo"
+# Freihändig auf einer Seite drucken (Standard-Modus), auf START-Taster
+# warten -- braucht eine vorher erstellte PageCalibration, siehe
+# Abschnitt "--mode page" unten:
+python main.py "Hallo" --page-calibration page_calibration.json
 
-# Positions-Loop ohne Hardware testen:
+# Positions-Loop (1D, eine Richtung) ohne Hardware testen:
 python main.py "Hallo" --simulate --mode line --dry-run
 
 # Klassisch zeitbasiert (wie das Ursprungsskript):
 python main.py "Hallo" --mode time --period 0.03
 ```
 
-**Experimentell: `--mode page`** — freihändiges 2D-Drucken (Wagen frei über die
-Seite bewegen, nicht nur eine Richtung). Braucht eine vorher erstellte
-`PageCalibration` (`printhead/calibration.py`, `--page-calibration PATH`) — dafür
-im **Calibration**-Tab der Web-UI zwei angrenzende Seitenkanten mit dem
-Sensor abfahren, "Compute calibration" berechnen lassen und speichern; die
-gespeicherte Datei dann per `--page-calibration PATH` laden. Details:
-`README_BLE_INTERFACE.md` im Firmware-Repo (Abschnitt "Page Mode").
+**`--mode page`** (seit diesem Release der Standard) — freihändiges 2D-Drucken
+(Wagen frei über die Seite bewegen, nicht nur eine Richtung). Braucht eine
+vorher erstellte `PageCalibration` (`printhead/calibration.py`,
+`--page-calibration PATH`) — dafür im **Calibration**-Tab der Web-UI zwei
+angrenzende Seitenkanten mit dem Sensor abfahren, "Compute calibration"
+berechnen lassen und speichern; die gespeicherte Datei dann per
+`--page-calibration PATH` laden. Details: `README_BLE_INTERFACE.md` im
+Firmware-Repo (Abschnitt "Page Mode"). Für den alten 1D-Closed-Loop
+(Wagen bewegt sich nur in eine Richtung, keine Kalibrierung nötig)
+weiterhin `--mode line` verwenden.
 
 ⚠️ **Wichtig:** Beim ersten echten Hardware-Bring-up ist der Modus ohne
 Fehlermeldung leer durchgelaufen (`active=0` die ganze Zeit, Exit-Code 0,
@@ -204,9 +217,26 @@ Das Überschreiten des Poll-Intervalls degradiert die Coverage also nicht
 sanft, sondern lässt sie einbrechen. Zusätzlich zum 3-Tropfen-Ziel gilt
 deshalb: `dose_hold_s` **muss unter** dem Poll-Intervall (`1 / poll_hz`)
 bleiben, damit zwei aufeinanderfolgende Samples immer für eine
-Fertigstellung reichen. Der neue Default 4.05 ms liegt 19 % unter dem
-5.00 ms Poll-Intervall (statt knapp darüber). `PrintController` warnt zur
-Laufzeit, falls `dose_hold_s >= 1 / poll_hz` doch wieder zutrifft.
+Fertigstellung reichen. Der Default 4.05 ms liegt 19 % unter dem
+5.00 ms Poll-Intervall von `--poll-hz 200` (statt knapp darüber).
+`PrintController` warnt zur Laufzeit, falls `dose_hold_s >= 1 / poll_hz`
+doch wieder zutrifft.
+
+⚠️ **`--poll-hz` ist jetzt standardmäßig 500, nicht mehr 200:** Das
+Poll-Intervall schrumpft dadurch von 5.00 ms auf **2.00 ms** — kürzer als
+das unveränderte `dose_hold_s`-Default (4.05 ms). Die obige
+Laufzeit-Warnung feuert also seit diesem Release **out of the box** bei
+jedem Seiten-Druck mit Default-Einstellungen (ein Pixel braucht jetzt 3
+Samples × 2 ms = 6 ms reale Zeit für eine Dosis, minimal schlechter als die
+alten 2 Samples × 5 ms = 10 ms bei 200 Hz — die höhere Poll-Rate verbessert
+nur die Spalten-Platzierungsgenauigkeit, nicht von sich aus die
+Dosis-Fertigstellungszeit). Bis eine an Hardware neu vermessene Paarung
+vorliegt, entweder explizit ein kürzeres `--dose-hold-s` setzen (und die
+Firmware entsprechend auf ein neues `PATTERN_STRIDE` umstellen und neu
+flashen, siehe "Firmware-Kopplung" unten) oder für die alte, zueinander
+passende Kombination explizit `--poll-hz 200` übergeben.
+`coverage.DEFAULT_DOSE_HOLD_S` selbst wurde in diesem Release **nicht**
+geändert — das bleibt für eine spätere, hardwareverifizierte Runde offen.
 
 Bei Handgeschwindigkeiten über ca. **20 mm/s** reicht die Verweildauer über
 einer Spalte nicht mehr für die vollen 4.05 ms — das Pixel bleibt
@@ -358,7 +388,7 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | `--origin button\|startpoint` | Was den Nullpunkt setzt (START-Taster oder Startpoint-Charakteristik) |
 | `--smooth-ms MS` | Tiefpass-Zeitkonstante (ms) gegen das verrauschte Amfitrack-Signal; `0` = aus, größer = glatter aber mehr Nachlauf (Default 12). Reduziert unregelmäßige Linien/Lücken. |
 | `--min-move MM` | Deadband; darunter gilt der Kopf als stehend (Default 0.05) |
-| `--poll-hz HZ` | Abtastrate der Position (Default 200). Ein Spaltenübergang kann nur einmal pro Abtastung bemerkt werden, das begrenzt also, wie genau eine Column platziert wird: bei 200 Hz und 20 mm/s sind das 0.1 mm = eine halbe Column. Mit `--profile-csv` messbar — die Abstände zwischen den Schreibzeitpunkten sind auf die effektive Schleifenperiode quantisiert. |
+| `--poll-hz HZ` | Abtastrate der Position (Default 500). Ein Spaltenübergang kann nur einmal pro Abtastung bemerkt werden, das begrenzt also, wie genau eine Column platziert wird: bei 500 Hz und 20 mm/s sind das 0.04 mm = ein Fünftel Column. Mit `--profile-csv` messbar — die Abstände zwischen den Schreibzeitpunkten sind auf die effektive Schleifenperiode quantisiert. |
 | `--timeout S` | Abbruch eines Durchlaufs nach S Sekunden (Default 30) |
 | `--vendor-id` / `--product-id` | USB-IDs des Amfitrack-Dongles (Default `0x0C17` / `0x0D12`) |
 | `--sensor-id` | optionaler `tx_id`-Filter unter den „Sensor"-Nodes (Default: alle) |

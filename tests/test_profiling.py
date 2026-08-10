@@ -195,7 +195,10 @@ def test_cli_ble_benchmark_needs_no_text():
 
 
 def test_cli_profile_flags():
-    args = cli.parse_args(["Hi", "--dry-run", "--profile", "--profile-csv", "x.csv"])
+    # --mode line: this test is about --profile/--profile-csv, not mode
+    # selection, and passes no --page-calibration.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--profile", "--profile-csv", "x.csv"])
     assert args.profile and args.profile_csv == "x.csv"
 
 

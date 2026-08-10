@@ -105,9 +105,10 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     # --- printing mode -----------------------------------------------------
     g = ap.add_argument_group("printing mode")
-    g.add_argument("--mode", choices=("line", "page", "time"), default="line",
-                   help="line = 1D Amfitrack closed loop (default); "
-                        "page = freehand 2D closed loop, needs --page-calibration; "
+    g.add_argument("--mode", choices=("line", "page", "time"), default="page",
+                   help="page = freehand 2D closed loop (default), needs "
+                        "--page-calibration; "
+                        "line = 1D Amfitrack closed loop; "
                         "time = stream one column every --period seconds")
     g.add_argument("--no-track", dest="track", action="store_false",
                    help="Disable tracking (forces time mode)")
@@ -174,11 +175,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--min-move", type=float, default=0.05,
                    help="Deadband in mm; below this the head counts as stopped "
                         "(default 0.05)")
-    g.add_argument("--poll-hz", type=float, default=200.0,
+    g.add_argument("--poll-hz", type=float, default=500.0,
                    help="Position polling rate. A column crossing can only be "
                         "noticed once per poll, so this bounds how precisely a "
-                        "column is placed: at 200 Hz and 20 mm/s that is 0.1 mm "
-                        "= half a column (default 200)")
+                        "column is placed: at 500 Hz and 20 mm/s that is 0.04 mm "
+                        "= a fifth of a column (default 500)")
     g.add_argument("--timeout", type=float, default=30.0,
                    help="Abort a position pass after this many seconds (default 30)")
     g.add_argument("--vendor-id", type=_auto_int, default=0x0C17,

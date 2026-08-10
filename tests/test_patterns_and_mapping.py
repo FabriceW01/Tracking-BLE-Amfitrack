@@ -155,9 +155,12 @@ def test_cli_requires_nozzle_order_with_block_size():
 
 
 def test_cli_accepts_calibrate_and_pattern():
-    args = cli.parse_args(["--calibrate", "--dry-run", "--pattern-length-mm", "10"])
+    # --mode line: this test is about --calibrate/--pattern acceptance, not
+    # mode selection, and neither call supplies a --page-calibration.
+    args = cli.parse_args(["--calibrate", "--dry-run", "--mode", "line",
+                           "--pattern-length-mm", "10"])
     assert args.calibrate and args.text is None
-    args = cli.parse_args(["--pattern", "solid", "--dry-run"])
+    args = cli.parse_args(["--pattern", "solid", "--dry-run", "--mode", "line"])
     assert args.pattern == "solid"
 
 
@@ -166,6 +169,42 @@ def test_cli_page_calibration_flag_defaults_to_none_and_parses():
     assert args.page_calibration is None
     args = cli.parse_args(["--pos", "--simulate", "--page-calibration", "cal.json"])
     assert args.page_calibration == "cal.json"
+
+
+def test_cli_mode_defaults_to_page():
+    # Hardware testing has moved to page/freehand as the primary workflow;
+    # --mode omitted must now resolve to "page" (used to be "line").
+    args = cli.parse_args(["Hi", "--dry-run", "--page-calibration", "cal.json"])
+    assert args.mode == "page"
+
+
+def test_cli_default_page_mode_requires_page_calibration():
+    # Same rule that already applied to explicit --mode page (see
+    # test_cli_rejects_nozzle_block_remap_in_page_mode's sibling checks
+    # elsewhere) now engages by default: omitting --mode with tracking on
+    # and no --page-calibration must still fail with a clear argparse error,
+    # not silently do the wrong thing.
+    try:
+        cli.parse_args(["Hi", "--dry-run"])
+        assert False, "expected SystemExit: default --mode page requires --page-calibration"
+    except SystemExit:
+        pass
+
+
+def test_cli_mode_line_still_opts_out_without_calibration():
+    # --mode line must still work with no calibration required, exactly as
+    # before this round's default change.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
+    assert args.mode == "line"
+
+
+def test_cli_poll_hz_defaults_to_500_and_round_trips():
+    # Hardware testing found 200 Hz too coarse for page/freehand precision;
+    # the default is now 500 Hz, and an explicit value must still round-trip.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
+    assert args.poll_hz == 500.0
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line", "--poll-hz", "200"])
+    assert args.poll_hz == 200.0
 
 
 def test_cli_rejects_nozzle_block_remap_in_page_mode():
@@ -184,8 +223,9 @@ def test_cli_rejects_nozzle_block_remap_in_page_mode():
 
 def test_cli_still_accepts_nozzle_block_remap_in_line_mode():
     # The guard above must not be over-broad: the same flags are fine in line
-    # mode (the default), where the remap is geometrically correct.
-    args = cli.parse_args(["Hi", "--nozzle-block-size", "5",
+    # mode (no longer the default -- --mode page is -- so requested
+    # explicitly), where the remap is geometrically correct.
+    args = cli.parse_args(["Hi", "--mode", "line", "--nozzle-block-size", "5",
                            "--nozzle-order", "2,3,4,1,5", "--dry-run"])
     assert args.nozzle_block_size == 5
     assert args.nozzle_order == "2,3,4,1,5"
@@ -249,7 +289,10 @@ def test_cli_pattern_height_mm_requires_page_mode():
     assert args.pattern_height_mm == 100.0
 
     try:
-        cli.parse_args(["--pattern", "checkerboard", "--dry-run",
+        # --mode line (explicit): must still be rejected specifically because
+        # --pattern-height-mm needs page mode -- not for the unrelated reason
+        # that page mode (now the default) would need --page-calibration too.
+        cli.parse_args(["--pattern", "checkerboard", "--dry-run", "--mode", "line",
                         "--pattern-height-mm", "100"])
         assert False, "expected SystemExit: --pattern-height-mm needs --mode page"
     except SystemExit:
@@ -261,7 +304,7 @@ def test_cli_pattern_square_height_mm_overrides_square_rows():
     # period, not just be accepted into the namespace and dropped.
     square_rows_equiv = 4
     square_height_mm = NOZZLE_PITCH_MM * square_rows_equiv
-    args = cli.parse_args(["--pattern", "checkerboard", "--dry-run",
+    args = cli.parse_args(["--pattern", "checkerboard", "--dry-run", "--mode", "line",
                            "--pattern-length-mm", "4", "--mm-per-column", "1.0",
                            "--pattern-square-mm", "2",
                            "--pattern-square-height-mm", str(square_height_mm)])
@@ -279,7 +322,9 @@ def test_cli_pattern_square_height_mm_overrides_square_rows():
 
 def test_cli_advance_axis_defaults_to_x():
     # Guards Change 1 against a silent regression back to "y".
-    args = cli.parse_args(["Hi", "--dry-run"])
+    # --mode line: advance_axis is a line-mode-only concept; this test isn't
+    # about mode selection and avoids needing --page-calibration.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.advance_axis == "x"
 
 

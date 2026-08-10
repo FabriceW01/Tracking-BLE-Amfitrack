@@ -66,7 +66,7 @@ class TrackingSettings:
         project the position onto it (robust against any rotation).
     """
     enabled: bool = True
-    mode: str = "line"              # "line" | "page" | "time"
+    mode: str = "page"              # "line" | "page" | "time"
 
     # --- axis mapping for a possibly-rotated sensor mount -------------------
     advance_axis: str = "x"         # "x" | "y" | "z" (which axis = travel dir.)
@@ -83,7 +83,7 @@ class TrackingSettings:
                                     # (0 = off); larger = smoother but more lag
     min_move_mm: float = 0.05       # deadband: below this, treat head as stopped
     timeout_s: float = 30.0         # give up a pass after this long with no end
-    poll_hz: float = 200.0          # position polling rate
+    poll_hz: float = 500.0          # position polling rate
 
     # --- USB dongle (amfiprot) --------------------------------------------
     vendor_id: int = 0x0C17          # Amfitech USB vendor id
