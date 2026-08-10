@@ -666,6 +666,22 @@ def test_simple_frame_pos_stream_reports_page_uv_without_a_calibration():
     assert "yaw_deg" in events[0], events[0]
 
 
+def test_pos_stream_accepts_a_pinned_simple_boresight():
+    # Smoke test for the --simple-boresight plumbing through monitor_position
+    # (SimulatedTracker never fakes orientation -- see the yaw_deg tests
+    # above -- so this can't observe a live rotated reading; the actual
+    # "reference pose reads as zero" math is pinned directly in
+    # test_calibration.py, and "pinned reference survives a real pass
+    # unmutated" in tests/test_freehand_pass.py). Must simply not crash and
+    # must still report the ordinary page_u/page_v/yaw_deg fields.
+    output = asyncio.run(_run_monitor_briefly(
+        settings=TrackingSettings(page_frame="simple"),
+        simple_boresight=[-0.5, -0.5, -0.51, 0.49]))
+    events = [e for e in _events(output) if e.get("event") == "position"]
+    assert events, output
+    assert "page_u" in events[0] and "yaw_deg" in events[0], events[0]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

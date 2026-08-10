@@ -588,11 +588,18 @@ class PrintController:
         if t.page_frame == "simple":
             raw_pos, start_quat = await self._wait_for_pose(tracker, loop)
             start_pos = pos_filter.update(raw_pos, loop.time())
-            # Reference pose FIRST: yaw is measured against the pose held at
-            # START, so a flat turn of the cart reads out as exactly that
-            # turn. Skipping this (assuming the sensor is mounted square with
-            # the tracker) corrupts yaw badly -- see capture_boresight.
-            mapper.capture_boresight(start_quat)
+            # Only auto-capture a reference pose if none was already pinned
+            # via --simple-boresight (self.page_calibration built by
+            # cli.build_page_calibration). Capturing unconditionally here
+            # would silently overwrite an operator-verified reference with
+            # whatever pose the cart happens to be in AT THIS PASS's start --
+            # which is exactly the failure blind first-sample auto-capture
+            # has in the field (BLE still settling, hand not yet still): a
+            # wrong pose becomes "0 deg" with no way to notice. See
+            # PageCalibration.simple_frame's docstring.
+            had_pinned_boresight = mapper.calibration.boresight_quat is not None
+            if not had_pinned_boresight:
+                mapper.capture_boresight(start_quat)
             # zero_at_nozzle, not set_origin: the origin has to land under the
             # NOZZLE BAR, not the sensor ~62mm away, or every sample reads
             # out of bounds and nothing prints -- see zero_at_nozzle.
@@ -602,14 +609,25 @@ class PrintController:
                       f"position (sensor at {start_pos[0]:.1f}, "
                       f"{start_pos[1]:.1f}, {start_pos[2]:.1f} mm); page axes "
                       f"= tracker x/y")
-                if start_quat is None:
+                if had_pinned_boresight:
+                    q = mapper.calibration.boresight_quat
+                    print(f"[simple] using pinned yaw reference from "
+                          f"--simple-boresight (qx={q[0]:+.4f} qy={q[1]:+.4f} "
+                          f"qz={q[2]:+.4f} qw={q[3]:+.4f}) -- NOT re-captured "
+                          f"at this START.")
+                elif start_quat is None:
                     print("[warn] no orientation from the tracker at START: "
                           "yaw reference not captured, printing with NO "
                           "rotation correction (cart must stay at the START "
                           "angle for the whole pass).")
                 else:
-                    print("[simple] yaw reference captured; the pose held now "
-                          "counts as 0 deg.")
+                    print(f"[simple] yaw reference auto-captured at START "
+                          f"(qx={start_quat[0]:+.4f} qy={start_quat[1]:+.4f} "
+                          f"qz={start_quat[2]:+.4f} qw={start_quat[3]:+.4f}); "
+                          f"the pose held now counts as 0 deg. If this wasn't "
+                          f"truly flat, capture-and-verify first with --pos, "
+                          f"then pin it with --simple-boresight instead of "
+                          f"relying on this auto-capture.")
 
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None

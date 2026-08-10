@@ -245,10 +245,25 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Which 2D frame --mode page prints into. calibrated "
                         "(default) = a traced --page-calibration with a captured "
                         "boresight, most accurate. simple = no calibration at "
-                        "all: the tracker's own x/y axes are the page axes, yaw "
-                        "is measured about the tracker's z axis, and the origin "
-                        "is zeroed wherever the cart is at START -- assumes the "
-                        "sheet lies square with the tracker")
+                        "all: the tracker's own x/y axes are the page axes, the "
+                        "origin is zeroed wherever the cart is at START, and yaw "
+                        "is measured relative to the pose held at START (or, "
+                        "better, --simple-boresight) -- assumes the sheet lies "
+                        "square with the tracker")
+    g.add_argument("--simple-boresight", nargs=4, type=float,
+                   metavar=("QX", "QY", "QZ", "QW"),
+                   help="Page mode with --page-frame simple only: pin the yaw "
+                        "reference pose instead of auto-capturing whatever "
+                        "orientation the cart happens to be in at START. "
+                        "Auto-capture can silently lock in a wrong pose (BLE "
+                        "still settling, hand not yet still), with no way to "
+                        "notice; capture the real value first with --pos "
+                        "--page-frame simple (printed live as 'quat=[...]'), "
+                        "confirm roll/pitch/yaw read ~0 while the cart is "
+                        "genuinely flat, then pass that exact quaternion here "
+                        "as four space-separated numbers (NOT comma-joined -- "
+                        "a single comma-joined value trips argparse's "
+                        "negative-number heuristic and is rejected)")
     g.add_argument("--page-calibration", metavar="PATH",
                    help="Load a page calibration JSON (see "
                         "printhead.calibration.PageCalibration). Required for "
@@ -328,6 +343,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--page-frame simple and --page-calibration are mutually "
                  "exclusive: simple takes the tracker's own x/y axes as the "
                  "page frame and ignores any traced calibration")
+    if args.simple_boresight and args.page_frame != "simple":
+        # nargs=4/type=float already guarantee exactly 4 numbers -- nothing
+        # left to validate here except that this only makes sense paired
+        # with --page-frame simple.
+        ap.error("--simple-boresight only applies to --page-frame simple "
+                 "(the calibrated frame's yaw reference comes from the traced "
+                 "calibration's own boresight_quat instead)")
     if (not _debug_mode(args) and args.track and args.mode != "page"
             and args.pattern_height_mm is not None):
         ap.error("--pattern-height-mm is only valid with --mode page: line/time "
@@ -424,12 +446,14 @@ def build_page_calibration(args: argparse.Namespace):
     was not given (only --mode page requires it -- see parse_args).
 
     ``--page-frame simple`` instead synthesises the calibration-free frame
-    (tracker x/y axes, identity boresight) rather than reading any file --
-    see ``PageCalibration.simple_frame``. parse_args() has already rejected
-    asking for both."""
+    (tracker x/y axes, no boresight unless --simple-boresight pinned one --
+    see ``PageCalibration.simple_frame``) rather than reading any file.
+    parse_args() has already rejected asking for both --page-frame simple
+    and --page-calibration together; --simple-boresight's own shape
+    (exactly 4 numbers) is validated by argparse itself (nargs=4, type=float)."""
     from .calibration import PageCalibration
     if args.page_frame == "simple":
-        return PageCalibration.simple_frame()
+        return PageCalibration.simple_frame(boresight_quat=args.simple_boresight)
     if not args.page_calibration:
         return None
     try:
@@ -478,6 +502,8 @@ def _run_debug(args: argparse.Namespace) -> None:
             pos_kwargs["sensor_offset_col_mm"] = args.sensor_offset_col_mm
         if args.boresight_deg is not None:
             pos_kwargs["boresight_deg"] = args.boresight_deg
+        if args.simple_boresight:
+            pos_kwargs["simple_boresight"] = args.simple_boresight
         asyncio.run(diagnostics.monitor_position(
             build_tracking(args), args.simulate, ndjson=args.pos_json,
             page_calibration_path=args.page_calibration, **pos_kwargs))

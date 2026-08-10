@@ -41,7 +41,8 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                            page_calibration_path: Optional[str] = None,
                            sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
                            sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
-                           boresight_deg: float = 0.0) -> None:
+                           boresight_deg: float = 0.0,
+                           simple_boresight: Optional[np.ndarray] = None) -> None:
     """Continuously print the sensor position (x/y/z), the travel-axis value and
     the resulting column, until Ctrl+C. Doubles as an axis / mm-per-column aid.
 
@@ -54,6 +55,15 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
     calibration be sanity-checked (known hand motion -> plausible u/v) before
     anything is printed with it. A bad/missing path aborts the same way a
     failed tracker connection does, since the caller asked for it explicitly.
+
+    ``simple_boresight``, with ``tracking.page_frame == "simple"``, pins the
+    yaw reference instead of auto-capturing whichever pose the first live
+    sample happens to be in (see ``PageCalibration.simple_frame``). This is
+    what makes this diagnostic a two-step capture-and-verify workflow: run it
+    once with no ``simple_boresight`` to read off the raw ``quat=[...]``
+    while the cart is held genuinely flat, then run it again (or print) with
+    that exact quaternion pinned here to confirm ``yaw_deg``/``roll_deg``/
+    ``pitch_deg`` now read ~0 for that same pose before trusting it.
 
     ``sensor_offset_row_mm``/``sensor_offset_col_mm``/``boresight_deg`` are
     forwarded into the same :class:`~printhead.tracking.PageMapper` a real
@@ -85,10 +95,11 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
         # tracker-frame u/v/yaw, and re-zeroing to wherever --pos happened to
         # start would only obscure that. page_u/page_v therefore read as
         # absolute tracker x/y (plus the sensor->nozzle offset).
-        page_mapper = PageMapper(PageCalibration.simple_frame(),
-                                 sensor_offset_row_mm=sensor_offset_row_mm,
-                                 sensor_offset_col_mm=sensor_offset_col_mm,
-                                 boresight_offset_rad=math.radians(boresight_deg))
+        page_mapper = PageMapper(
+            PageCalibration.simple_frame(boresight_quat=simple_boresight),
+            sensor_offset_row_mm=sensor_offset_row_mm,
+            sensor_offset_col_mm=sensor_offset_col_mm,
+            boresight_offset_rad=math.radians(boresight_deg))
     elif page_calibration_path is not None:
         try:
             page_mapper = PageMapper(PageCalibration.load(page_calibration_path),
@@ -132,12 +143,14 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                 # page_mapper.last_yaw_rad as a side effect (read below) --
                 # see controller._print_freehand_pass for the identical
                 # "compute once, reuse" pattern.
-                # Simple frame: adopt the first orientation sample as the yaw
-                # reference, mirroring what a real pass captures at START --
-                # so yaw_deg reads 0 for the pose the cart is in now and then
-                # shows the turn from it, which is the whole point of watching
-                # it live. Without a reference the reported angle would carry
-                # the sensor's (large, ~120 deg) mounting rotation instead.
+                # Simple frame with no pinned --simple-boresight: adopt the
+                # first orientation sample as the yaw reference, mirroring
+                # the auto-capture a real pass falls back to -- so yaw_deg
+                # reads 0 for the pose the cart is in now and then shows the
+                # turn from it. Guarded on `is None`, so a boresight already
+                # pinned via simple_boresight above is never overwritten --
+                # that pinned value is the whole point of the second
+                # verification run (see this function's docstring).
                 if (page_mapper is not None and quat is not None
                         and tracking.page_frame == "simple"
                         and page_mapper.calibration.boresight_quat is None):

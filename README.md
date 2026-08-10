@@ -144,6 +144,47 @@ Gierwinkel dreht den Sensor→Düsen-Versatz, die Identitäts-Variante hat also
 auch die Tinte falsch platziert. Festgehalten in
 `tests/test_calibration.py` / `tests/test_page_mapper.py`.
 
+**`--simple-boresight QX QY QZ QW`: Referenzpose anpinnen statt blind
+automatisch erfassen.** Die automatische Erfassung beim START (siehe oben)
+hat einen echten Schwachpunkt: Sie nimmt einfach die Pose, in der der Wagen
+in genau diesem Moment zufällig steht — BLE noch nicht eingeschwungen, Hand
+noch nicht ganz ruhig — und es gibt **keine Möglichkeit, das zu
+kontrollieren**, außer den ganzen Durchlauf neu zu starten und zu hoffen.
+Genau das ist auf der echten Anlage passiert: Eine tatsächlich flach und mit
+0° Gier gehaltene Pose (`quat=[-0.50 -0.50 -0.51 +0.49]`) wurde als
+`yaw=-71.23° roll=-70.29° pitch=-69.34°` gemeldet, weil die automatische
+Erfassung an einer anderen, ungeprüften Pose hängengeblieben war.
+
+Der robuste Weg: Referenzpose **erst separat erfassen und verifizieren**,
+dann **anpinnen** — genau der Capture-Workflow, den es für den kalibrierten
+Modus mit seinem Boresight-Button schon gibt.
+
+```bash
+python main.py --pos --page-frame simple
+```
+
+— Wagen wirklich flach mit 0° Gier hinlegen, den rohen `quat=[...]`-Wert aus
+der Konsole ablesen, dann exakt diesen Wert anpinnen (**vier
+leerzeichengetrennte Zahlen, NICHT kommagetrennt** — ein einzelner
+kommagetrennter Wert wie `-0.5,-0.5,-0.51,0.49` fällt durch argparses
+Erkennung negativer Zahlen und wird als unbekannte Option abgelehnt):
+
+```bash
+python main.py --pos --page-frame simple --simple-boresight -0.50 -0.50 -0.51 0.49
+```
+
+Jetzt in derselben Pose bleiben — Yaw/Roll/Nick müssen ~0° zeigen. Erst wenn
+das stimmt, denselben `--simple-boresight`-Wert in den echten Druck
+übernehmen; die automatische Erfassung beim START greift dann **nicht** mehr
+ein (ein gepinnter Wert wird nie überschrieben, siehe
+`tests/test_freehand_pass.py`s Regressionstest dazu).
+
+In der Web-UI übernimmt der Button **Capture yaw reference** (im Tracking-Tab,
+nur bei `page_frame = simple` sichtbar) genau diesen Schritt: er liest den
+zuletzt empfangenen Quaternion-Wert aus dem Live-Sensor-Panel oben, zeigt ihn
+an, und hängt ihn automatisch als `--simple-boresight` an sowohl den
+Live-`--pos`-Verifikationsbefehl als auch den eigentlichen Druckbefehl an.
+
 ⚠️ **Wichtig:** Beim ersten echten Hardware-Bring-up ist der Modus ohne
 Fehlermeldung leer durchgelaufen (`active=0` die ganze Zeit, Exit-Code 0,
 nichts auf dem Papier) — der Grund war genau der folgende Punkt: Das
@@ -458,6 +499,7 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | Option | Bedeutung |
 |---|---|
 | `--page-frame calibrated\|simple` | Welchen 2D-Rahmen `--mode page` benutzt (Default `calibrated`). `simple` braucht keine Kalibrierung: Seitenachsen = Tracker-x/y, Nullpunkt beim START-Druck auf der Düsenleiste, Gierwinkel relativ zur beim START gehaltenen Pose. Schließt `--page-calibration` aus. Siehe Abschnitt „Einfacher Modus" oben. |
+| `--simple-boresight QX QY QZ QW` | Nur mit `--page-frame simple`: pinnt die Gier-Referenzpose fest, statt sie beim START automatisch (und ungeprüft) zu erfassen. Vier leerzeichengetrennte Zahlen, nicht kommagetrennt. Siehe Abschnitt „Einfacher Modus" oben. |
 | `--origin button\|startpoint` | Was den Nullpunkt setzt (START-Taster oder Startpoint-Charakteristik) |
 | `--smooth-ms MS` | Tiefpass-Zeitkonstante (ms) gegen das verrauschte Amfitrack-Signal; `0` = aus, größer = glatter aber mehr Nachlauf (Default 12). Reduziert unregelmäßige Linien/Lücken. |
 | `--min-move MM` | Deadband; darunter gilt der Kopf als stehend (Default 0.05) |

@@ -110,7 +110,7 @@ class PageCalibration:
     angle_error_deg: float = 0.0
 
     @classmethod
-    def simple_frame(cls) -> "PageCalibration":
+    def simple_frame(cls, boresight_quat: Optional[np.ndarray] = None) -> "PageCalibration":
         """
         The calibration-free ("simple") page frame: the tracker's own axes
         taken as the page's, with no edge tracing at all.
@@ -120,42 +120,48 @@ class PageCalibration:
         which ``tracking.PageMapper.zero_at_nozzle`` zeroes at pass start --
         see there).
 
-        ``boresight_quat`` starts as **None** and is captured at pass start
-        from the cart's actual pose (``PageMapper.capture_boresight``). It is
-        deliberately NOT the identity quaternion, which was the first
-        (wrong) attempt: identity means "the reference pose is the world
-        frame itself", but the sensor is mounted rotated on the cart, so the
-        whole mounting rotation stays inside every reported angle. Measured
-        on the real rig (mounting pose 120.1 deg about [0.553, 0.589,
-        -0.590], i.e. body x -> world -z, body y -> world +x, body z ->
-        world -y), rotating the cart FLAT through 0..90 deg then reported:
+        ``boresight_quat`` defaults to **None**, auto-captured from whatever
+        pose the cart happens to be in at the first live sample of a pass or
+        ``--pos`` run (``PageMapper.capture_boresight``, gated on ``is
+        None`` by the caller so a pre-supplied one below is never
+        overwritten). It is deliberately NOT the identity quaternion, which
+        was the first (wrong) attempt: identity means "the reference pose is
+        the world frame itself", but the sensor is mounted rotated on the
+        cart (measured on the real rig: 120.1 deg about [0.553, 0.589,
+        -0.590]), so the whole mounting rotation stayed inside every
+        reported angle -- a flat 90 deg turn read as only ~70 deg of yaw
+        change, non-linearly, with roll/pitch swinging tens of degrees, and
+        since that yaw also drives the sensor->nozzle offset rotation it
+        placed ink wrongly too. Pinned by ``tests/test_calibration.py``.
 
-            flat turn   identity boresight        captured at START
-                        roll   pitch    yaw       roll  pitch   yaw
-              0 deg    66.41   70.71  -70.85      0.00   0.00    0.00
-             15 deg    55.12   76.69  -59.60      0.00   0.00   15.00
-             90 deg    -2.78   88.78   -1.08      0.00   0.00   90.00
-
-        -- i.e. with identity a 90 deg turn read as ~70 deg of yaw change,
-        non-linearly, with roll/pitch swinging tens of degrees; with a
-        captured reference it is exact and roll/pitch stay at zero. Since
-        that yaw also drives the sensor->nozzle offset rotation, the
-        identity version placed ink wrongly, not just displayed a wrong
-        number. Pinned by ``tests/test_calibration.py``.
+        Passing ``boresight_quat`` explicitly (from ``--simple-boresight``,
+        see ``cli.py``) exists because blind first-sample auto-capture is
+        itself unreliable in the field: whatever pose the cart happens to be
+        in at that exact instant (BLE still settling, hand not yet fully
+        still) silently becomes "0 deg", with no way to notice or fix it
+        short of restarting the whole pass and hoping. A supplied value lets
+        the operator capture once via ``--pos``, visually confirm roll/pitch/
+        yaw read ~0 while genuinely flat, and only then pin that exact
+        quaternion into the real print -- reusing the same "capture, look at
+        the number, decide it's good" workflow the traced calibration's own
+        boresight button already gives, rather than trusting an unattended
+        first sample.
 
         The trade-off versus a traced calibration is explicit: this assumes
         the sheet is laid out square with the tracker's x/y axes, and that
         the tracker's mm are true mm (``scale_col``/``scale_row`` stay 1.0,
         since there is no known sheet size to derive a correction from). In
-        exchange it needs no calibration step, so it cannot inherit a bad
-        one -- the reason it exists (measured yaw itself is accurate to
-        ~1 deg, see the README's "Einfacher Modus" section).
+        exchange it needs no edge-tracing step, so it cannot inherit a bad
+        edge trace -- the reason it exists (measured yaw itself is accurate
+        to ~1 deg once the reference pose is right, see the README's
+        "Einfacher Modus" section).
         """
         return cls(
             origin=np.zeros(3, dtype=float),
             e_col=np.array([1.0, 0.0, 0.0]),
             e_row=np.array([0.0, 1.0, 0.0]),
-            boresight_quat=None,
+            boresight_quat=(np.array(boresight_quat, dtype=float)
+                            if boresight_quat is not None else None),
         )
 
     def project(self, pos) -> "tuple[float, float, float]":
