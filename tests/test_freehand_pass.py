@@ -156,10 +156,12 @@ def test_freehand_pass_covers_the_page_and_stops_before_timeout():
 
 def test_simple_frame_pass_zeroes_at_the_nozzle_bar_and_prints():
     # REGRESSION: --page-frame simple's origin must land under the nozzle
-    # bar, not the sensor. Zeroing at the sensor leaves the bar ~54.9mm
-    # (SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM/2) along +v,
-    # every sample reads out of bounds, and the pass completes "successfully"
-    # having printed NOTHING -- which is exactly what the first simulated
+    # bar, not the sensor. Zeroing at the sensor leaves the bar
+    # abs(SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM/2) ~=
+    # 69.86mm off along v (magnitude only -- the sign/direction depends on
+    # the constant's current, hardware-measured sign), every sample reads
+    # out of bounds, and the pass completes "successfully" having printed
+    # NOTHING -- which is exactly what the first simulated
     # simple-frame pass did. Deliberately uses the REAL sensor offsets (not
     # the neutralised ones _controller() passes) because the bug only exists
     # when the offset is nonzero.
@@ -301,13 +303,22 @@ def test_simple_frame_pass_records_sensor_and_nozzle_paths_for_record():
 
     # ScriptedTracker never fakes orientation (quat always None -- same
     # contract as SimulatedTracker), so yaw stays 0 for the whole pass and
-    # every point differs only in v, by exactly SENSOR_TO_NOZZLE_BAR_CENTER_
-    # ROW_MM (sensor -> nozzle-bar-CENTRE is the full lever arm; sensor ->
-    # nozzle-0 alone would be a different, smaller distance -- see
-    # tracking.PageMapper's docstring / geometry.py).
+    # every point differs only in v, by SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM
+    # (sensor -> nozzle-bar-CENTRE is the full lever arm; sensor -> nozzle-0
+    # alone would be a different, smaller distance -- see tracking.
+    # PageMapper's docstring / geometry.py). Tolerance of 1: the recorded
+    # row_diff is the difference of two INDEPENDENTLY rounded pixel rows
+    # (sensor's own row, nozzle-centre's own row), not a single rounding of
+    # the raw mm difference -- when the sensor row lands within half a pixel
+    # of a rounding boundary (it does at this constant's current sign), the
+    # two can differ by 1 from round(constant / pitch) even though nothing
+    # is wrong; only a fixed offset that's flat-out MISSING or of the wrong
+    # sign should ever produce a difference this test would miss.
     row_diffs = [n[0] - s[0] for s, n in zip(sensor_path, nozzle_path)]
     expected_row_diff = round(SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM / NOZZLE_PITCH_MM)
-    assert all(d == expected_row_diff for d in row_diffs), (row_diffs[:5], expected_row_diff)
+    assert all(abs(d - expected_row_diff) <= 1 for d in row_diffs), (
+        row_diffs[:5], expected_row_diff)
+    assert len(set(row_diffs)) == 1, "row_diff must be CONSTANT across a zero-yaw pass"
     # u (column) must match between the two paths at zero yaw -- the offset
     # is purely along the row/v axis.
     assert all(s[1] == n[1] for s, n in zip(sensor_path, nozzle_path))

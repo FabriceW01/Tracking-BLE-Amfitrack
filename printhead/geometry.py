@@ -75,17 +75,22 @@ NOZZLE_PITCH_MM = NOZZLE_BAR_WIDTH_MM / (NUM_NOZZLES - 1)
 # Measured ("Die Mitte der Nozzle-Reihe ist 62,36 mm verschoben von der
 # Y-Koordinate des Amfitrack"): the CENTRE of the 152-nozzle bar sits 62.36 mm
 # from the sensor, along the row axis (the axis perpendicular to travel, i.e.
-# along the nozzle bar itself -- close to world -Y in the current mounting,
-# but that is mounting-dependent, not a property of this constant). Sign
-# convention: positive means the nozzle bar sits further in the +row
+# along the nozzle bar itself -- which world axis that corresponds to is
+# mounting-dependent, not a property of this constant, so not claimed here).
+# Sign convention: positive means the nozzle bar sits further in the +row
 # direction than the sensor. If a test print comes out offset in the wrong
 # direction, the fix is to NEGATE this value -- nothing else needs to change.
+#
+# NEGATED from the original +62.36 measurement: a real print on the rig
+# came out shifted the wrong way, confirming (per the sign-convention note
+# above) that the bar sits in the -row direction from the sensor on this
+# mounting, not +row.
 #
 # Deliberately named around the bar CENTRE (not nozzle 0) to make the
 # reference point unambiguous: tracking.PageMapper is the one place that
 # converts this centre-referenced measurement into the nozzle-0-referenced
 # offset CoverageEngine actually needs (see its docstring for that math).
-SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = 62.36
+SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = -62.36
 
 # Column-axis (travel direction) counterpart. Believed to be 0 -- no
 # measurement has shown otherwise -- but kept as a named, overridable
