@@ -139,6 +139,8 @@ class PrintController:
                  record: Optional[str] = None,
                  page_calibration: Optional[PageCalibration] = None,
                  dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
+                 spray_radius_mm: float = 0.0,
+                 spray_strength: float = 0.0,
                  ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S,
                  speed_warning_mm_s: float = DEFAULT_SPEED_WARNING_MM_S,
                  progress_json: bool = False,
@@ -156,6 +158,8 @@ class PrintController:
         self.record = record
         self.page_calibration = page_calibration
         self.dose_hold_s = dose_hold_s
+        self.spray_radius_mm = spray_radius_mm
+        self.spray_strength = spray_strength
         self.ble_write_ceiling = ble_write_ceiling
         self.speed_warning_mm_s = speed_warning_mm_s
         self.progress_json = progress_json
@@ -519,7 +523,10 @@ class PrintController:
                            sensor_offset_row_mm=self.sensor_offset_row_mm,
                            sensor_offset_col_mm=self.sensor_offset_col_mm,
                            boresight_offset_rad=math.radians(self.boresight_deg))
-        coverage = CoverageEngine(self._ink, t.mm_per_column, dose_hold_s=self.dose_hold_s)
+        coverage = CoverageEngine(self._ink, t.mm_per_column,
+                                  dose_hold_s=self.dose_hold_s,
+                                  spray_radius_mm=self.spray_radius_mm,
+                                  spray_strength=self.spray_strength)
         pos_filter = PositionFilter(t.smooth_ms / 1000.0)
         sender = PatternSender(ble)
         loop = asyncio.get_event_loop()

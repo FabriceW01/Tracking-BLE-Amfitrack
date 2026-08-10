@@ -248,6 +248,42 @@ def test_cli_page_frame_reaches_tracking_settings():
     assert cli.build_tracking(args).page_frame == "simple"
 
 
+def test_cli_spray_defaults_to_off():
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
+    assert args.spray_radius_mm is None and args.spray_strength is None
+    # None -> the controller keeps its own 0.0 defaults, i.e. spray disabled
+    ctrl = cli.build_controller(args)
+    assert ctrl.spray_radius_mm == 0.0 and ctrl.spray_strength == 0.0
+
+
+def test_cli_spray_values_reach_the_controller():
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                           "--spray-radius-mm", "0.15", "--spray-strength", "0.5"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.spray_radius_mm == 0.15 and ctrl.spray_strength == 0.5
+
+
+def test_cli_rejects_a_negative_spray_radius():
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                        "--spray-radius-mm", "-0.1"])
+        assert False, "expected SystemExit for a negative --spray-radius-mm"
+    except SystemExit:
+        pass
+
+
+def test_cli_rejects_a_spray_strength_outside_0_to_1():
+    # Above 1.0 one drop would mark whole neighbourhoods printed outright,
+    # which silently under-prints real gaps rather than erroring visibly.
+    for bad in ("1.5", "-0.2"):
+        try:
+            cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                            "--spray-strength", bad])
+            assert False, f"expected SystemExit for --spray-strength {bad}"
+        except SystemExit:
+            pass
+
+
 def test_cli_simple_boresight_defaults_to_none():
     args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
     assert args.simple_boresight is None

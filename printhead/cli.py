@@ -128,6 +128,29 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "consecutive samples cannot complete a dose and "
                         "coverage collapses -- PrintController warns at "
                         "runtime if this holds)")
+    g.add_argument("--spray-radius-mm", type=float, default=None,
+                   help="Page mode ink-spread model: physical radius (mm) "
+                        "around a completed pixel that also receives a "
+                        "partial dose, since a real drop wets more than its "
+                        "own grid cell. In MILLIMETRES, not pixels -- a cell "
+                        "is ~0.0993mm tall but --mm-per-column (0.2 default) "
+                        "wide, so the same pixel count would mean two "
+                        "different physical distances per axis. Default 0 "
+                        "(off, exactly the pre-spray behaviour); pair with "
+                        "--spray-strength, both must be > 0 to take effect. "
+                        "Reduces re-printing when a return pass lands a "
+                        "fraction of a mm off the outbound one")
+    g.add_argument("--spray-strength", type=float, default=None,
+                   help="Page mode ink-spread model: how much dose a "
+                        "neighbour just next to a completed pixel picks up, "
+                        "0.0..1.0, falling off linearly to 0 at "
+                        "--spray-radius-mm. 1.0 would mark a neighbour fully "
+                        "printed from one drop alone; a pixel counts as "
+                        "printed once its accumulated dose reaches 1.0, so "
+                        "e.g. 0.5 needs two neighbouring drops. Default 0 "
+                        "(off). Too high under-prints (real gaps left "
+                        "unfilled), so raise it gradually and check the "
+                        "printed sheet, not just --record")
     g.add_argument("--progress-json", action="store_true",
                    help="Page mode: emit one JSON progress event per sample "
                         "(current u/v/row/col + newly-covered cells) instead "
@@ -343,6 +366,16 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--page-frame simple and --page-calibration are mutually "
                  "exclusive: simple takes the tracker's own x/y axes as the "
                  "page frame and ignores any traced calibration")
+    if args.spray_radius_mm is not None and args.spray_radius_mm < 0.0:
+        ap.error("--spray-radius-mm cannot be negative (0 disables the "
+                 "ink-spread model)")
+    if args.spray_strength is not None and not 0.0 <= args.spray_strength <= 1.0:
+        # Above 1.0 a single drop would mark whole neighbourhoods printed
+        # outright, which stops the pass firing over real gaps -- a silent
+        # under-print rather than an obvious error, so reject it here.
+        ap.error("--spray-strength must be between 0.0 and 1.0 (a pixel counts "
+                 "as printed at an accumulated dose of 1.0; 0 disables the "
+                 "ink-spread model)")
     if args.simple_boresight and args.page_frame != "simple":
         # nargs=4/type=float already guarantee exactly 4 numbers -- nothing
         # left to validate here except that this only makes sense paired
@@ -470,6 +503,10 @@ def build_controller(args: argparse.Namespace) -> PrintController:
     kwargs = {}
     if args.dose_hold_s is not None:
         kwargs["dose_hold_s"] = args.dose_hold_s
+    if args.spray_radius_mm is not None:
+        kwargs["spray_radius_mm"] = args.spray_radius_mm
+    if args.spray_strength is not None:
+        kwargs["spray_strength"] = args.spray_strength
     if args.ble_write_ceiling is not None:
         kwargs["ble_write_ceiling"] = args.ble_write_ceiling
     if args.speed_warning_mm_s is not None:

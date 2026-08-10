@@ -369,6 +369,46 @@ PATTERN_STRIDE × 450 µs` (jetzt `PATTERN_STRIDE = 3`). Wird nur eine Seite ge�
 Tropfenzahl pro Pixel nicht mehr — die Firmware muss bei einer Änderung
 **neu geflasht** werden.
 
+### Tintenausbreitung: `--spray-radius-mm` / `--spray-strength`
+
+Ein echter Tropfen landet nicht exakt in *einer* Rasterzelle, er benetzt eine
+kleine Fläche drumherum. Ohne dieses Modell passiert Folgendes: Bei einer
+Rückfahrt sitzt der Wagen ein paar Zehntel-mm versetzt, die Düsen adressieren
+dadurch **andere Zeilen-Indizes**, diese gelten als „noch nicht gedruckt" — und
+es wird erneut über Papier gedruckt, auf dem längst Tinte ist.
+
+| Option | Bedeutung |
+|---|---|
+| `--spray-radius-mm MM` | Physischer Radius um ein fertiges Pixel, der eine Teildosis abbekommt. **In Millimetern, nicht in Pixeln** — eine Zelle ist ~0.0993 mm hoch, aber `--mm-per-column` (Default 0.2 mm) breit, ein runder Tropfen ist im Raster also ~2:1 elliptisch. Default `0` = aus. |
+| `--spray-strength F` | Dosis, die ein **direkt angrenzendes** Pixel abbekommt (0.0–1.0), linear abfallend bis 0 am Radius. Ein Pixel gilt ab Gesamtdosis 1.0 als gedruckt: bei `1.0` markiert ein einzelner Tropfen die Nachbarzelle sofort mit, bei `0.5` sind zwei Tropfen nötig. Default `0` = aus. |
+
+Beide müssen `> 0` sein, damit das Modell greift; sonst verhält sich die Engine
+exakt wie zuvor (Default-Verhalten unverändert).
+
+Gemessen an simulierten Mehrfach-Überfahrten mit 0,05 mm Versatz pro Durchgang
+(40 × 30 mm Vollfläche, `--dose-hold-s 0.0018`, 500 Hz):
+
+```
+Einstellung   | Düsen-Feuerungen | Deckung im überfahrenen Band
+aus (heute)   |           62.400 |                       100,0 %
+r=.15 s=0.5   |           62.400 |                       100,0 %
+r=.15 s=1.0   |           46.400 |                       100,0 %
+r=.25 s=1.0   |           46.400 |                       100,0 %
+r=.40 s=1.0   |           23.501 |                       100,0 %
+```
+
+Bei `strength 0.5` passiert nichts, weil eine einzelne Nachbar-Teildosis von 0,5
+allein nie die 1,0 erreicht und die Leiste im nächsten Durchgang ohnehin selbst
+darüberfährt. Erst ab `strength 1.0` fällt das Nachdrucken messbar
+(−25 % Feuerungen gesamt, −33 % in den Wiederholungs-Durchgängen).
+
+⚠️ **Die Deckungszahl kann das nicht validieren:** Sie bleibt per Konstruktion
+100 %, weil das Modell die Nachbarpixel ja selbst als gedruckt markiert. Ob real
+Lücken bleiben, sagt **nur das Papier**. Deshalb schrittweise erhöhen und jedes
+Mal den echten Ausdruck prüfen — ein zu großer Radius unterdruckt still, statt
+sichtbar zu scheitern. Startpunkt: `--spray-radius-mm 0.15 --spray-strength 1.0`
+(entspricht ±1 Zeile bei Standardgeometrie).
+
 **Geschwindigkeitswarnung in `--mode page` (`--speed-warning-mm-s`):**
 Während des Freihand-Durchlaufs schreibt der Client zusätzlich zur
 Nozzle-Charakteristik eine neue BLE-Charakteristik (`SPEED_WARN_UUID =

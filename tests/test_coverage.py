@@ -99,6 +99,123 @@ def test_short_dwell_above_49mms_stays_unprinted_with_the_new_default():
     assert not eng.printed[0, 0]
 
 
+# ======================================================= ink spread ("spray")
+def _spray_engine(radius_mm, strength, mm_per_column=0.2, size=(41, 41)):
+    return CoverageEngine(np.ones(size, dtype=bool), mm_per_column=mm_per_column,
+                          dose_hold_s=DOSE_HOLD_S, spray_radius_mm=radius_mm,
+                          spray_strength=strength)
+
+
+def test_spray_is_off_by_default():
+    # The whole feature must be opt-in: with no spray arguments the kernel is
+    # empty and a deposit touches exactly one pixel, i.e. bit-identical to the
+    # pre-spray engine.
+    eng = CoverageEngine(np.ones((21, 21), dtype=bool), mm_per_column=0.2,
+                         dose_hold_s=DOSE_HOLD_S)
+    assert eng._spray_kernel == []
+    eng._deposit(10, 10)
+    assert eng.printed[10, 10]
+    assert eng.printed.sum() == 1, "no spray configured must touch exactly one pixel"
+
+
+def test_spray_needs_both_radius_and_strength_to_engage():
+    assert _spray_engine(0.2, 0.0)._spray_kernel == []      # no strength
+    assert _spray_engine(0.0, 1.0)._spray_kernel == []      # no radius
+    assert _spray_engine(0.2, 1.0)._spray_kernel != []
+
+
+def test_spray_kernel_gives_the_nearest_neighbour_exactly_the_strength():
+    # The normalisation that makes the parameter mean something (see
+    # _build_spray_kernel): without it the nearest neighbour sits ~half a
+    # radius out and could never exceed ~0.5*strength, so strength=1.0 could
+    # not complete a pixel and the feature had NO measurable effect.
+    for strength in (0.25, 0.5, 1.0):
+        kernel = _spray_engine(0.2, strength)._spray_kernel
+        assert abs(max(w for _, _, w in kernel) - strength) < 1e-9, strength
+
+
+def test_spray_radius_is_physical_so_the_kernel_is_anisotropic():
+    # A cell is NOZZLE_PITCH_MM (~0.0993mm) tall but mm_per_column (0.2mm)
+    # wide, so a round drop must reach further in ROWS than in COLUMNS. A
+    # pixel-count radius would silently mean two different real distances.
+    kernel = _spray_engine(0.2, 1.0, mm_per_column=0.2)._spray_kernel
+    max_dr = max(abs(dr) for dr, _, _ in kernel)
+    max_dc = max(abs(dc) for _, dc, _ in kernel)
+    assert max_dr > max_dc, (max_dr, max_dc)
+    assert abs(max_dr - round(0.2 / NOZZLE_PITCH_MM)) <= 1
+
+    # Square-ish cells (0.1mm/col ~= the 0.0993mm row pitch) must instead
+    # give a near-symmetric kernel -- proving it tracks physical mm, not
+    # an axis-specific fudge.
+    square = _spray_engine(0.2, 1.0, mm_per_column=0.1)._spray_kernel
+    assert abs(max(abs(dr) for dr, _, _ in square)
+               - max(abs(dc) for _, dc, _ in square)) <= 1
+
+
+def test_spray_at_full_strength_marks_the_adjacent_pixel_printed():
+    # This is what actually stops a return pass, drifted one row over, from
+    # re-firing paper that already has ink on it.
+    eng = _spray_engine(0.2, 1.0)
+    eng._deposit(20, 20)
+    assert eng.printed[20, 20]
+    assert eng.printed[19, 20] and eng.printed[21, 20], (
+        "at strength 1.0 an immediately adjacent pixel must count as printed")
+
+
+def test_spray_at_half_strength_needs_two_drops():
+    # Both drops must be IMMEDIATELY adjacent to the pixel under test: at
+    # radius 0.2mm a two-row gap is already ~0.199mm, i.e. right at the edge
+    # of the kernel where the linear falloff has taken the weight to ~0.007.
+    eng = _spray_engine(0.2, 0.5)
+    eng._deposit(19, 20)
+    assert not eng.printed[20, 20], "one drop at 0.5 must not complete a neighbour"
+    assert abs(eng.dose[20, 20] - 0.5) < 1e-6, eng.dose[20, 20]
+    eng._deposit(21, 20)                       # second drop, other side
+    assert eng.printed[20, 20], "two half-strength drops must complete it"
+
+
+def test_spray_never_lowers_an_already_printed_pixel_or_leaves_the_page():
+    # Deposit hard against a corner: must not raise, must not wrap around to
+    # the far edge, and must leave an already-printed pixel printed.
+    eng = _spray_engine(0.3, 1.0)
+    eng._deposit(0, 0)
+    assert eng.printed[0, 0]
+    assert not eng.printed[-1, -1], "spray must not wrap to the opposite edge"
+    eng._deposit(1, 0)
+    assert eng.printed[0, 0], "an already-printed pixel must stay printed"
+
+
+def test_spray_dose_never_exceeds_one():
+    eng = _spray_engine(0.3, 1.0)
+    for r in range(8, 14):
+        eng._deposit(r, 20)
+    assert eng.dose.max() <= 1.0 + 1e-6, eng.dose.max()
+
+
+def test_spray_can_only_ever_add_coverage_never_remove_it():
+    # Correctness property under identical input: everything the plain engine
+    # marks must also be marked with spray on (spray only ever ADDS dose).
+    # Driven off a fixed sample grid, not wall-clock, so it is deterministic
+    # -- a timing-driven comparison is far too noisy to show this (measured:
+    # run-to-run spread larger than the effect itself).
+    ink = np.ones((60, 40), dtype=bool)
+    samples = [(u, 2.0 + 0.02 * i, 0.001 * i)
+               for i, u in enumerate(np.linspace(0.0, 6.0, 400))]
+
+    def run(radius, strength):
+        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018,
+                             spray_radius_mm=radius, spray_strength=strength)
+        for u, v, t in samples:
+            eng.step(u_mm=u, v_mm=v, t=t)
+        return eng.printed.copy()
+
+    plain = run(0.0, 0.0)
+    sprayed = run(0.15, 1.0)
+    assert plain.any(), "test is vacuous if the plain run printed nothing"
+    assert np.all(sprayed | ~plain), "spray must never un-print a pixel"
+    assert sprayed.sum() >= plain.sum()
+
+
 # ============================================================== basic dosing
 def test_single_pass_completes_after_dose_hold_elapses():
     ink = np.ones((10, 5), dtype=bool)
