@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from typing import Optional
 
 import numpy as np
@@ -141,7 +142,8 @@ class PrintController:
                  speed_warning_mm_s: float = DEFAULT_SPEED_WARNING_MM_S,
                  progress_json: bool = False,
                  sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
-                 sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM):
+                 sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
+                 boresight_deg: float = 0.0):
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -158,6 +160,10 @@ class PrintController:
         self.progress_json = progress_json
         self.sensor_offset_row_mm = sensor_offset_row_mm
         self.sensor_offset_col_mm = sensor_offset_col_mm
+        # Additive fine-tune (degrees) on top of the yaw computed from the
+        # captured boresight -- see PageMapper.boresight_offset_rad / CLI's
+        # --boresight-deg. 0.0 = trust the captured boresight exactly.
+        self.boresight_deg = boresight_deg
 
         # Rendered once up front, unless the caller already built the ink
         # (calibration ruler / test patterns bypass text rendering entirely).
@@ -491,7 +497,8 @@ class PrintController:
         pj = self.progress_json
         mapper = PageMapper(self.page_calibration,
                            sensor_offset_row_mm=self.sensor_offset_row_mm,
-                           sensor_offset_col_mm=self.sensor_offset_col_mm)
+                           sensor_offset_col_mm=self.sensor_offset_col_mm,
+                           boresight_offset_rad=math.radians(self.boresight_deg))
         coverage = CoverageEngine(self._ink, t.mm_per_column, dose_hold_s=self.dose_hold_s)
         pos_filter = PositionFilter(t.smooth_ms / 1000.0)
         sender = PatternSender(ble)
@@ -536,6 +543,22 @@ class PrintController:
                   f"column, and coverage will be very low. Use a shorter "
                   f"--dose-hold-s or a higher --poll-hz.")
 
+        # No boresight_quat on this calibration (every calibration saved
+        # before this feature existed): PageMapper.project() therefore never
+        # rotates the sensor->nozzle offset and CoverageEngine.step() is
+        # always called with yaw_rad=0.0 below -- i.e. exactly today's
+        # behaviour, silently. Loud rather than silent on purpose (see
+        # tracking.PageMapper's docstring / README): re-calibrating and
+        # capturing a boresight is the fix, not something this pass can
+        # guess its way around (e.g. from the cart's pose at pass start).
+        if not pj and self.page_calibration.boresight_quat is None:
+            print("[warn] page calibration has no boresight (captured "
+                  "before cart-rotation correction existed) -- printing "
+                  "with NO rotation correction, same as before. Re-run page "
+                  "calibration and capture a boresight (hold the cart flat "
+                  "with the nozzle bar aligned along the traced row edge) "
+                  "to enable it.")
+
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None
         prev_printed = coverage.printed.copy() if pj else None
@@ -562,7 +585,14 @@ class PrintController:
                 pos, quat = tracker.read_pose()
                 if pos is not None:
                     pos = pos_filter.update(pos, now)   # low-pass the noisy signal
-                    u_mm, v_mm, _z_mm = mapper.project(pos)
+                    # project() computes (and caches on mapper.last_yaw_rad)
+                    # this sample's yaw as a side effect -- read it back
+                    # below rather than calling rotation.yaw_about_normal a
+                    # second time, so it's computed exactly once per sample
+                    # and shared between the position projection and
+                    # CoverageEngine.step()'s per-nozzle placement.
+                    u_mm, v_mm, _z_mm = mapper.project(pos, quat)
+                    yaw_rad = mapper.last_yaw_rad
 
                     samples += 1
                     u_min = u_mm if u_min is None else min(u_min, u_mm)
@@ -589,7 +619,7 @@ class PrintController:
                             speed_warn_state = new_warn
                             await ble.set_speed_warning(speed_warn_state)
 
-                    pattern, changed = coverage.step(u_mm, v_mm, now)
+                    pattern, changed = coverage.step(u_mm, v_mm, now, yaw_rad=yaw_rad)
                     if coverage.last_in_bounds:
                         in_bounds_samples += 1
                     if changed:

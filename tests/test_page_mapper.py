@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -30,6 +31,17 @@ from printhead.geometry import (                              # noqa: E402
     SENSOR_TO_NOZZLE_COL_MM,
 )
 from printhead.tracking import PageMapper                    # noqa: E402
+
+IDENTITY_QUAT = (0.0, 0.0, 0.0, 1.0)
+
+
+def _quat_about_z(deg: float):
+    """Same helper as tests/test_rotation.py: a quaternion for a rotation of
+    ``deg`` about +Z, which coincides with the page normal for the
+    axis-aligned e_col=(1,0,0)/e_row=(0,1,0) calibrations used throughout
+    this file."""
+    half = math.radians(deg) / 2.0
+    return (0.0, 0.0, math.sin(half), math.cos(half))
 
 
 # ================================================================= PageMapper
@@ -175,6 +187,136 @@ def test_page_mapper_end_to_end_known_world_position():
     assert abs(z - expected_z) < 1e-9
 
 
+# ==================================================== yaw / rotation correction
+def _cal_with_boresight(boresight_quat=IDENTITY_QUAT):
+    return PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                           e_row=np.array([0.0, 1.0, 0.0]),
+                           boresight_quat=np.array(boresight_quat, dtype=float))
+
+
+def test_page_mapper_without_boresight_ignores_quat_entirely():
+    # Absent boresight_quat -> current (pre-rotation-correction) behaviour,
+    # identical whether or not a live orientation happens to be available --
+    # the "no invisible failure" design: a print must never start
+    # rotation-correcting just because a quat happened to arrive, and must
+    # never depend on whatever orientation the cart had at some arbitrary
+    # sample. This is the situation EVERY calibration saved before this
+    # feature existed is in.
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]))
+    assert cal.boresight_quat is None
+    pos = np.array([3.0, 4.0, 0.0])
+    mapper = PageMapper(cal, sensor_offset_row_mm=62.36, sensor_offset_col_mm=0.0)
+
+    no_quat = mapper.project(pos, quat=None)
+    with_quat = mapper.project(pos, quat=_quat_about_z(90.0))
+    assert with_quat == no_quat
+    assert mapper.last_yaw_rad == 0.0
+
+
+def test_page_mapper_90deg_yaw_moves_a_pure_row_offset_entirely_onto_u():
+    # Hand-checkable pin of the sign convention against
+    # rotation.yaw_about_normal: a pure row (v-axis) sensor->nozzle offset,
+    # rotated 90 degrees, must land ENTIRELY on the u axis with nothing left
+    # on v.
+    cal = _cal_with_boresight()
+    row_offset_mm = 10.0
+    # PageMapper's constructor always subtracts NOZZLE_BAR_WIDTH_MM/2 from
+    # the given sensor_offset_row_mm (bar-centre -> nozzle-0 conversion, see
+    # its docstring) -- add it back so the NET row offset is exactly 10.0mm,
+    # col offset exactly 0.0mm, i.e. a "pure row offset" in the sense this
+    # test needs.
+    mapper = PageMapper(cal, sensor_offset_row_mm=row_offset_mm + NOZZLE_BAR_WIDTH_MM / 2.0,
+                        sensor_offset_col_mm=0.0)
+    pos = np.zeros(3)
+    u_raw, v_raw, _ = cal.project(pos)
+
+    quat_90 = _quat_about_z(90.0)
+    u, v, _ = mapper.project(pos, quat=quat_90)
+
+    assert abs(mapper.last_yaw_rad - math.pi / 2.0) < 1e-9
+    # u += col*cos(90) - row*sin(90) = 0 - row_offset_mm = -row_offset_mm
+    assert abs((u - u_raw) - (-row_offset_mm)) < 1e-9
+    # v += col*sin(90) + row*cos(90) = 0 + 0 = 0 -- nothing left on v
+    assert abs(v - v_raw) < 1e-9
+
+
+def test_page_mapper_quat_none_reuses_the_last_known_yaw():
+    # An intermittent orientation dropout (this tick's packet carried no
+    # quaternion) must not snap the correction back to 0 -- that would make
+    # the correction flicker on/off sample to sample for no physical reason.
+    cal = _cal_with_boresight()
+    mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0 + 10.0,
+                        sensor_offset_col_mm=0.0)
+    pos = np.zeros(3)
+
+    mapper.project(pos, quat=_quat_about_z(90.0))
+    assert abs(mapper.last_yaw_rad - math.pi / 2.0) < 1e-9
+
+    dropout_u, dropout_v, _ = mapper.project(pos, quat=None)
+    held_u, held_v, _ = mapper.project(pos, quat=_quat_about_z(90.0))
+    assert dropout_u == held_u and dropout_v == held_v
+    assert abs(mapper.last_yaw_rad - math.pi / 2.0) < 1e-9   # unchanged, not reset to 0
+
+
+def test_page_mapper_zero_yaw_is_bit_identical_to_no_rotation():
+    # A boresight IS present, but the cart is exactly at the boresight pose
+    # (quat == boresight_quat) -> yaw is exactly 0.0, and the result must be
+    # bit-identical to the pre-rotation formula (not just "very close").
+    cal = _cal_with_boresight()
+    mapper = PageMapper(cal, sensor_offset_row_mm=70.0, sensor_offset_col_mm=-3.5)
+    pos = np.array([11.0, 7.0, 3.0])
+    u, v, z = mapper.project(pos, quat=IDENTITY_QUAT)
+    u_expected, v_expected, z_expected = cal.project(pos)
+    u_expected += -3.5
+    v_expected += 70.0 - NOZZLE_BAR_WIDTH_MM / 2.0
+    assert u == u_expected and v == v_expected and z == z_expected
+
+
+def test_page_mapper_boresight_offset_is_additive_on_top_of_the_captured_boresight():
+    # --boresight-deg: cart genuinely still at the boresight pose (raw yaw
+    # 0), but a +20 deg fine-tune must appear directly in last_yaw_rad.
+    cal = _cal_with_boresight()
+    mapper = PageMapper(cal, boresight_offset_rad=math.radians(20.0))
+    mapper.project(np.zeros(3), quat=IDENTITY_QUAT)
+    assert abs(math.degrees(mapper.last_yaw_rad) - 20.0) < 1e-9
+
+
+def test_page_mapper_boresight_offset_has_no_effect_without_a_boresight():
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]))          # no boresight
+    mapper = PageMapper(cal, boresight_offset_rad=math.radians(20.0))
+    mapper.project(np.zeros(3), quat=IDENTITY_QUAT)
+    assert mapper.last_yaw_rad == 0.0
+
+
+# =============================================== mutation check (see PR body)
+def test_page_mapper_MUTATION_check_dropping_the_offset_rotation_breaks_the_90deg_case():
+    # Inlines the mutation described in the PR: if project() applied the
+    # sensor offset WITHOUT rotating it by yaw (i.e. always used yaw=0 for
+    # the offset math, the pre-fix behaviour), the 90-degree pure-row-offset
+    # case above would keep the shift entirely on v instead of moving it to
+    # u. This function reproduces exactly that (mutated) formula inline
+    # rather than editing tracking.py, so the regression stays covered by
+    # the test suite.
+    cal = _cal_with_boresight()
+    row_offset_mm = 10.0
+    u_raw, v_raw, _ = cal.project(np.zeros(3))
+
+    # Mutated project(): offset added as a constant, ignoring last_yaw_rad.
+    mutated_u = u_raw + 0.0
+    mutated_v = v_raw + row_offset_mm
+
+    mapper = PageMapper(cal, sensor_offset_row_mm=row_offset_mm + NOZZLE_BAR_WIDTH_MM / 2.0,
+                        sensor_offset_col_mm=0.0)
+    correct_u, correct_v, _ = mapper.project(np.zeros(3), quat=_quat_about_z(90.0))
+
+    assert (mutated_u, mutated_v) != (correct_u, correct_v), (
+        "the mutated (no-rotation) formula must disagree with the real, "
+        "rotation-aware one at 90 degrees -- if this ever matches, the "
+        "90-degree test above has stopped actually exercising the rotation")
+
+
 # ===================================================== --pos / monitor_position
 async def _run_monitor_briefly(**kwargs):
     """Run monitor_position(simulate=True, ndjson=True, ...) for a short while,
@@ -256,6 +398,35 @@ def test_monitor_position_omits_page_uvz_without_calibration():
     positions = [e for e in _events(output) if e.get("event") == "position"]
     assert positions, output
     assert "page_u" not in positions[-1]
+
+
+def test_monitor_position_reports_yaw_deg_alongside_page_uvz():
+    # SimulatedTracker never fakes orientation (quat always None -- see
+    # SimulatedTracker.read_pose), so the mapper never gets a live sample to
+    # rotate from and yaw_deg stays at its 0.0 (assume-boresight-pose)
+    # default -- this pins the field's PRESENCE and default value, not a
+    # live rotation (that's PageMapper's own job, pinned directly in
+    # test_page_mapper_90deg_yaw_moves_a_pure_row_offset_entirely_onto_u).
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]),
+                          boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]))
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "cal.json")
+        cal.save(path)
+        output = asyncio.run(_run_monitor_briefly(page_calibration_path=path))
+
+    positions = [e for e in _events(output) if e.get("event") == "position"]
+    assert positions, output
+    last = positions[-1]
+    assert "yaw_deg" in last
+    assert abs(last["yaw_deg"]) < 1e-6
+
+
+def test_monitor_position_omits_yaw_deg_without_calibration():
+    output = asyncio.run(_run_monitor_briefly())
+    positions = [e for e in _events(output) if e.get("event") == "position"]
+    assert positions, output
+    assert "yaw_deg" not in positions[-1]
 
 
 def test_monitor_position_reports_an_error_for_a_bad_calibration_path():

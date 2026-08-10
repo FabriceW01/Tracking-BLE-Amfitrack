@@ -164,6 +164,7 @@ def calibrate_page(col_samples: np.ndarray, row_samples: np.ndarray,
                     sheet_width_mm: Optional[float] = None,
                     sheet_height_mm: Optional[float] = None,
                     max_angle_error_deg: float = MAX_ANGLE_ERROR_DEG,
+                    boresight_quat: Optional[np.ndarray] = None,
                     ) -> PageCalibration:
     """
     Fit a ``PageCalibration`` from two traced page edges.
@@ -177,6 +178,15 @@ def calibrate_page(col_samples: np.ndarray, row_samples: np.ndarray,
     of trusting the tracker's raw mm -- this replaces manually typing in a
     reference distance, the way the 1D ``AdvanceMapper.auto_calibrate`` does
     via ``calib_distance_mm``.
+
+    ``boresight_quat``, if given, is stored as-is on the returned
+    ``PageCalibration`` (see its docstring / ``rotation.yaw_about_normal``):
+    the orientation quaternion captured with the cart held flat on the page,
+    nozzle bar aligned along the traced row edge -- the reference pose cart
+    yaw is measured relative to. Left ``None`` (the default) when the caller
+    has not captured one yet, which keeps rotation correction off entirely
+    for the resulting calibration (see ``tracking.PageMapper``) rather than
+    guessing a reference pose.
 
     Raises ``CalibrationAngleWarning`` (not an error) if the raw traces are
     more than ``max_angle_error_deg`` away from perpendicular; the returned
@@ -218,6 +228,9 @@ def calibrate_page(col_samples: np.ndarray, row_samples: np.ndarray,
             raise ValueError("Row trace has ~zero length; cannot derive scale.")
         scale_row = sheet_height_mm / measured
 
-    return PageCalibration(origin=origin, e_col=e_col, e_row=e_row,
-                            scale_col=scale_col, scale_row=scale_row,
-                            angle_error_deg=angle_error_deg)
+    return PageCalibration(
+        origin=origin, e_col=e_col, e_row=e_row,
+        scale_col=scale_col, scale_row=scale_row,
+        boresight_quat=(np.asarray(boresight_quat, dtype=float)
+                        if boresight_quat is not None else None),
+        angle_error_deg=angle_error_deg)

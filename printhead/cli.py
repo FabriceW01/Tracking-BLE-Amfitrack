@@ -264,6 +264,18 @@ def parse_args(argv=None) -> argparse.Namespace:
                         f"{SENSOR_TO_NOZZLE_COL_MM:g}, currently assumed 0 "
                         "(no measurement has shown otherwise); a wrong-signed "
                         "test print is fixed the same way -- negate this value")
+    g.add_argument("--boresight-deg", type=float, default=None,
+                   help="Page mode: additive fine-tuning offset in degrees, "
+                        "added to the yaw computed from the captured "
+                        "boresight quaternion (PageCalibration.boresight_quat, "
+                        "see --page-calibration / the Calibration tab's "
+                        "'Capture boresight' button) -- lets a print that "
+                        "comes out rotated be corrected without "
+                        "re-calibrating, same 'adjust rather than rebuild' "
+                        "idea as --sensor-offset-row-mm/-col-mm above. Has "
+                        "no effect on a calibration with no boresight "
+                        "captured (default: 0.0, i.e. trust the captured "
+                        "boresight exactly)")
     mx.add_argument("--list-nodes", action="store_true",
                     help="List the Amfitrack USB nodes (name/uuid/tx_id) and exit")
     mx.add_argument("--scan-ble", action="store_true",
@@ -414,6 +426,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         kwargs["sensor_offset_row_mm"] = args.sensor_offset_row_mm
     if args.sensor_offset_col_mm is not None:
         kwargs["sensor_offset_col_mm"] = args.sensor_offset_col_mm
+    if args.boresight_deg is not None:
+        kwargs["boresight_deg"] = args.boresight_deg
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,
@@ -434,6 +448,8 @@ def _run_debug(args: argparse.Namespace) -> None:
             pos_kwargs["sensor_offset_row_mm"] = args.sensor_offset_row_mm
         if args.sensor_offset_col_mm is not None:
             pos_kwargs["sensor_offset_col_mm"] = args.sensor_offset_col_mm
+        if args.boresight_deg is not None:
+            pos_kwargs["boresight_deg"] = args.boresight_deg
         asyncio.run(diagnostics.monitor_position(
             build_tracking(args), args.simulate, ndjson=args.pos_json,
             page_calibration_path=args.page_calibration, **pos_kwargs))

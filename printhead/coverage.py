@@ -20,17 +20,23 @@ this nozzle, or by a different one, if vertical movement changed which
 nozzle covers that row) catches it up. This gives full coverage under loops
 and revisits without ever accumulating dose across pixels.
 
-This assumes the nozzle bar stays perpendicular to the page's column axis
-(``e_col``) -- no cart-rotation correction yet. The orientation quaternion
-is confirmed available on real hardware (see ``tracking.AmfitrackTracker.
-_extract_pose``) and is the intended eventual source for that correction,
-but it needs a measured boresight offset first (``PageCalibration.
-boresight_quat`` exists as a field but nothing yet has a procedure to
-measure it) -- deliberately deferred rather than half-wired in here.
+Cart yaw about the page normal is corrected here on a per-nozzle basis: with
+the bar rotated by ``yaw_rad``, nozzle ``p`` is no longer at the same column
+as nozzle 0 (see ``step()``'s ``yaw_rad`` parameter). Measured from a real
+pass (``pass5.csv``), yaw spans 75.6 deg, which spreads the 15mm bar across
+~14.5mm (~72 columns at 0.2 mm/col) -- ignoring that put nozzles that were
+nowhere near a wanted pixel into the fired pattern, and vice versa. Only yaw
+is corrected: tilt (pitch/roll) is small by comparison in the same data
+(median 2.7 deg, max 7.8 deg) and is a deliberate, measured non-goal, not an
+oversight -- see ``rotation.yaw_about_normal``'s docstring for the yaw
+extraction itself and ``tracking.PageMapper`` for the matching lever-arm
+correction (the sensor->nozzle-bar offset is a cart-frame vector, not a
+page-frame constant, for the same reason).
 """
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -157,11 +163,42 @@ class CoverageEngine:
         """True once every wanted ink pixel has been printed."""
         return bool(np.all(self.printed[self.ink]))
 
-    def step(self, u_mm: float, v_mm: float, t: float) -> "Tuple[bytes, bool]":
+    def step(self, u_mm: float, v_mm: float, t: float,
+             yaw_rad: float = 0.0) -> "Tuple[bytes, bool]":
         """
         Advance the engine with one live page-plane sample (see
         ``tracking.PageMapper.project``) at time ``t`` (seconds; only
         differences between calls matter, so ``time.monotonic()`` is fine).
+
+        ``yaw_rad`` is the cart's current yaw about the page normal (see
+        ``rotation.yaw_about_normal``, computed once per sample by the
+        caller -- see ``controller._print_freehand_pass``), 0.0 by default
+        (no rotation correction, e.g. no boresight captured for this pass's
+        calibration). With the bar rotated by ``yaw_rad``, nozzle ``p`` sits
+        at its own ``(row, col)`` -- offset ``p * NOZZLE_PITCH_MM`` along the
+        bar's CURRENT direction from nozzle 0 -- rather than sharing nozzle
+        0's column the way a zero-yaw bar (perpendicular to travel) does.
+
+        Sign derivation (check this before ever touching it again): in the
+        right-handed page basis ``{e_col, e_row, n}`` with ``n = e_col x
+        e_row``, a rotation by ``+theta`` about ``n`` maps an in-plane vector
+        ``(a, b)`` to ``(a*cos(theta) - b*sin(theta), a*sin(theta) +
+        b*cos(theta))``. At ``yaw_rad == 0`` the bar points along ``+e_row``
+        -- that follows directly from the ``row = base_row + p`` convention
+        below (increasing nozzle index ``p`` -> increasing ``row`` ->
+        increasing ``v``), i.e. the bar's direction vector is ``(0, 1)`` in
+        ``(u, v)``. Rotating ``(0, 1)`` by ``+theta`` gives ``(-sin(theta),
+        cos(theta))``, so nozzle ``p`` at distance ``d = p * NOZZLE_PITCH_MM``
+        along the bar sits at ``u_p = u_mm - d*sin(yaw_rad)``, ``v_p = v_mm +
+        d*cos(yaw_rad)`` -- MINUS on the u term. This must match
+        ``tracking.PageMapper``'s offset rotation (``du = col_offset*cos(yaw)
+        - row_offset*sin(yaw)``, same minus sign on the sin term for a
+        row-offset vector): both describe body-fixed vectors on the same
+        cart, so both must rotate the same way, or a rotating pass has the
+        bar-tilt correction here pulling one way while the lever-arm
+        correction in PageMapper pulls the other -- see
+        ``tests/test_coverage.py``'s cross-consistency test against
+        PageMapper, which exists specifically to catch that.
 
         Returns ``(pattern, changed)``: ``pattern`` is the current 19-byte /
         152-bit nozzle frame (same format as ``rendering.frames_from_ink``),
@@ -173,13 +210,38 @@ class CoverageEngine:
         docstring) -- kept as an attribute rather than a third return value
         so this signature stays untouched for existing callers/tests.
         """
-        col = int(round(u_mm / self.mm_per_column))
-        base_row = int(round(v_mm / NOZZLE_PITCH_MM))
+        # yaw_rad == 0.0 gets its own exact-integer path: col/row for every
+        # nozzle must be BIT-IDENTICAL to the pre-rotation formula (a single
+        # shared `col`, `row = base_row + p`), not merely close to it, since
+        # every coverage test written before this change depends on that
+        # exact behaviour. Mathematically sin(0)=0/cos(0)=1 already collapse
+        # the general per-nozzle formula below to the same u_p/v_p -- but
+        # recomputing row_p as round(v_p / NOZZLE_PITCH_MM) from a
+        # floating-point v_p = v_mm + p*NOZZLE_PITCH_MM, instead of the exact
+        # integer base_row + p, can drift by one nozzle purely from the extra
+        # add-then-divide rounding, which is exactly the drift this fast path
+        # exists to avoid.
+        zero_yaw = yaw_rad == 0.0
+        if zero_yaw:
+            col_fixed = int(round(u_mm / self.mm_per_column))
+            base_row = int(round(v_mm / NOZZLE_PITCH_MM))
+        else:
+            sin_yaw = math.sin(yaw_rad)
+            cos_yaw = math.cos(yaw_rad)
 
         active = np.zeros(NUM_NOZZLES, dtype=bool)
         in_bounds_any = False
         for p in range(NUM_NOZZLES):
-            row = base_row + p
+            if zero_yaw:
+                col = col_fixed
+                row = base_row + p
+            else:
+                offset_along_bar = p * NOZZLE_PITCH_MM
+                u_p = u_mm - offset_along_bar * sin_yaw
+                v_p = v_mm + offset_along_bar * cos_yaw
+                col = int(round(u_p / self.mm_per_column))
+                row = int(round(v_p / NOZZLE_PITCH_MM))
+
             in_bounds = 0 <= row < self.height and 0 <= col < self.width
             if in_bounds:
                 in_bounds_any = True
