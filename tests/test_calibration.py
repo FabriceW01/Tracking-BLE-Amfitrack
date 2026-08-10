@@ -324,6 +324,23 @@ def test_simple_frame_identity_boresight_would_be_wrong():
         f"for a 90 deg turn) -- if this now holds, revisit the design note")
 
 
+def test_simple_frame_accepts_a_pinned_boresight():
+    q = [-0.5, -0.5, -0.51, 0.49]
+    cal = PageCalibration.simple_frame(boresight_quat=q)
+    assert np.allclose(cal.boresight_quat, q)
+
+
+def test_simple_frame_pinned_boresight_makes_its_own_pose_read_as_zero():
+    # The whole point of --simple-boresight: with the pinned quat used as
+    # both the current sample AND the reference, yaw/roll/pitch must be
+    # exactly zero -- this is what "capture, verify, pin" checks before
+    # trusting a value.
+    q = np.array([-0.5, -0.5, -0.51, 0.49])
+    cal = PageCalibration.simple_frame(boresight_quat=q)
+    yaw = yaw_about_normal(q, cal.boresight_quat, cal.e_col, cal.e_row)
+    assert abs(math.degrees(yaw)) < 1e-9
+
+
 def test_simple_frame_is_independent_between_calls():
     # Returned fresh each call: the controller mutates .origin at pass start
     # (PageMapper.zero_at_nozzle), which must not leak into the next pass or

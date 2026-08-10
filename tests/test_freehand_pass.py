@@ -216,6 +216,40 @@ def test_simple_frame_pass_does_not_mutate_a_shared_frame():
     assert all(c > 0 for c in covered_counts), covered_counts
 
 
+def test_simple_frame_pinned_boresight_is_not_overwritten_at_start():
+    # REGRESSION: a pass used to call PageMapper.capture_boresight
+    # unconditionally at START, which would have silently clobbered an
+    # operator-verified --simple-boresight reference with whatever pose the
+    # cart happens to hold at THIS pass's start -- exactly the failure the
+    # flag exists to prevent. The pinned quat must survive the pass
+    # untouched, and the reported yaw must be measured against IT, not
+    # against the ScriptedTracker's actual (different) start orientation.
+    q_pinned = np.array([-0.5, -0.5, -0.51, 0.49])
+    q_pinned /= np.linalg.norm(q_pinned)
+    q_start = np.array([0.0, 0.0, 0.0, 1.0])  # a different pose at START
+
+    ink = np.ones((30, 5), dtype=bool)
+    render = RenderSettings(text="pinned boresight test")
+    trk = TrackingSettings(mode="page", page_frame="simple", mm_per_column=1.0,
+                           smooth_ms=0.0, poll_hz=500.0, timeout_s=5.0)
+    cal = PageCalibration.simple_frame(boresight_quat=q_pinned)
+    ctrl = PrintController(render, BleSettings(), trk, ink=ink,
+                           page_calibration=cal, dose_hold_s=0.01)
+
+    positions = _sweep_positions(n_cols=5, samples_per_col=12)
+    tracker = ScriptedTracker(positions, quats=[q_start] * len(positions))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    assert np.allclose(cal.boresight_quat, q_pinned), (
+        "pinned boresight was overwritten by auto-capture")
+    assert "using pinned yaw reference" in text, text
+    assert "auto-captured" not in text, text
+
+
 def test_freehand_pass_actually_covers_every_ink_pixel():
     # Same math as the pass above, but driving CoverageEngine/PageMapper
     # directly to check *what* "covered" means at the pixel level, not just

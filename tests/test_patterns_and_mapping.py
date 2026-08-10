@@ -248,6 +248,56 @@ def test_cli_page_frame_reaches_tracking_settings():
     assert cli.build_tracking(args).page_frame == "simple"
 
 
+def test_cli_simple_boresight_defaults_to_none():
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
+    assert args.simple_boresight is None
+    cal = cli.build_page_calibration(args)
+    assert cal.boresight_quat is None
+
+
+def test_cli_simple_boresight_accepts_four_space_separated_floats():
+    # NOT comma-joined: a single "-0.5,-0.5,-0.51,0.49" token trips
+    # argparse's negative-number heuristic (the commas break the match) and
+    # gets misread as an option -- see the --simple-boresight help text.
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                           "--simple-boresight", "-0.5", "-0.5", "-0.51", "0.49"])
+    assert args.simple_boresight == [-0.5, -0.5, -0.51, 0.49]
+    cal = cli.build_page_calibration(args)
+    assert np.allclose(cal.boresight_quat, [-0.5, -0.5, -0.51, 0.49])
+
+
+def test_cli_simple_boresight_rejects_wrong_count():
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                        "--simple-boresight", "0", "0", "1"])
+        assert False, "expected SystemExit for a 3-value --simple-boresight"
+    except SystemExit:
+        pass
+
+
+def test_cli_simple_boresight_rejects_non_numeric():
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                        "--simple-boresight", "a", "b", "c", "d"])
+        assert False, "expected SystemExit for a non-numeric --simple-boresight"
+    except SystemExit:
+        pass
+
+
+def test_cli_simple_boresight_requires_simple_frame():
+    # Paired with --page-calibration (the default calibrated frame) rather
+    # than --page-frame simple: the calibrated frame's yaw reference comes
+    # from the traced calibration's own boresight_quat instead, so this
+    # combination doesn't mean anything and must be rejected, not silently
+    # ignored.
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--page-calibration", "cal.json",
+                        "--simple-boresight", "0", "0", "0", "1"])
+        assert False, "expected SystemExit: --simple-boresight needs --page-frame simple"
+    except SystemExit:
+        pass
+
+
 def test_cli_rejects_nozzle_block_remap_in_page_mode():
     # Page mode's nozzle-to-row alignment slides with vertical travel (see
     # nozzle_map.py's docstring), so the block permutation -- indexed by fixed

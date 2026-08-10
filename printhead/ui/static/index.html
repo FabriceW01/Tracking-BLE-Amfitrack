@@ -205,10 +205,17 @@
           <div class="field"><label>Page calibration (path)</label><input id="page_calibration" placeholder="page_calibration.json"></div>
         </div>
         <div class="hint page-only calibrated-only" style="display:none">Build a page calibration on the <b>Calibration</b> tab first, or point this at a previously saved one.</div>
+        <div class="row page-only simple-only" style="display:none">
+          <div class="btnrow"><button class="btn" id="btnCaptureSimpleBoresight">Capture yaw reference</button>
+            <span class="live-badge" id="simpleBoresightStatus">not captured -- START will auto-capture whatever pose the cart is in</span></div>
+        </div>
         <div class="hint page-only simple-only" style="display:none">No calibration needed: the page axes are the tracker's own <b>x</b> (columns) and <b>y</b> (rows),
-          the page origin is zeroed wherever the cart sits when you press <b>START</b>, and cart yaw is measured
-          relative to the pose held at that moment (so hold the cart the way you want to count as 0&deg;). Lay the sheet square
-          with the tracker axes for this to line up.</div>
+          and the page origin is zeroed wherever the cart sits when you press <b>START</b>. Cart yaw is measured relative to a
+          reference pose -- lay the cart flat with 0&deg; yaw in the <b>Live sensor position</b> panel above, then click
+          <b>Capture yaw reference</b> here. Skipping this lets START auto-capture instead, but that grabs whatever pose the cart
+          happens to be in at that exact instant with no way to verify it -- a bad grab (BLE still settling, hand not yet
+          still) silently corrupts every angle for the rest of the pass. Capturing here first lets you check Yaw/Roll/Pitch
+          read ~0&deg; while genuinely flat before you trust it.</div>
         <div class="row line-only">
           <div class="field"><label>Advance axis</label><select id="advance_axis"><option selected>x</option><option>y</option><option>z</option></select></div>
           <div class="field"><label>Axis sign</label><select id="axis_sign"><option value="1">+1</option><option value="-1">−1</option></select></div>
@@ -393,6 +400,17 @@ document.querySelectorAll('input[name=src]').forEach(r=>r.onchange=updateSrc);
 /* ---------- mode switching (line/page/time) ---------- */
 function isPageMode(){ return val('mode')==='page'; }
 function isSimpleFrame(){ return val('page_frame')==='simple'; }
+// --simple-boresight takes 4 SEPARATE numeric argv entries, not one
+// comma-joined value: argparse's negative-number heuristic rejects a
+// comma-joined "-0.5,-0.5,-0.51,0.49" (the commas break the match), which a
+// captured quaternion hits constantly since components are routinely
+// negative. Shared by trackingArgs() (the real print) and sensorArgs() (the
+// --pos verify stream), so a captured reference is honoured in both.
+function pushSimpleBoresight(a){
+  if(isSimpleFrame() && simpleBoresightQuat){
+    a.push('--simple-boresight', ...simpleBoresightQuat.map(v=>String(v)));
+  }
+}
 function updateMode(){
   const page = isPageMode();
   document.querySelectorAll('.line-only').forEach(el=>el.style.display = page ? 'none' : '');
@@ -423,7 +441,7 @@ function trackingArgs(a){
   if(isPageMode() && !chk('no_track')){
     // --page-frame simple and --page-calibration are mutually exclusive in
     // the CLI (see parse_args), so emit exactly one of the two.
-    if(isSimpleFrame()) a.push('--page-frame','simple');
+    if(isSimpleFrame()){ a.push('--page-frame','simple'); pushSimpleBoresight(a); }
     else pushIf(a, !!val('page_calibration'), '--page-calibration', val('page_calibration'));
     pushIf(a, !!val('dose_hold_s'), '--dose-hold-s', val('dose_hold_s'));
   } else {
@@ -498,7 +516,7 @@ function sensorArgs(){
   // frame, diagnostics.monitor_position builds no PageMapper and reports
   // neither). Mutually exclusive in the CLI -- emit exactly one.
   if(isPageMode()){
-    if(isSimpleFrame()) a.push('--page-frame','simple');
+    if(isSimpleFrame()){ a.push('--page-frame','simple'); pushSimpleBoresight(a); }
     else pushIf(a, !!val('page_calibration'),'--page-calibration',val('page_calibration'));
   }
   pushIf(a, val('advance_axis')!=='x','--advance-axis',val('advance_axis'));
@@ -701,7 +719,7 @@ let colSamples=[], rowSamples=[], tracingCol=false, tracingRow=false, lastCalibr
 // when the connected hardware/SDK actually reports orientation (see
 // diagnostics.monitor_position's --pos-json event); null on a sensor that
 // never sends one (e.g. --simulate, which never fakes orientation).
-let lastQuat=null, boresightQuat=null;
+let lastQuat=null, boresightQuat=null, simpleBoresightQuat=null;
 function onCalibrationPosition(o){
   if(tracingCol){ colSamples.push([o.x,o.y,o.z]); $('colSampleCount').textContent=colSamples.length+' samples'; }
   if(tracingRow){ rowSamples.push([o.x,o.y,o.z]); $('rowSampleCount').textContent=rowSamples.length+' samples'; }
@@ -717,6 +735,31 @@ $('btnCaptureBoresight').onclick=()=>{
   boresightQuat=lastQuat.slice();
   const [qx,qy,qz,qw]=boresightQuat;
   setBoresightStatus(`captured: qx=${qx.toFixed(3)} qy=${qy.toFixed(3)} qz=${qz.toFixed(3)} qw=${qw.toFixed(3)}`);
+};
+
+// Simple-frame yaw reference (--simple-boresight): same "grab lastQuat, show
+// it, let the operator judge" pattern as btnCaptureBoresight above, but for
+// --page-frame simple, which has no calibration file to fold it into --
+// this instead gets forwarded as four plain CLI numbers by trackingArgs()/
+// sensorArgs() below. Exists because auto-capturing whatever pose the cart
+// happens to be in at START is unverifiable and can silently lock in a bad
+// reference (see this button's neighbouring hint text) -- capturing here
+// first lets the operator watch Yaw/Roll/Pitch settle near 0 while
+// genuinely flat before trusting it into a real print.
+$('btnCaptureSimpleBoresight').onclick=()=>{
+  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
+  if(!lastQuat){
+    $('simpleBoresightStatus').textContent='no orientation received yet -- hold the cart still and try again';
+    return;
+  }
+  simpleBoresightQuat=lastQuat.slice();
+  const [qx,qy,qz,qw]=simpleBoresightQuat;
+  $('simpleBoresightStatus').textContent=
+    `captured: qx=${qx.toFixed(3)} qy=${qy.toFixed(3)} qz=${qz.toFixed(3)} qw=${qw.toFixed(3)} -- `+
+    `hold this pose and check Yaw/Roll/Pitch above now read ~0 before printing`;
+  buildPreview();   // refresh: capturing changes the emitted command (--simple-boresight)
+                     // without touching any form field, so the usual change-listener
+                     // triggered rebuild would otherwise leave the preview stale.
 };
 function setTracing(which,on){
   if(which==='col'){ tracingCol=on; $('btnTraceCol').textContent=on?'■ Stop tracing edge 1':'● Trace edge 1'; $('btnTraceCol').classList.toggle('danger',on); }
