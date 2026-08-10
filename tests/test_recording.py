@@ -12,7 +12,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printhead.geometry import IMAGE_HEIGHT                          # noqa: E402
-from printhead.recording import SendRecorder, _decode, render_coverage  # noqa: E402
+from printhead.recording import (                                     # noqa: E402
+    SendRecorder, _decode, _marker_indices, render_coverage,
+)
 from printhead.rendering import frames_from_ink                      # noqa: E402
 
 
@@ -228,6 +230,135 @@ def test_render_coverage_path_panel_tolerates_out_of_bounds_points():
     try:
         assert render_coverage(printed, ink, path,
                                sensor_path=wild_path, nozzle_path=wild_path) is True
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+# =============================================================== _marker_indices
+def test_marker_indices_empty_for_no_sample_times():
+    assert _marker_indices([], 2.0) == []
+    assert _marker_indices(None, 2.0) == []
+
+
+def test_marker_indices_single_marker_for_a_short_pass():
+    # Duration well under one interval -- only marker 1, at index 0.
+    assert _marker_indices([0.0, 0.3, 0.6], 2.0) == [(0, 1)]
+
+
+def test_marker_indices_regular_samples_land_on_the_boundary():
+    times = [i * 0.5 for i in range(21)]           # 0.0 .. 10.0s, 0.5s apart
+    markers = _marker_indices(times, 2.0)
+    assert markers == [(0, 1), (4, 2), (8, 3), (12, 4), (16, 5), (20, 6)]
+    for idx, number in markers:
+        assert abs(times[idx] - (number - 1) * 2.0) < 1e-9
+
+
+def test_marker_indices_picks_the_nearest_sample_off_the_exact_boundary():
+    # No sample lands exactly on t=2.0 -- 1.9 is 0.1 away, 2.3 is 0.3 away,
+    # so the marker must land on the 1.9 sample.
+    times = [0.0, 1.9, 2.3, 4.1]
+    markers = _marker_indices(times, 2.0)
+    assert (1, 2) in markers, markers
+
+
+def test_marker_indices_never_repeats_an_index():
+    # Interval finer than the sample rate -- several targets can be nearest
+    # to the SAME sample; that sample must only appear once.
+    times = [0.0, 5.0]
+    markers = _marker_indices(times, 0.5)
+    indices = [idx for idx, _ in markers]
+    assert len(indices) == len(set(indices)), markers
+
+
+# =========================================================== render_coverage: scale
+def test_render_coverage_default_scale_is_larger_than_unscaled():
+    h, w = 40, 30
+    ink = np.ones((h, w), dtype=bool)
+    printed = ink.copy()
+    path_scaled = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_scaled.png")
+    path_unscaled = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_unscaled.png")
+    try:
+        assert render_coverage(printed, ink, path_scaled) is True         # default scale
+        assert render_coverage(printed, ink, path_unscaled, scale=1) is True
+        from PIL import Image
+        with Image.open(path_scaled) as im:
+            w_scaled, h_scaled = im.size
+        with Image.open(path_unscaled) as im:
+            w_unscaled, h_unscaled = im.size
+        assert w_scaled > w_unscaled
+        assert h_scaled > h_unscaled
+    finally:
+        for p in (path_scaled, path_unscaled):
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def test_render_coverage_scale_1_matches_pre_scaling_dimensions():
+    # Regression: scale=1 must reproduce the exact pixel dimensions the
+    # function had before scaling existed (w == ink width, h > 3*ink height
+    # from labels/gaps) -- same shape assertion the original test used.
+    h, w = 200, 6
+    ink = np.zeros((h, w), dtype=bool)
+    ink[5:15, 1:4] = True
+    printed = np.zeros((h, w), dtype=bool)
+    printed[5:15, 1:3] = True
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_scale1.png")
+    try:
+        assert render_coverage(printed, ink, path, scale=1) is True
+        from PIL import Image
+        pw, ph = Image.open(path).size
+        assert ph > 3 * h and pw == w
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+# ============================================= render_coverage: timestamped markers
+def test_render_coverage_with_sample_times_draws_numbered_markers_not_plain_dots():
+    h, w = 60, 60
+    ink = np.ones((h, w), dtype=bool)
+    printed = ink.copy()
+    sensor_path = [(5, 5), (5, 30), (5, 55)]
+    nozzle_path = [(50, 5), (50, 30), (50, 55)]
+    sample_times = [0.0, 2.0, 4.0]
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_timed.png")
+    try:
+        assert render_coverage(printed, ink, path, sensor_path=sensor_path,
+                               nozzle_path=nozzle_path, sample_times=sample_times,
+                               scale=1) is True
+        from PIL import Image
+        arr = np.array(Image.open(path).convert("RGB"))
+        # Plain start/end dots (green/dark) must NOT appear once sample_times
+        # is given -- numbered markers in the path's own colour replace them.
+        green = np.any(np.all(arr == (30, 160, 60), axis=-1))
+        dark = np.any(np.all(arr == (40, 40, 40), axis=-1))
+        assert not green, "plain start dot must not appear alongside markers"
+        assert not dark, "plain end dot must not appear alongside markers"
+        blue = np.any(np.all(arr == (30, 100, 220), axis=-1))
+        orange = np.any(np.all(arr == (230, 90, 20), axis=-1))
+        assert blue and orange, "markers must still be drawn, in each path's own colour"
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_render_coverage_without_sample_times_still_draws_plain_dots():
+    # Backward compatibility for a caller with paths but no timing info.
+    h, w = 60, 60
+    ink = np.ones((h, w), dtype=bool)
+    printed = ink.copy()
+    sensor_path = [(5, 5), (5, 55)]
+    nozzle_path = [(50, 5), (50, 55)]
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "printhead_cov_notimed.png")
+    try:
+        assert render_coverage(printed, ink, path, sensor_path=sensor_path,
+                               nozzle_path=nozzle_path, scale=1) is True
+        from PIL import Image
+        arr = np.array(Image.open(path).convert("RGB"))
+        green = np.any(np.all(arr == (30, 160, 60), axis=-1))
+        dark = np.any(np.all(arr == (40, 40, 40), axis=-1))
+        assert green and dark, "plain start/end dots must still appear without sample_times"
     finally:
         if os.path.exists(path):
             os.remove(path)
