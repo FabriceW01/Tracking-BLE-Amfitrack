@@ -63,7 +63,10 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
     would use. Reporting the live yaw (``yaw_deg`` below) is exactly what
     lets a boresight be verified before printing with it: held in the
     reference pose (nozzle bar along the traced row edge), ``yaw_deg``
-    should read close to 0."""
+    should read close to 0. ``roll_deg``/``pitch_deg`` (see
+    ``rotation.cart_rotation_angles``) are reported alongside it for the
+    same live-monitoring purpose, but are diagnostic only -- unlike yaw,
+    neither feeds any position correction (see that function's docstring)."""
     tracker = make_tracker(tracking, simulate)
     try:
         tracker.open()
@@ -75,7 +78,18 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
         return
 
     page_mapper = None
-    if page_calibration_path is not None:
+    if tracking.page_frame == "simple":
+        # Calibration-free frame (see PageCalibration.simple_frame): page
+        # axes = tracker x/y, yaw about tracker z. Unlike a print pass, the
+        # origin is NOT zeroed here -- this diagnostic is for watching raw
+        # tracker-frame u/v/yaw, and re-zeroing to wherever --pos happened to
+        # start would only obscure that. page_u/page_v therefore read as
+        # absolute tracker x/y (plus the sensor->nozzle offset).
+        page_mapper = PageMapper(PageCalibration.simple_frame(),
+                                 sensor_offset_row_mm=sensor_offset_row_mm,
+                                 sensor_offset_col_mm=sensor_offset_col_mm,
+                                 boresight_offset_rad=math.radians(boresight_deg))
+    elif page_calibration_path is not None:
         try:
             page_mapper = PageMapper(PageCalibration.load(page_calibration_path),
                                      sensor_offset_row_mm=sensor_offset_row_mm,
@@ -121,6 +135,15 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                 page_uvz = page_mapper.project(pos, quat) if page_mapper is not None else None
                 yaw_deg = (math.degrees(page_mapper.last_yaw_rad)
                           if page_mapper is not None else None)
+                # Diagnostic-only tilt readout (see rotation.cart_rotation_angles /
+                # tracking.PageMapper.project) -- reported alongside yaw_deg but,
+                # like it, never fed back into any correction; last_roll_rad/
+                # last_pitch_rad are valid floats (0.0 default) whenever a
+                # page_mapper is active at all, same as last_yaw_rad.
+                roll_deg = (math.degrees(page_mapper.last_roll_rad)
+                           if page_mapper is not None else None)
+                pitch_deg = (math.degrees(page_mapper.last_pitch_rad)
+                            if page_mapper is not None else None)
                 if ndjson:
                     event = {
                         "event": "position",
@@ -134,7 +157,9 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                         event.update(page_u=round(page_uvz[0], 3),
                                      page_v=round(page_uvz[1], 3),
                                      page_z=round(page_uvz[2], 3),
-                                     yaw_deg=round(yaw_deg, 3))
+                                     yaw_deg=round(yaw_deg, 3),
+                                     roll_deg=round(roll_deg, 3),
+                                     pitch_deg=round(pitch_deg, 3))
                     print(json.dumps(event), flush=True)
                 else:
                     line = (f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
@@ -144,7 +169,8 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
                                 f"{quat[2]:+.2f} {quat[3]:+.2f}]")
                     if page_uvz is not None:
                         line += (f"  |  page u={page_uvz[0]:8.2f}  v={page_uvz[1]:8.2f}  "
-                                f"z={page_uvz[2]:6.2f} mm  yaw={yaw_deg:+6.2f} deg")
+                                f"z={page_uvz[2]:6.2f} mm  yaw={yaw_deg:+6.2f} deg  "
+                                f"roll={roll_deg:+6.2f} deg  pitch={pitch_deg:+6.2f} deg")
                     print(line, end="\r", flush=True)
             await asyncio.sleep(1.0 / hz)
     except (KeyboardInterrupt, asyncio.CancelledError):

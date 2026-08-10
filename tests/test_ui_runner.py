@@ -29,7 +29,9 @@ def test_command_process_streams_and_exits():
 
     async def run():
         proc = CommandProcess(
-            ["--pattern", "solid", "--dry-run", "--simulate",
+            # --mode line: this test is about CommandProcess streaming/exit
+            # handling, not mode selection, and passes no --page-calibration.
+            ["--pattern", "solid", "--dry-run", "--simulate", "--mode", "line",
              "--pattern-length-mm", "10"],
             on_line, on_exit)
         assert proc.command_str().startswith("python main.py --pattern solid")

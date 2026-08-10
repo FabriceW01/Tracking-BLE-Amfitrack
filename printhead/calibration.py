@@ -109,6 +109,37 @@ class PageCalibration:
     boresight_quat: Optional[np.ndarray] = None
     angle_error_deg: float = 0.0
 
+    @classmethod
+    def simple_frame(cls) -> "PageCalibration":
+        """
+        The calibration-free ("simple") page frame: the tracker's own axes
+        taken as the page's, with no edge tracing at all.
+
+        ``e_col``/``e_row`` are the raw Amfitrack **x** and **y** axes, so
+        ``project()`` degenerates to "u = x, v = y, z = z" (minus the origin,
+        which ``tracking.PageMapper.set_origin`` zeroes at pass start -- see
+        there). ``boresight_quat`` is the IDENTITY quaternion, which makes
+        ``rotation.yaw_about_normal`` return exactly the cart's rotation
+        about the tracker's **z** axis: with ``R(identity) == I`` the
+        relative rotation ``R_rel`` reduces to ``R(quat)`` itself, and the
+        page normal ``e_col x e_row`` is exactly ``z``. Verified bit-exact
+        against pure z-rotations in ``tests/test_calibration.py``.
+
+        The trade-off versus a traced calibration is explicit: this assumes
+        the sheet is laid out square with the tracker's x/y axes, and that
+        the tracker's mm are true mm (``scale_col``/``scale_row`` stay 1.0,
+        since there is no known sheet size to derive a correction from). In
+        exchange it needs no calibration step, so it cannot inherit a bad
+        one -- the reason it exists (measured yaw itself is accurate to
+        ~1 deg, see the README's "Einfacher Modus" section).
+        """
+        return cls(
+            origin=np.zeros(3, dtype=float),
+            e_col=np.array([1.0, 0.0, 0.0]),
+            e_row=np.array([0.0, 1.0, 0.0]),
+            boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]),
+        )
+
     def project(self, pos) -> "tuple[float, float, float]":
         """
         World position (mm) -> page-plane ``(u_mm, v_mm, z_mm)``.

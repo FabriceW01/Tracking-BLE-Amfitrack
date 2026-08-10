@@ -54,9 +54,18 @@ class TrackingSettings:
         tell apart.)
       * ``"page"`` - 2D freehand closed loop: the cart can move anywhere over
         a calibrated page (loops, revisits, vertical sweeps included) and a
-        per-nozzle coverage engine decides what still needs ink. Requires a
-        ``PageCalibration`` (see ``calibration.py``), traced ahead of time.
+        per-nozzle coverage engine decides what still needs ink. The page
+        frame it prints into comes from ``page_frame`` below.
       * ``"time"`` - legacy behaviour: stream one column every ``period`` s.
+
+    ``page_frame`` picks which 2D frame page mode prints into:
+      * ``"calibrated"`` - a ``PageCalibration`` (see ``calibration.py``)
+        traced ahead of time from two page edges, with a captured boresight
+        pose. Most accurate, but a bad trace poisons every later print.
+      * ``"simple"`` - no calibration at all: the tracker's own x/y axes are
+        taken as the page axes and cart yaw is measured about the tracker's
+        z axis (``PageCalibration.simple_frame``), with the origin zeroed at
+        pass start. Assumes the sheet is laid out square with the tracker.
 
     X is the rig's measured travel axis, but the sensor may be mounted rotated
     on a given rig, so the axis that drives column advancement is configurable
@@ -66,7 +75,8 @@ class TrackingSettings:
         project the position onto it (robust against any rotation).
     """
     enabled: bool = True
-    mode: str = "line"              # "line" | "page" | "time"
+    mode: str = "page"              # "line" | "page" | "time"
+    page_frame: str = "calibrated"  # "calibrated" | "simple" (page mode only)
 
     # --- axis mapping for a possibly-rotated sensor mount -------------------
     advance_axis: str = "x"         # "x" | "y" | "z" (which axis = travel dir.)
@@ -83,7 +93,7 @@ class TrackingSettings:
                                     # (0 = off); larger = smoother but more lag
     min_move_mm: float = 0.05       # deadband: below this, treat head as stopped
     timeout_s: float = 30.0         # give up a pass after this long with no end
-    poll_hz: float = 200.0          # position polling rate
+    poll_hz: float = 500.0          # position polling rate
 
     # --- USB dongle (amfiprot) --------------------------------------------
     vendor_id: int = 0x0C17          # Amfitech USB vendor id

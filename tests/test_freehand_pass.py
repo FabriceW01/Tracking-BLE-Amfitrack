@@ -8,6 +8,7 @@ Run with:  python tests/test_freehand_pass.py
 
 import asyncio
 import io
+import re
 import json
 import math
 import os
@@ -152,6 +153,69 @@ def test_freehand_pass_covers_the_page_and_stops_before_timeout():
     assert null.blank_writes == 1, "must send exactly one final blank"
 
 
+def test_simple_frame_pass_zeroes_at_the_nozzle_bar_and_prints():
+    # REGRESSION: --page-frame simple's origin must land under the nozzle
+    # bar, not the sensor. Zeroing at the sensor leaves the bar ~54.9mm
+    # (SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM/2) along +v,
+    # every sample reads out of bounds, and the pass completes "successfully"
+    # having printed NOTHING -- which is exactly what the first simulated
+    # simple-frame pass did. Deliberately uses the REAL sensor offsets (not
+    # the neutralised ones _controller() passes) because the bug only exists
+    # when the offset is nonzero.
+    ink = np.ones((30, 5), dtype=bool)
+    render = RenderSettings(text="simple frame test")
+    trk = TrackingSettings(mode="page", page_frame="simple", mm_per_column=1.0,
+                           smooth_ms=0.0, poll_hz=500.0, timeout_s=5.0)
+    ctrl = PrintController(render, BleSettings(), trk, ink=ink,
+                           page_calibration=PageCalibration.simple_frame(),
+                           dose_hold_s=0.01)
+    # Sweep in tracker x from wherever the cart starts -- the frame is zeroed
+    # at the first sample, so absolute placement is irrelevant by design.
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+    null = _NullPrinthead()
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(null, tracker))
+    text = out.getvalue()
+
+    # NOT pattern_writes: the very first step() reports `changed` even for an
+    # all-zero pattern, so a pass that covers nothing still writes once (seen
+    # for real: "issued 1 pattern writes" alongside "Covered 0/6080"). Assert
+    # on the covered pixel count, which is the thing that actually breaks.
+    covered = re.search(r"Covered (\d+)/(\d+) ink pixels", text)
+    assert covered, text
+    assert int(covered.group(1)) > 0, (
+        "simple frame covered 0 pixels -- origin is probably zeroed at the "
+        "sensor instead of the nozzle bar:\n" + text)
+    assert null.blank_writes == 1
+
+
+def test_simple_frame_pass_does_not_mutate_a_shared_frame():
+    # The pass mutates calibration.origin in place; two passes must not drift
+    # (each PageCalibration.simple_frame() is independent, and the zeroing is
+    # absolute rather than cumulative).
+    ink = np.ones((30, 5), dtype=bool)
+    render = RenderSettings(text="simple frame test")
+    trk = TrackingSettings(mode="page", page_frame="simple", mm_per_column=1.0,
+                           smooth_ms=0.0, poll_hz=500.0, timeout_s=5.0)
+    cal = PageCalibration.simple_frame()
+    ctrl = PrintController(render, BleSettings(), trk, ink=ink,
+                           page_calibration=cal, dose_hold_s=0.01)
+
+    covered_counts = []
+    for _ in range(2):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(ctrl._print_freehand_pass(
+                _NullPrinthead(),
+                ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))))
+        m = re.search(r"Covered (\d+)/(\d+) ink pixels", out.getvalue())
+        assert m, out.getvalue()
+        covered_counts.append(int(m.group(1)))
+    assert all(c > 0 for c in covered_counts), covered_counts
+
+
 def test_freehand_pass_actually_covers_every_ink_pixel():
     # Same math as the pass above, but driving CoverageEngine/PageMapper
     # directly to check *what* "covered" means at the pixel level, not just
@@ -276,9 +340,10 @@ def test_progress_json_off_by_default_stays_plain_text():
 
 
 def test_cli_progress_json_flag():
-    args = cli.parse_args(["Hi", "--dry-run", "--progress-json"])
+    # --mode line: this test is about --progress-json, not mode selection.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line", "--progress-json"])
     assert args.progress_json is True
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.progress_json is False
 
 
@@ -719,26 +784,32 @@ def test_cli_no_track_bypasses_the_page_calibration_requirement():
 
 
 def test_cli_ble_write_ceiling_defaults_to_none_and_parses():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    # --mode line throughout this block: these tests are about the
+    # individual flags below, not mode selection, and pass no
+    # --page-calibration.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.ble_write_ceiling is None
-    args = cli.parse_args(["Hi", "--dry-run", "--ble-write-ceiling", "150"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--ble-write-ceiling", "150"])
     assert args.ble_write_ceiling == 150.0
 
 
 def test_cli_sensor_offset_flags_default_to_none_and_parse():
     # Same "default None -> controller falls back to the geometry constant"
     # pattern as --dose-hold-s / --ble-write-ceiling above.
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.sensor_offset_row_mm is None
     assert args.sensor_offset_col_mm is None
-    args = cli.parse_args(["Hi", "--dry-run", "--sensor-offset-row-mm", "70.0",
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--sensor-offset-row-mm", "70.0",
                            "--sensor-offset-col-mm", "-3.5"])
     assert args.sensor_offset_row_mm == 70.0
     assert args.sensor_offset_col_mm == -3.5
 
 
 def test_cli_sensor_offset_flags_reach_the_controller_when_given():
-    args = cli.parse_args(["Hi", "--dry-run", "--sensor-offset-row-mm", "70.0",
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--sensor-offset-row-mm", "70.0",
                            "--sensor-offset-col-mm", "-3.5"])
     ctrl = cli.build_controller(args)
     assert ctrl.sensor_offset_row_mm == 70.0
@@ -748,7 +819,7 @@ def test_cli_sensor_offset_flags_reach_the_controller_when_given():
 def test_cli_sensor_offset_flags_default_to_the_geometry_constants_unset():
     # When not given at all, the controller must fall back to the real
     # measured geometry constants, not to 0.0.
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     ctrl = cli.build_controller(args)
     assert ctrl.sensor_offset_row_mm == SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM
     assert ctrl.sensor_offset_col_mm == SENSOR_TO_NOZZLE_COL_MM
@@ -756,14 +827,16 @@ def test_cli_sensor_offset_flags_default_to_the_geometry_constants_unset():
 
 # =============================================================== --boresight-deg
 def test_cli_boresight_deg_defaults_to_none_and_parses():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.boresight_deg is None
-    args = cli.parse_args(["Hi", "--dry-run", "--boresight-deg", "3.5"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--boresight-deg", "3.5"])
     assert args.boresight_deg == 3.5
 
 
 def test_cli_boresight_deg_reaches_the_controller_when_given():
-    args = cli.parse_args(["Hi", "--dry-run", "--boresight-deg", "-7.25"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--boresight-deg", "-7.25"])
     ctrl = cli.build_controller(args)
     assert ctrl.boresight_deg == -7.25
 
@@ -771,7 +844,7 @@ def test_cli_boresight_deg_reaches_the_controller_when_given():
 def test_cli_boresight_deg_defaults_to_zero_unset():
     # Same "default None on the CLI -> 0.0 (neutral) on the controller"
     # pattern as the other page-mode fine-tune flags.
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     ctrl = cli.build_controller(args)
     assert ctrl.boresight_deg == 0.0
 
@@ -789,14 +862,18 @@ def test_build_page_calibration_loads_a_saved_file():
 
 
 def test_build_page_calibration_is_none_without_the_flag():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    # --mode line: the point here is exercising the "no --page-calibration
+    # given" path through build_page_calibration() itself; --mode page would
+    # instead be rejected earlier, by parse_args's own validation.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert cli.build_page_calibration(args) is None
 
 
 def test_cli_speed_warning_mm_s_defaults_to_none_and_parses():
-    args = cli.parse_args(["Hi", "--dry-run"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.speed_warning_mm_s is None
-    args = cli.parse_args(["Hi", "--dry-run", "--speed-warning-mm-s", "30"])
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--speed-warning-mm-s", "30"])
     assert args.speed_warning_mm_s == 30.0
 
 

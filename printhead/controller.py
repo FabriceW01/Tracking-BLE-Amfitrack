@@ -559,6 +559,27 @@ class PrintController:
                   "with the nozzle bar aligned along the traced row edge) "
                   "to enable it.")
 
+        # Simple (calibration-free) frame: its origin is the tracker's world
+        # zero -- somewhere on the table, not on the paper -- so zero it here
+        # at the cart's current position. "Where you press START" becomes the
+        # page's (0, 0), exactly like line mode's --origin button. A traced
+        # calibration is deliberately NOT re-zeroed: its origin is a measured
+        # page corner meant to outlive a single pass (see PageMapper.
+        # set_origin).
+        if t.page_frame == "simple":
+            _sp, start_quat = tracker.read_pose()
+            start_pos = pos_filter.update(
+                await self._wait_for_position(tracker, loop), loop.time())
+            # zero_at_nozzle, not set_origin: the origin has to land under the
+            # NOZZLE BAR, not the sensor ~62mm away, or every sample reads
+            # out of bounds and nothing prints -- see zero_at_nozzle.
+            mapper.zero_at_nozzle(start_pos, start_quat)
+            if not pj:
+                print(f"[simple] page origin zeroed at the nozzle bar's current "
+                      f"position (sensor at {start_pos[0]:.1f}, "
+                      f"{start_pos[1]:.1f}, {start_pos[2]:.1f} mm); page axes "
+                      f"= tracker x/y, yaw about tracker z")
+
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None
         prev_printed = coverage.printed.copy() if pj else None

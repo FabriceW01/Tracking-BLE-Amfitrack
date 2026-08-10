@@ -136,6 +136,8 @@
       <div class="metric page-only" style="display:none"><div class="k">Page V</div><div class="v"><span id="posPageV">–</span><span class="u">mm</span></div></div>
       <div class="metric page-only" style="display:none"><div class="k">Page Z</div><div class="v"><span id="posPageZ">–</span><span class="u">mm</span></div></div>
       <div class="metric page-only" style="display:none"><div class="k">Yaw</div><div class="v"><span id="posYaw">–</span><span class="u">deg</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Roll</div><div class="v"><span id="posRoll">–</span><span class="u">deg</span></div></div>
+      <div class="metric page-only" style="display:none"><div class="k">Pitch</div><div class="v"><span id="posPitch">–</span><span class="u">deg</span></div></div>
     </div>
     <div class="spark" id="sparkWrap"><canvas id="spark" width="1100" height="90"></canvas></div>
     <div class="spark" id="coverageWrap" style="display:none">
@@ -192,14 +194,20 @@
       <!-- TRACKING -->
       <div class="panel" data-p="tracking">
         <div class="row">
-          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="page">page (freehand 2D)</option><option value="time">time</option></select></div>
+          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="page" selected>page (freehand 2D)</option><option value="time">time</option></select></div>
           <div class="field"><label>Period (s, time mode)</label><input id="period" type="number" step="0.005" value="0.03"></div>
         </div>
         <div class="row page-only" style="display:none">
-          <div class="field"><label>Page calibration (path)</label><input id="page_calibration" placeholder="page_calibration.json"></div>
+          <div class="field"><label>Page frame</label><select id="page_frame" title="How page mode gets its 2D frame. Advanced uses a traced calibration; Simple takes the tracker's own x/y axes and needs no calibration at all."><option value="calibrated" selected>advanced (traced calibration)</option><option value="simple">simple (no calibration)</option></select></div>
           <div class="field"><label>Dose hold (s, optional)</label><input id="dose_hold_s" type="number" step="0.005" placeholder="0.05 (default)" title="Seconds a nozzle must continuously hold a pixel before it counts as printed. Untuned first guess -- see the Calibration tab hint."></div>
         </div>
-        <div class="hint page-only" style="display:none">Build a page calibration on the <b>Calibration</b> tab first, or point this at a previously saved one.</div>
+        <div class="row page-only calibrated-only" style="display:none">
+          <div class="field"><label>Page calibration (path)</label><input id="page_calibration" placeholder="page_calibration.json"></div>
+        </div>
+        <div class="hint page-only calibrated-only" style="display:none">Build a page calibration on the <b>Calibration</b> tab first, or point this at a previously saved one.</div>
+        <div class="hint page-only simple-only" style="display:none">No calibration needed: the page axes are the tracker's own <b>x</b> (columns) and <b>y</b> (rows),
+          cart yaw is measured about the tracker's <b>z</b> axis, and the page origin is zeroed wherever the cart sits when you press
+          <b>START</b>. Lay the sheet square with the tracker axes for this to line up.</div>
         <div class="row line-only">
           <div class="field"><label>Advance axis</label><select id="advance_axis"><option selected>x</option><option>y</option><option>z</option></select></div>
           <div class="field"><label>Axis sign</label><select id="axis_sign"><option value="1">+1</option><option value="-1">−1</option></select></div>
@@ -217,7 +225,7 @@
           <div class="field"><label>Smoothing (ms)</label><input id="smooth_ms" type="number" step="1" value="12" title="Low-pass time constant for the Amfitrack position. 0 disables it."></div>
         </div>
         <div class="row">
-          <div class="field"><label>Poll rate (Hz)</label><input id="poll_hz" type="number" step="50" value="200" title="Position polling rate. A column crossing is only noticed once per poll, so this bounds how precisely a column is placed."></div>
+          <div class="field"><label>Poll rate (Hz)</label><input id="poll_hz" type="number" step="50" value="500" title="Position polling rate. A column crossing is only noticed once per poll, so this bounds how precisely a column is placed."></div>
         </div>
         <div class="row">
           <div class="field"><label>Sensor tx_id (optional)</label><input id="sensor_id" placeholder="all"></div>
@@ -383,24 +391,39 @@ document.querySelectorAll('input[name=src]').forEach(r=>r.onchange=updateSrc);
 
 /* ---------- mode switching (line/page/time) ---------- */
 function isPageMode(){ return val('mode')==='page'; }
+function isSimpleFrame(){ return val('page_frame')==='simple'; }
 function updateMode(){
   const page = isPageMode();
   document.querySelectorAll('.line-only').forEach(el=>el.style.display = page ? 'none' : '');
   document.querySelectorAll('.page-only').forEach(el=>el.style.display = page ? '' : 'none');
+  // Nested inside .page-only: only ever visible in page mode, and then only
+  // for the matching frame -- so re-hide them after the .page-only sweep
+  // above has just shown everything page-related.
+  const simple = isSimpleFrame();
+  document.querySelectorAll('.calibrated-only').forEach(el=>{
+    if(page && simple) el.style.display = 'none';
+  });
+  document.querySelectorAll('.simple-only').forEach(el=>{
+    if(page && !simple) el.style.display = 'none';
+  });
   $('sparkWrap').style.display = page ? 'none' : '';
   if(!page){ $('coverageWrap').style.display = 'none'; }
   buildPreview();
 }
 $('mode').addEventListener('change', updateMode);
+$('page_frame').addEventListener('change', updateMode);
 
 /* ---------- argv builders ---------- */
 function pushIf(a,cond,flag,v){ if(cond){ a.push(flag); if(v!==undefined && v!=="") a.push(String(v)); } }
 
 function trackingArgs(a){
   if(chk('no_track')) a.push('--no-track');
-  else pushIf(a, val('mode')!=='line', '--mode', val('mode'));
+  else pushIf(a, val('mode')!=='page', '--mode', val('mode'));
   if(isPageMode() && !chk('no_track')){
-    pushIf(a, !!val('page_calibration'), '--page-calibration', val('page_calibration'));
+    // --page-frame simple and --page-calibration are mutually exclusive in
+    // the CLI (see parse_args), so emit exactly one of the two.
+    if(isSimpleFrame()) a.push('--page-frame','simple');
+    else pushIf(a, !!val('page_calibration'), '--page-calibration', val('page_calibration'));
     pushIf(a, !!val('dose_hold_s'), '--dose-hold-s', val('dose_hold_s'));
   } else {
     pushIf(a, val('advance_axis')!=='x', '--advance-axis', val('advance_axis'));
@@ -412,7 +435,7 @@ function trackingArgs(a){
   pushIf(a, val('min_move')!=='0.05', '--min-move', val('min_move'));
   pushIf(a, val('timeout')!=='30', '--timeout', val('timeout'));
   pushIf(a, val('smooth_ms')!=='12', '--smooth-ms', val('smooth_ms'));
-  pushIf(a, val('poll_hz')!=='200', '--poll-hz', val('poll_hz'));
+  pushIf(a, val('poll_hz')!=='500', '--poll-hz', val('poll_hz'));
   pushIf(a, val('vendor_id')!=='0x0C17', '--vendor-id', val('vendor_id'));
   pushIf(a, val('product_id')!=='0x0D12', '--product-id', val('product_id'));
   pushIf(a, !!val('sensor_id'), '--sensor-id', val('sensor_id'));
@@ -469,6 +492,14 @@ function diagArgs(flag){
 }
 function sensorArgs(){
   const a=[];
+  // Give the live --pos stream the same page frame the print would use, so
+  // the Page U/V/Z and Yaw/Roll/Pitch tiles actually read out (without a
+  // frame, diagnostics.monitor_position builds no PageMapper and reports
+  // neither). Mutually exclusive in the CLI -- emit exactly one.
+  if(isPageMode()){
+    if(isSimpleFrame()) a.push('--page-frame','simple');
+    else pushIf(a, !!val('page_calibration'),'--page-calibration',val('page_calibration'));
+  }
   pushIf(a, val('advance_axis')!=='x','--advance-axis',val('advance_axis'));
   pushIf(a, val('axis_sign')!=='1','--axis-sign',val('axis_sign'));
   if(val('dpi')) a.push('--dpi', val('dpi')); else pushIf(a, val('mm_per_column')!=='0.2','--mm-per-column',val('mm_per_column'));
@@ -518,8 +549,8 @@ function runCustomCmd(){
 $('btnCustomRun').onclick=runCustomCmd;
 $('customCmd').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); runCustomCmd(); } });
 $('btnRun').onclick=()=>{
-  if(isPageMode() && !chk('no_track') && !val('page_calibration')){
-    log('! page mode needs a page calibration -- build one on the Calibration tab, or enter a path (Tracking & scale tab)','err');
+  if(isPageMode() && !chk('no_track') && !isSimpleFrame() && !val('page_calibration')){
+    log('! page mode needs a page calibration -- build one on the Calibration tab, enter a path (Tracking & scale tab), or switch Page frame to "simple"','err');
     return;
   }
   runArgs(printArgs());
@@ -584,7 +615,7 @@ function setSensor(on){
   $('sensorPill').classList.toggle('on',on);
   $('sensorPillText').textContent=on?'sensor live':'sensor offline';
   $('liveBadge').innerHTML=on?'<b>● streaming</b>':'not connected';
-  if(!on){ ['posX','posY','posZ','posAdv','posCol','posQuat','posPageU','posPageV','posPageZ','posYaw'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
+  if(!on){ ['posX','posY','posZ','posAdv','posCol','posQuat','posPageU','posPageV','posPageZ','posYaw','posRoll','posPitch'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
 }
 
 /* ---------- sparkline ---------- */
@@ -614,6 +645,8 @@ function onPosition(o){
   $('posPageV').textContent = o.page_v!==undefined ? o.page_v.toFixed(2) : '–';
   $('posPageZ').textContent = o.page_z!==undefined ? o.page_z.toFixed(2) : '–';
   $('posYaw').textContent = o.yaw_deg!==undefined ? fmtSigned(o.yaw_deg,2) : '–';
+  $('posRoll').textContent = o.roll_deg!==undefined ? fmtSigned(o.roll_deg,2) : '–';
+  $('posPitch').textContent = o.pitch_deg!==undefined ? fmtSigned(o.pitch_deg,2) : '–';
   onCalibrationPosition(o);
 }
 
