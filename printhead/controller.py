@@ -20,16 +20,17 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
 from .ble_client import PrintheadBLE
 from .calibration import PageCalibration
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
-from .coverage import DEFAULT_DOSE_HOLD_S, CoverageEngine
+from .coverage import DEFAULT_DOSE_HOLD_S, CoverageEngine, bar_offset_uv
 from .geometry import (
     BLANK_FRAME,
+    NOZZLE_BAR_WIDTH_MM,
     NOZZLE_MODE_LINE,
     NOZZLE_MODE_PAGE,
     NOZZLE_PITCH_MM,
@@ -570,7 +571,16 @@ class PrintController:
         # tracking.PageMapper's docstring / README): re-calibrating and
         # capturing a boresight is the fix, not something this pass can
         # guess its way around (e.g. from the cart's pose at pass start).
-        if not pj and self.page_calibration.boresight_quat is None:
+        #
+        # page_frame == "simple" is deliberately EXCLUDED here: its own
+        # boresight status gets a more specific, more accurate message just
+        # below ("auto-captured at START" / "using pinned yaw reference" /
+        # the no-orientation fallback) -- this generic one's instructions
+        # ("re-run page calibration... trace the row edge") describe the
+        # CALIBRATED frame's workflow and would be actively wrong advice for
+        # simple mode, which has no calibration file to re-run at all.
+        if (not pj and t.page_frame != "simple"
+                and self.page_calibration.boresight_quat is None):
             print("[warn] page calibration has no boresight (captured "
                   "before cart-rotation correction existed) -- printing "
                   "with NO rotation correction, same as before. Re-run page "
@@ -649,6 +659,15 @@ class PrintController:
         samples = 0
         last_warn_t = None
 
+        # --record path overlay (see recording.render_coverage): one
+        # (row, col) point per sample for the raw sensor centre and the
+        # nozzle-bar centre, so the reconstruction can trace where the cart
+        # physically went, not just what got covered. Only collected when
+        # actually recording -- a multi-minute pass at up to --poll-hz
+        # samples/s has no reason to grow these lists otherwise.
+        sensor_path: Optional[List[Tuple[int, int]]] = [] if self.record else None
+        nozzle_path: Optional[List[Tuple[int, int]]] = [] if self.record else None
+
         try:
             while True:
                 now = loop.time()
@@ -663,6 +682,29 @@ class PrintController:
                     # CoverageEngine.step()'s per-nozzle placement.
                     u_mm, v_mm, _z_mm = mapper.project(pos, quat)
                     yaw_rad = mapper.last_yaw_rad
+
+                    if self.record:
+                        # Sensor centre: the RAW page-plane position, before
+                        # PageMapper.project() adds the sensor->nozzle
+                        # offset -- i.e. calibration.project() alone, not
+                        # mapper.project()'s (u_mm, v_mm) above (that is
+                        # already nozzle-0-referenced, see PageMapper's
+                        # class docstring).
+                        su, sv, _ = mapper.calibration.project(pos)
+                        sensor_path.append(
+                            (int(round(sv / NOZZLE_PITCH_MM)),
+                             int(round(su / t.mm_per_column))))
+                        # Nozzle-bar CENTRE: nozzle 0's (u_mm, v_mm) shifted
+                        # by half the bar width along the CURRENT (yaw-
+                        # rotated) bar direction -- bar_offset_uv is the same
+                        # formula CoverageEngine.step() places every
+                        # individual nozzle with (see its docstring), just
+                        # evaluated once per sample for the bar's midpoint
+                        # rather than per nozzle.
+                        ndu, ndv = bar_offset_uv(NOZZLE_BAR_WIDTH_MM / 2.0, yaw_rad)
+                        nozzle_path.append(
+                            (int(round((v_mm + ndv) / NOZZLE_PITCH_MM)),
+                             int(round((u_mm + ndu) / t.mm_per_column))))
 
                     samples += 1
                     u_min = u_mm if u_min is None else min(u_min, u_mm)
@@ -774,7 +816,8 @@ class PrintController:
                 profiler.finish()
             if self.record:
                 from .recording import render_coverage
-                if render_coverage(coverage.printed, coverage.ink, self.record):
+                if render_coverage(coverage.printed, coverage.ink, self.record,
+                                   sensor_path=sensor_path, nozzle_path=nozzle_path):
                     if not pj:
                         print(f"Coverage reconstruction -> {self.record}")
                 elif not pj:

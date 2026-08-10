@@ -105,7 +105,15 @@ class SendRecorder:
         return True
 
 
-def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str) -> bool:
+_SENSOR_PATH_RGB = (30, 100, 220)     # blue: raw sensor centre
+_NOZZLE_PATH_RGB = (230, 90, 20)      # orange: nozzle-bar centre
+_PATH_START_RGB = (30, 160, 60)       # green dot: pass start
+_PATH_END_RGB = (40, 40, 40)          # dark dot: pass end
+
+
+def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
+                    sensor_path: Optional[List[Tuple[int, int]]] = None,
+                    nozzle_path: Optional[List[Tuple[int, int]]] = None) -> bool:
     """
     Write a PNG comparing the intended page-mode image to what
     ``CoverageEngine`` actually covered. Returns False if nothing was
@@ -118,6 +126,23 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str) -> bool:
     queue-slot layout. A third MISSED panel (ink wanted but never printed)
     is included since that is the whole open question after a freehand pass
     -- did the cart cover everything, and if not, where.
+
+    ``sensor_path``/``nozzle_path``, if given, are lists of ``(row, col)``
+    pixel coordinates -- one point per live sample, same convention
+    ``CoverageEngine.step()`` uses internally (``row = round(v_mm /
+    NOZZLE_PITCH_MM)``, ``col = round(u_mm / mm_per_column)``) -- for the
+    RAW SENSOR position and the NOZZLE-BAR-CENTRE position respectively
+    (see ``controller._print_freehand_pass``, which records both once per
+    sample precisely so this can draw them). When either is given, a 4th
+    "PATH" panel is added, letting an operator trace where the cart
+    actually went against what got covered -- e.g. spotting that a MISSED
+    patch was simply never driven over, versus driven over too fast for
+    ``--dose-hold-s`` to complete. Points outside the page are drawn
+    anyway (PIL clips automatically) rather than dropped, since a path
+    leaving/re-entering the page is itself useful information. Omitting
+    both keeps this call byte-for-byte identical to the pre-path-tracking
+    behaviour (3 grayscale panels, unchanged), for any caller that doesn't
+    have the trajectory available.
     """
     printed = np.asarray(printed, dtype=bool)
     ink = np.asarray(ink, dtype=bool)
@@ -129,23 +154,78 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str) -> bool:
         (f"COVERED ({int(printed.sum())}/{int(ink.sum())} ink pixels)", printed),
         (f"MISSED ({int(missed.sum())} ink pixels)", missed),
     ]
-    _save_panels(panels, path, ink.shape[1])
+    extra_rgb_panels = []
+    if sensor_path or nozzle_path:
+        n_pts = max(len(sensor_path or ()), len(nozzle_path or ()))
+        # Kept short deliberately: this label sits on a canvas as narrow as
+        # the printed pattern itself (see test_render_coverage_path_panel_
+        # label_still_fits_a_narrow_image), unlike a fixed-width UI label.
+        label = f"PATH ({n_pts} pts) blue=sensor orange=nozzles"
+        extra_rgb_panels.append(
+            (label, _render_path_panel(ink.shape, sensor_path, nozzle_path)))
+    _save_panels(panels, path, ink.shape[1], extra_rgb_panels=extra_rgb_panels)
     return True
 
 
-def _save_panels(panels, path: str, width: int) -> None:
+def _render_path_panel(shape: Tuple[int, int],
+                       sensor_path: Optional[List[Tuple[int, int]]],
+                       nozzle_path: Optional[List[Tuple[int, int]]]) -> Image.Image:
+    """A white RGB panel of ``shape`` (height, width) with each given path
+    drawn as a thin polyline plus a start/end marker dot, so direction of
+    travel is visible (a plain line alone doesn't show which end is which).
+    """
+    height, width = shape
+    arr = np.full((height, width, 3), 255, dtype=np.uint8)
+    img = Image.fromarray(arr, mode="RGB")
+    draw = ImageDraw.Draw(img)
+
+    def _draw(pts: Optional[List[Tuple[int, int]]], colour) -> None:
+        if not pts:
+            return
+        # (row, col) -> PIL's (x, y) = (col, row).
+        xy = [(c, r) for r, c in pts]
+        if len(xy) >= 2:
+            draw.line(xy, fill=colour, width=1)
+        _dot(draw, xy[0], _PATH_START_RGB)
+        _dot(draw, xy[-1], _PATH_END_RGB)
+
+    _draw(sensor_path, _SENSOR_PATH_RGB)
+    _draw(nozzle_path, _NOZZLE_PATH_RGB)
+    return img
+
+
+def _dot(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], colour, r: int = 3) -> None:
+    x, y = xy
+    draw.ellipse([x - r, y - r, x + r, y + r], fill=colour)
+
+
+def _save_panels(panels, path: str, width: int, extra_rgb_panels=None) -> None:
+    """``panels`` are ``(label, boolean_mask)`` pairs rendered in grayscale
+    (black-on-white), same as before path overlays existed. ``extra_rgb_panels``
+    are ``(label, PIL.Image in RGB mode)`` pairs appended below them, for
+    panels (like the path overlay) that need colour -- the whole canvas is
+    built as RGB either way so a grayscale panel (via .convert) and a colour
+    one can share one image; a pure grayscale panel still LOOKS identical to
+    the pre-colour version, R==G==B."""
     label_h = 18
     gap = 12
-    total_h = sum(label_h + p.shape[0] + gap for _, p in panels)
-    canvas = Image.new("L", (width, total_h), 255)
+    extra_rgb_panels = extra_rgb_panels or []
+    total_h = (sum(label_h + p.shape[0] + gap for _, p in panels)
+              + sum(label_h + img.height + gap for _, img in extra_rgb_panels))
+    canvas = Image.new("RGB", (width, total_h), (255, 255, 255))
     draw = ImageDraw.Draw(canvas)
     font = load_font(None, 13)
 
     y = 0
     for label, mask in panels:
-        draw.text((3, y + 2), label, font=font, fill=0)
+        draw.text((3, y + 2), label, font=font, fill=(0, 0, 0))
         y += label_h
         img = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8), mode="L")
-        canvas.paste(img, (0, y))
+        canvas.paste(img.convert("RGB"), (0, y))
         y += mask.shape[0] + gap
+    for label, img in extra_rgb_panels:
+        draw.text((3, y + 2), label, font=font, fill=(0, 0, 0))
+        y += label_h
+        canvas.paste(img, (0, y))
+        y += img.height + gap
     canvas.save(path)
