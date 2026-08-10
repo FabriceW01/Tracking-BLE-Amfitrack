@@ -78,7 +78,18 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
         return
 
     page_mapper = None
-    if page_calibration_path is not None:
+    if tracking.page_frame == "simple":
+        # Calibration-free frame (see PageCalibration.simple_frame): page
+        # axes = tracker x/y, yaw about tracker z. Unlike a print pass, the
+        # origin is NOT zeroed here -- this diagnostic is for watching raw
+        # tracker-frame u/v/yaw, and re-zeroing to wherever --pos happened to
+        # start would only obscure that. page_u/page_v therefore read as
+        # absolute tracker x/y (plus the sensor->nozzle offset).
+        page_mapper = PageMapper(PageCalibration.simple_frame(),
+                                 sensor_offset_row_mm=sensor_offset_row_mm,
+                                 sensor_offset_col_mm=sensor_offset_col_mm,
+                                 boresight_offset_rad=math.radians(boresight_deg))
+    elif page_calibration_path is not None:
         try:
             page_mapper = PageMapper(PageCalibration.load(page_calibration_path),
                                      sensor_offset_row_mm=sensor_offset_row_mm,

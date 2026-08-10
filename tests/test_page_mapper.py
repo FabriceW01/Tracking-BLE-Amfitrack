@@ -406,13 +406,18 @@ def test_page_mapper_MUTATION_check_dropping_the_offset_rotation_breaks_the_90de
 
 
 # ===================================================== --pos / monitor_position
-async def _run_monitor_briefly(**kwargs):
+async def _run_monitor_briefly(settings=None, **kwargs):
     """Run monitor_position(simulate=True, ndjson=True, ...) for a short while,
-    then cancel it (like Ctrl+C) and return everything it printed."""
+    then cancel it (like Ctrl+C) and return everything it printed.
+
+    ``settings`` overrides the default TrackingSettings() -- used by the
+    --page-frame simple case, which selects its page frame through the
+    settings rather than through a calibration path."""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         task = asyncio.ensure_future(diagnostics.monitor_position(
-            TrackingSettings(), simulate=True, hz=50.0, ndjson=True, **kwargs))
+            settings if settings is not None else TrackingSettings(),
+            simulate=True, hz=50.0, ndjson=True, **kwargs))
         await asyncio.sleep(0.3)
         task.cancel()
         try:
@@ -551,6 +556,71 @@ def test_monitor_position_reports_an_error_for_a_bad_calibration_path():
     events = _events(output)
     assert any(e.get("event") == "error" for e in events), output
     assert not any(e.get("event") == "position" for e in events)
+
+
+# ======================================== simple frame origin zeroing (M10)
+def test_zero_at_nozzle_puts_the_origin_under_the_nozzle_bar():
+    # The bug this method exists for: set_origin() alone zeroes at the
+    # SENSOR, leaving the nozzle bar ~54.9mm away along +v, so every sample
+    # reads out of bounds on a 15mm-tall page and nothing prints (observed on
+    # the first simulated simple-frame pass). After zero_at_nozzle, the start
+    # pose must project to exactly (0, 0).
+    mapper = PageMapper(PageCalibration.simple_frame())
+    start = np.array([100.0, 40.0, 5.0])
+
+    mapper.set_origin(start)
+    u_sensor, v_sensor, _ = mapper.project(start, IDENTITY_QUAT)
+    expected_v = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM / 2.0
+    assert abs(u_sensor - SENSOR_TO_NOZZLE_COL_MM) < 1e-9
+    assert abs(v_sensor - expected_v) < 1e-9, v_sensor   # the off-page offset
+
+    mapper.zero_at_nozzle(start, IDENTITY_QUAT)
+    u, v, _ = mapper.project(start, IDENTITY_QUAT)
+    assert abs(u) < 1e-9 and abs(v) < 1e-9, (u, v)
+
+
+def test_zero_at_nozzle_keeps_relative_motion_one_to_one():
+    # Zeroing must only shift the frame, never scale or rotate it: moving the
+    # cart 10mm in tracker x / 4mm in y must read as exactly (10, 4).
+    mapper = PageMapper(PageCalibration.simple_frame())
+    start = np.array([7.0, -3.0, 1.0])
+    mapper.zero_at_nozzle(start, IDENTITY_QUAT)
+    u, v, _ = mapper.project(start + np.array([10.0, 4.0, 0.0]), IDENTITY_QUAT)
+    assert abs(u - 10.0) < 1e-9 and abs(v - 4.0) < 1e-9, (u, v)
+
+
+def test_zero_at_nozzle_accounts_for_the_start_yaw():
+    # The sensor->nozzle offset rotates with cart yaw, so zeroing has to use
+    # the pose actually held at START -- otherwise a cart started at an angle
+    # would be zeroed to the wrong point by exactly the rotated offset.
+    for deg in (0.0, 30.0, -45.0, 90.0):
+        mapper = PageMapper(PageCalibration.simple_frame())
+        start = np.array([12.0, 8.0, 0.0])
+        quat = _quat_about_z(deg)
+        mapper.zero_at_nozzle(start, quat)
+        u, v, _ = mapper.project(start, quat)
+        assert abs(u) < 1e-9 and abs(v) < 1e-9, (deg, u, v)
+
+
+def test_zero_at_nozzle_does_not_disturb_yaw_readout():
+    # Zeroing touches the origin only; the identity boresight must still make
+    # yaw read as the raw tracker-z rotation afterwards.
+    mapper = PageMapper(PageCalibration.simple_frame())
+    mapper.zero_at_nozzle(np.array([1.0, 2.0, 3.0]), IDENTITY_QUAT)
+    mapper.project(np.array([1.0, 2.0, 3.0]), _quat_about_z(37.5))
+    assert abs(math.degrees(mapper.last_yaw_rad) - 37.5) < 1e-9
+
+
+def test_simple_frame_pos_stream_reports_page_uv_without_a_calibration():
+    # --page-frame simple must light up the same live page_u/page_v/yaw_deg
+    # readout a traced calibration does, with no --page-calibration at all --
+    # that is what lets the frame be sanity-checked before printing.
+    output = asyncio.run(_run_monitor_briefly(
+        settings=TrackingSettings(page_frame="simple")))
+    events = [e for e in _events(output) if e.get("event") == "position"]
+    assert events, output
+    assert "page_u" in events[0] and "page_v" in events[0], events[0]
+    assert "yaw_deg" in events[0], events[0]
 
 
 if __name__ == "__main__":

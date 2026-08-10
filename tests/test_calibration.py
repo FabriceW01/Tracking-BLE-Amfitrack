@@ -5,6 +5,7 @@ standing in for a cart tracing two page edges.
 Run with:  python tests/test_calibration.py
 """
 
+import math
 import os
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from printhead.calibration import (                                  # noqa: E40
     CalibrationAngleWarning, PageCalibration, calibrate_page, fit_axis,
     trace_length_mm,
 )
+from printhead.rotation import yaw_about_normal                       # noqa: E402
 
 
 def _noisy_line(origin, direction, length_mm, n=40, noise_mm=0.05, seed=0):
@@ -248,6 +250,56 @@ def test_save_and_load_roundtrip_without_boresight_quat():
         loaded = PageCalibration.load(path)
 
     assert loaded.boresight_quat is None
+
+
+# ===================================================== simple (uncalibrated)
+def _quat_about(axis: str, deg: float) -> np.ndarray:
+    h = math.radians(deg) / 2.0
+    s, c = math.sin(h), math.cos(h)
+    return {"x": np.array([s, 0.0, 0.0, c]),
+            "y": np.array([0.0, s, 0.0, c]),
+            "z": np.array([0.0, 0.0, s, c])}[axis]
+
+
+def test_simple_frame_projects_tracker_axes_unchanged():
+    # The whole promise of --page-frame simple: u is the tracker's x, v its
+    # y, z its z -- no rotation, no scaling, no traced calibration.
+    cal = PageCalibration.simple_frame()
+    assert np.allclose(cal.e_col, [1, 0, 0])
+    assert np.allclose(cal.e_row, [0, 1, 0])
+    assert cal.scale_col == 1.0 and cal.scale_row == 1.0
+    for pos in ([0, 0, 0], [123.0, 45.0, 7.5], [-10.0, 3.25, -2.0]):
+        assert np.allclose(cal.project(pos), pos), pos
+
+
+def test_simple_frame_yaw_is_rotation_about_tracker_z():
+    # simple_frame's identity boresight is what makes yaw_about_normal read
+    # out the raw tracker-z rotation; assert that equivalence directly,
+    # since it is the reason the identity quaternion is used rather than None.
+    cal = PageCalibration.simple_frame()
+    for deg in (-90.0, -30.0, 0.0, 15.0, 45.0, 90.0, 120.0):
+        yaw = yaw_about_normal(_quat_about("z", deg), cal.boresight_quat,
+                               cal.e_col, cal.e_row)
+        assert abs(math.degrees(yaw) - deg) < 1e-9, (deg, math.degrees(yaw))
+
+
+def test_simple_frame_boresight_is_identity_not_none():
+    # None would disable rotation correction entirely (see PageMapper's
+    # docstring: no boresight => yaw stays 0.0 forever), which would silently
+    # turn the simple frame into an uncorrected print. Pin the distinction.
+    cal = PageCalibration.simple_frame()
+    assert cal.boresight_quat is not None
+    assert np.allclose(cal.boresight_quat, [0.0, 0.0, 0.0, 1.0])
+
+
+def test_simple_frame_is_independent_between_calls():
+    # Returned fresh each call: the controller mutates .origin at pass start
+    # (PageMapper.zero_at_nozzle), which must not leak into the next pass or
+    # into any other caller via a shared array.
+    a, b = PageCalibration.simple_frame(), PageCalibration.simple_frame()
+    a.origin += 5.0
+    assert np.allclose(b.origin, [0.0, 0.0, 0.0])
+    assert np.allclose(a.e_col, b.e_col)
 
 
 if __name__ == "__main__":

@@ -211,6 +211,60 @@ class PageMapper:
         self.last_roll_rad = 0.0
         self.last_pitch_rad = 0.0
 
+    def set_origin(self, pos) -> None:
+        """
+        Re-zero the page frame's origin at ``pos`` (a world-space position).
+
+        Only meaningful for the calibration-free simple frame (see
+        ``PageCalibration.simple_frame``), whose origin starts at the
+        tracker's world zero -- somewhere on the table, not on the paper --
+        so without this every sample would land far outside the target image
+        and nothing would print. The controller calls it once at pass start,
+        which makes "wherever the cart is when you press START" the page's
+        ``(0, 0)``, exactly like ``AdvanceMapper.set_origin`` does for the 1D
+        line mode.
+
+        A traced calibration must NOT be re-zeroed this way: its origin is a
+        real, measured page corner, and one calibration is meant to stay
+        valid across many passes (see the class docstring). The controller
+        therefore only calls this for the simple frame.
+        """
+        self.calibration.origin = np.asarray(pos, dtype=float).copy()
+
+    def zero_at_nozzle(self, pos, quat=None) -> None:
+        """
+        Re-zero the page frame so that ``project(pos, quat)`` returns
+        ``(0, 0)`` -- i.e. put the page's origin under the NOZZLE BAR, not
+        under the sensor.
+
+        ``set_origin(pos)`` alone is not enough, and gets this visibly wrong:
+        it puts the origin at the *sensor*, but ``project()`` deliberately
+        reports where the nozzle bar is, a fixed
+        ``SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM`` (~62mm) away. Zeroing at the
+        sensor therefore leaves the bar at ``v ~ 54.9mm``
+        (``62.36 - NOZZLE_BAR_WIDTH_MM / 2``) -- far outside a 15mm-tall
+        page -- so every sample reads out of bounds and NOTHING prints. Seen
+        for real on the first simulated simple-frame pass.
+
+        Shifting the origin by ``d`` along ``e_col`` moves ``u`` by
+        ``-d * scale_col`` (see ``PageCalibration.project``), so cancelling a
+        residual ``u0`` needs a shift of ``+u0 / scale_col``; likewise for
+        ``v``. The frame's own axes are used rather than world axes so this
+        stays correct for a rotated (traced) frame too, even though only the
+        simple frame currently calls it.
+
+        ``quat`` matters because the sensor->nozzle offset is rotated by the
+        cart's current yaw: this zeroes at the bar's position *for the pose
+        held at START*, which is exactly the pose the operator is aiming
+        with.
+        """
+        self.set_origin(pos)
+        u0, v0, _ = self.project(pos, quat)
+        cal = self.calibration
+        cal.origin = (cal.origin
+                      + (u0 / cal.scale_col) * cal.e_col
+                      + (v0 / cal.scale_row) * cal.e_row)
+
     def project(self, pos, quat=None) -> "tuple[float, float, float]":
         """
         World position (mm) -> nozzle-0-referenced page-plane

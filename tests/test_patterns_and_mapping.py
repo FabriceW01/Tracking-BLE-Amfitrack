@@ -207,6 +207,46 @@ def test_cli_poll_hz_defaults_to_500_and_round_trips():
     assert args.poll_hz == 200.0
 
 
+def test_cli_page_frame_defaults_to_calibrated():
+    args = cli.parse_args(["Hi", "--dry-run", "--page-calibration", "cal.json"])
+    assert args.page_frame == "calibrated"
+
+
+def test_cli_page_frame_simple_needs_no_calibration():
+    # The whole point of --page-frame simple: page mode without the
+    # --page-calibration requirement that would otherwise SystemExit here.
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
+    assert args.page_frame == "simple" and args.mode == "page"
+    assert args.page_calibration is None
+
+
+def test_cli_page_frame_simple_conflicts_with_page_calibration():
+    # Two different page frames asked for at once -- refuse rather than
+    # silently honouring one (see parse_args).
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                        "--page-calibration", "cal.json"])
+        assert False, "expected SystemExit for simple + --page-calibration"
+    except SystemExit:
+        pass
+
+
+def test_cli_build_page_calibration_synthesises_the_simple_frame():
+    # build_page_calibration must produce the frame itself for simple (no
+    # file is read), and the identity boresight has to survive -- without it
+    # PageMapper disables rotation correction entirely.
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
+    cal = cli.build_page_calibration(args)
+    assert cal is not None
+    assert np.allclose(cal.e_col, [1, 0, 0]) and np.allclose(cal.e_row, [0, 1, 0])
+    assert cal.boresight_quat is not None
+
+
+def test_cli_page_frame_reaches_tracking_settings():
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
+    assert cli.build_tracking(args).page_frame == "simple"
+
+
 def test_cli_rejects_nozzle_block_remap_in_page_mode():
     # Page mode's nozzle-to-row alignment slides with vertical travel (see
     # nozzle_map.py's docstring), so the block permutation -- indexed by fixed

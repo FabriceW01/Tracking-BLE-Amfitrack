@@ -240,12 +240,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--pos-json", action="store_true",
                    help="With --pos: emit one JSON object per sample (newline "
                         "terminated) instead of the live line (used by the web UI)")
+    g.add_argument("--page-frame", choices=("calibrated", "simple"),
+                   default="calibrated",
+                   help="Which 2D frame --mode page prints into. calibrated "
+                        "(default) = a traced --page-calibration with a captured "
+                        "boresight, most accurate. simple = no calibration at "
+                        "all: the tracker's own x/y axes are the page axes, yaw "
+                        "is measured about the tracker's z axis, and the origin "
+                        "is zeroed wherever the cart is at START -- assumes the "
+                        "sheet lies square with the tracker")
     g.add_argument("--page-calibration", metavar="PATH",
                    help="Load a page calibration JSON (see "
                         "printhead.calibration.PageCalibration). Required for "
-                        "--mode page. With --pos, also reports live page-plane "
-                        "u/v/z, to sanity-check a calibration against known hand "
-                        "motion before printing with it")
+                        "--mode page unless --page-frame simple. With --pos, "
+                        "also reports live page-plane u/v/z, to sanity-check a "
+                        "calibration against known hand motion before printing "
+                        "with it")
     g.add_argument("--sensor-offset-row-mm", type=float, default=None,
                    help="Page mode: distance in mm, along the row axis (along "
                         "the nozzle bar, perpendicular to travel), from the "
@@ -305,9 +315,19 @@ def parse_args(argv=None) -> argparse.Namespace:
                  "but page mode's nozzle-to-row alignment shifts with vertical "
                  "travel, so the permutation would only be correct at multiples "
                  "of the block size")
-    if not _debug_mode(args) and args.track and args.mode == "page" and not args.page_calibration:
+    if (not _debug_mode(args) and args.track and args.mode == "page"
+            and args.page_frame == "calibrated" and not args.page_calibration):
         ap.error("--mode page requires --page-calibration PATH (trace the page "
-                 "edges with calibration.calibrate_page() first, then save())")
+                 "edges with calibration.calibrate_page() first, then save()), "
+                 "or --page-frame simple to print without a calibration")
+    if args.page_frame == "simple" and args.page_calibration:
+        # Both given = two different page frames requested at once. Refuse
+        # rather than silently picking one: the traced file is exactly what
+        # --page-frame simple exists to bypass, so quietly honouring either
+        # choice would be a surprise in one direction or the other.
+        ap.error("--page-frame simple and --page-calibration are mutually "
+                 "exclusive: simple takes the tracker's own x/y axes as the "
+                 "page frame and ignores any traced calibration")
     if (not _debug_mode(args) and args.track and args.mode != "page"
             and args.pattern_height_mm is not None):
         ap.error("--pattern-height-mm is only valid with --mode page: line/time "
@@ -338,7 +358,7 @@ def build_tracking(args: argparse.Namespace) -> TrackingSettings:
     # --no-track forces time mode; otherwise honour --mode.
     mode = args.mode if args.track else "time"
     tracking = TrackingSettings(
-        enabled=args.track, mode=mode,
+        enabled=args.track, mode=mode, page_frame=args.page_frame,
         advance_axis=args.advance_axis, axis_sign=args.axis_sign,
         auto_calibrate=args.auto_calibrate, calib_distance_mm=args.calib_distance,
         origin=args.origin, min_move_mm=args.min_move, timeout_s=args.timeout,
@@ -401,10 +421,17 @@ def build_nozzle_map(args: argparse.Namespace) -> Optional[NozzleMapSettings]:
 
 def build_page_calibration(args: argparse.Namespace):
     """Load the PageCalibration named by --page-calibration, or None if it
-    was not given (only --mode page requires it -- see parse_args)."""
+    was not given (only --mode page requires it -- see parse_args).
+
+    ``--page-frame simple`` instead synthesises the calibration-free frame
+    (tracker x/y axes, identity boresight) rather than reading any file --
+    see ``PageCalibration.simple_frame``. parse_args() has already rejected
+    asking for both."""
+    from .calibration import PageCalibration
+    if args.page_frame == "simple":
+        return PageCalibration.simple_frame()
     if not args.page_calibration:
         return None
-    from .calibration import PageCalibration
     try:
         return PageCalibration.load(args.page_calibration)
     except Exception as exc:
