@@ -151,6 +151,23 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(off). Too high under-prints (real gaps left "
                         "unfilled), so raise it gradually and check the "
                         "printed sheet, not just --record")
+    g.add_argument("--nozzle-group", type=int, choices=(1, 2), default=1,
+                   help="Page mode only: tie N adjacent nozzles into one "
+                        "addressable unit that always fires (and doses) "
+                        "together or not at all -- for coarser VERTICAL "
+                        "addressing. N=2 halves the smallest addressable "
+                        "vertical step from NOZZLE_PITCH_MM (~0.0993mm) to "
+                        "~0.1986mm; the physical nozzle pitch itself does "
+                        "not change. A group fires if ANY member's pixel "
+                        "still wants ink (OR rule), so a group straddling "
+                        "an ink/no-ink boundary also inks the no-ink side. "
+                        "Default 1 = today's behaviour, every nozzle "
+                        "addressed individually. NOT the same feature as "
+                        "--nozzle-block-size/--nozzle-order above: those "
+                        "permute which image ROW an individually-addressed "
+                        "nozzle receives, for a rig wired out of order -- "
+                        "this option does not reorder anything, it only "
+                        "ties adjacent nozzles' firing together")
     g.add_argument("--progress-json", action="store_true",
                    help="Page mode: emit one JSON progress event per sample "
                         "(current u/v/row/col + newly-covered cells) instead "
@@ -389,6 +406,14 @@ def parse_args(argv=None) -> argparse.Namespace:
                  "mode packs fixed frames via frames_from_ink(), which requires "
                  "exactly IMAGE_HEIGHT rows, so the pattern height can't be "
                  "changed there")
+    if (not _debug_mode(args) and args.track and args.mode != "page"
+            and args.nozzle_group != 1):
+        ap.error("--nozzle-group 2 is only valid with --mode page: line/time "
+                 "mode packs fixed frames via rendering.frames_from_ink() "
+                 "instead of going through CoverageEngine, so nozzle grouping "
+                 "has no effect there (this is unrelated to "
+                 "--nozzle-block-size/--nozzle-order, which IS supported "
+                 "outside page mode -- see that option's help text)")
     return args
 
 
@@ -507,6 +532,10 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         kwargs["spray_radius_mm"] = args.spray_radius_mm
     if args.spray_strength is not None:
         kwargs["spray_strength"] = args.spray_strength
+    # --nozzle-group has a real default of 1 (not None like the args above),
+    # so it always reaches the controller -- there is no "unset" state to
+    # distinguish from the default here.
+    kwargs["nozzle_group"] = args.nozzle_group
     if args.ble_write_ceiling is not None:
         kwargs["ble_write_ceiling"] = args.ble_write_ceiling
     if args.speed_warning_mm_s is not None:

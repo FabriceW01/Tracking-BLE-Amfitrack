@@ -566,6 +566,120 @@ def test_step_and_page_mapper_rotate_a_body_fixed_row_vector_the_same_direction(
         "inconsistency the original sign error introduced")
 
 
+# ========================================================= nozzle grouping
+def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
+    # G=1 must reduce to EXACTLY today's per-nozzle behaviour -- the most
+    # important correctness property of this feature. Drive two engines (one
+    # built with nozzle_group=1 explicit, one with the parameter omitted
+    # entirely, i.e. whatever the class default is) through the SAME
+    # scripted multi-sample run and require every returned pattern, and both
+    # final printed masks, to match exactly.
+    height = NUM_NOZZLES + 40
+    ink = np.zeros((height, 40), dtype=bool)
+    ink[::3, ::2] = True   # deterministic scattered target (not all-true/all-false)
+
+    # Same v-step/sample-count shape as
+    # test_spray_can_only_ever_add_coverage_never_remove_it above, which is
+    # known to actually accumulate coverage at this dose_hold_s -- a much
+    # faster v sweep (or too few samples) leaves each (row, col) key too
+    # short-lived to ever complete a dose, making the comparison vacuous.
+    samples = [(u, 2.0 + 0.02 * i, 0.001 * i)
+               for i, u in enumerate(np.linspace(0.0, 6.0, 400))]
+
+    def run(**kwargs):
+        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018, **kwargs)
+        seen = [eng.step(u_mm=u, v_mm=v, t=t)[0] for u, v, t in samples]
+        return seen, eng.printed.copy()
+
+    patterns_default, printed_default = run()
+    patterns_g1, printed_g1 = run(nozzle_group=1)
+
+    assert printed_default.any(), "test is vacuous if nothing got printed"
+    assert patterns_default == patterns_g1, (
+        "nozzle_group=1 must return byte-identical patterns to the "
+        "no-argument default, sample for sample")
+    assert np.array_equal(printed_default, printed_g1), (
+        "nozzle_group=1 must leave an identical printed mask to the "
+        "no-argument default")
+
+
+def test_nozzle_group_2_fires_both_members_when_only_one_row_is_wanted():
+    # Single ink row -> only nozzle 0 (row 0) individually "wants" ink;
+    # nozzle 1 (row 1, same group) does not. The OR rule must still fire both.
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
+    ink[0, 0] = True
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    active = _unpack(pattern)
+    assert active[0] and active[1], "both nozzles of the group must fire together"
+    assert not active[2:].any(), "only group 0 (rows 0/1) should be firing"
+
+
+def test_nozzle_group_2_marks_both_rows_printed_on_dose_completion():
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
+    ink[0, 0] = True                        # row 1 is not itself wanted ink
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)   # dwell completes
+
+    assert eng.printed[0, 0], "the actually-wanted row must be printed"
+    assert eng.printed[1, 0], (
+        "row 1 physically received ink too (tied to row 0's nozzle), so it "
+        "must also be marked printed even though it wasn't itself wanted")
+
+
+def test_nozzle_group_2_neither_member_fires_when_neither_is_wanted():
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)   # nothing wanted anywhere
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    active = _unpack(pattern)
+    assert not active[0] and not active[1]
+    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)
+    assert not eng.printed.any()
+
+
+def test_nozzle_group_2_under_yaw_fires_both_members_without_crashing():
+    # Under yaw, group members can legitimately land in different columns
+    # (see step()'s docstring) -- that must not crash the grouping logic,
+    # and the group must still fire together.
+    mm_per_column = 0.5
+    ink = np.ones((300, 200), dtype=bool)
+    yaw = math.radians(45.0)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=DOSE_HOLD_S,
+                         nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=yaw)
+    active = _unpack(pattern)
+    assert active[0] and active[1], "both members of group 0 must fire together under yaw"
+
+
+def test_nozzle_group_2_MUTATION_check_firing_only_the_first_member_breaks_the_both_fire_test():
+    # Inlines a broken alternative implementation: a step() that computes
+    # the group-wanted OR correctly but only sets active[] for the group's
+    # FIRST member, not every member -- reproduced directly here (not by
+    # editing coverage.py), so this regression stays covered by the test
+    # suite even if nobody re-derives it by hand.
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
+    ink[0, 0] = True                # only nozzle 0 (group 0's first member) wants ink
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    real_active = _unpack(pattern)[:2].copy()
+
+    mutated_active = real_active.copy()
+    mutated_active[1] = 0           # the mutation: group's second nozzle never fires
+
+    assert real_active[1] == 1, "the real engine must fire BOTH members of the group"
+    assert not np.array_equal(real_active, mutated_active), (
+        "the mutated (first-member-only) firing pattern must disagree with "
+        "the real engine's -- if this ever matches, the 'both fire' test "
+        "above has stopped actually exercising nozzle_group's OR/fire-"
+        "together rule")
+
+
 # =============================================== mutation check (see PR body)
 def test_step_MUTATION_check_ignoring_yaw_rad_breaks_the_spread_test():
     # Inlines the mutation described in the PR: a step() that accepts

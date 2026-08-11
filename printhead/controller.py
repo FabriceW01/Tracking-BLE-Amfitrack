@@ -141,6 +141,7 @@ class PrintController:
                  dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
                  spray_radius_mm: float = 0.0,
                  spray_strength: float = 0.0,
+                 nozzle_group: int = 1,
                  ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S,
                  speed_warning_mm_s: float = DEFAULT_SPEED_WARNING_MM_S,
                  progress_json: bool = False,
@@ -160,6 +161,11 @@ class PrintController:
         self.dose_hold_s = dose_hold_s
         self.spray_radius_mm = spray_radius_mm
         self.spray_strength = spray_strength
+        # Page mode only (see CoverageEngine.step()'s docstring for the
+        # exact per-group rule) -- coarser vertical addressing, requested by
+        # the hardware owner; not threaded through anywhere on the line/time
+        # path, which never constructs a CoverageEngine at all.
+        self.nozzle_group = nozzle_group
         self.ble_write_ceiling = ble_write_ceiling
         self.speed_warning_mm_s = speed_warning_mm_s
         self.progress_json = progress_json
@@ -526,7 +532,8 @@ class PrintController:
         coverage = CoverageEngine(self._ink, t.mm_per_column,
                                   dose_hold_s=self.dose_hold_s,
                                   spray_radius_mm=self.spray_radius_mm,
-                                  spray_strength=self.spray_strength)
+                                  spray_strength=self.spray_strength,
+                                  nozzle_group=self.nozzle_group)
         pos_filter = PositionFilter(t.smooth_ms / 1000.0)
         sender = PatternSender(ble)
         loop = asyncio.get_event_loop()

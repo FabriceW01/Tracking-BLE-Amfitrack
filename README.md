@@ -440,6 +440,50 @@ Warning Characteristic", im Firmware-Repo `Printhead_Original_V2`, Branch
 fehl — das wird abgefangen und geloggt, bricht den Druckvorgang aber nicht
 ab (siehe oben).
 
+### Düsengruppierung: `--nozzle-group`
+
+Standardmäßig wird jede der 152 Düsen einzeln angesteuert (`--nozzle-group 1`,
+heutiges Verhalten, Default). Mit `--nozzle-group 2` werden je zwei
+benachbarte Düsen zu einer gemeinsam adressierbaren Einheit zusammengefasst,
+die immer nur gemeinsam feuert oder gar nicht. **Gilt nur in `--mode page`**
+(`CoverageEngine`) — Line-/Time-Modus packt feste Frames über einen anderen
+Pfad (`rendering.frames_from_ink`), den diese Option nicht berührt;
+`--nozzle-group 2` außerhalb von `--mode page` wird deshalb beim Parsen
+abgelehnt.
+
+Der physische Düsenabstand (`NOZZLE_PITCH_MM`, ~0,0993 mm) ändert sich dadurch
+**nicht** — nur die kleinste noch einzeln ansprechbare vertikale Einheit wird
+doppelt so groß: aus ~0,0993 mm pro Düse werden bei `--nozzle-group 2`
+~0,1986 mm pro adressierbarer Einheit.
+
+**Feuerregel (OR):** Eine Gruppe feuert, sobald **mindestens eine** ihrer
+beiden Düsen ihr Pixel noch braucht (angefordert und noch nicht gedruckt) —
+so geht nie ein gewolltes Pixel verloren, weil die Gruppe es nicht anfeuert.
+Der Preis: Liegt eine Gruppe genau auf der Grenze zwischen einer Tinte- und
+einer Nicht-Tinte-Zeile, wird beim Fertigwerden auch die Nicht-Tinte-Zeile
+mitgedruckt (Kantenverbreiterung um bis zu eine Zeile) — die Gruppe kann
+nicht nur zur Hälfte feuern.
+
+⚠️ Diese Option ist **kein Fix** für wiederholtes Überdrucken (siehe
+Tintenausbreitung oben, `--spray-radius-mm`/`--spray-strength`) und senkt
+auch nicht spürbar die CPU-Last — gemessen kostet `CoverageEngine.step()`
+~46,9 µs pro Aufruf (2,3 % eines Kerns bei 500 Hz), unabhängig von
+`--nozzle-group`, weil weiterhin alle 152 Düsen pro Sample durchlaufen
+werden, nur gruppiert. Sie existiert ausschließlich, weil eine gröbere
+vertikale Adressierung gewünscht war.
+
+**Nicht zu verwechseln mit `--nozzle-block-size`/`--nozzle-order`**
+(Düsen-Mapping, siehe unten): Das korrigiert eine **Vertauschung** in der
+Verdrahtung — eine Zeilen-*Permutation* — ändert aber nichts daran, dass
+jede Düse einzeln feuert, und ist nur außerhalb von `--mode page` erlaubt
+(die Blockpermutation ist nach Bildzeile indiziert, aber die Zuordnung
+Düse↔Zeile verschiebt sich in `--mode page` mit jeder vertikalen Bewegung —
+siehe den entsprechenden Fehlertext unten). `--nozzle-group` vertauscht
+nichts, sondern bindet benachbarte Düsen fest zusammen, und ist nur
+*innerhalb* von `--mode page` erlaubt. Die beiden Optionen lösen
+unterschiedliche Probleme und schließen sich schon durch den jeweils
+erforderlichen Modus gegenseitig aus.
+
 ---
 
 ## Web-UI

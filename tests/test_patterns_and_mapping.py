@@ -284,6 +284,41 @@ def test_cli_rejects_a_spray_strength_outside_0_to_1():
             pass
 
 
+def test_cli_nozzle_group_defaults_to_1():
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
+    assert args.nozzle_group == 1
+    ctrl = cli.build_controller(args)
+    assert ctrl.nozzle_group == 1
+
+
+def test_cli_nozzle_group_2_reaches_the_controller():
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                           "--nozzle-group", "2"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.nozzle_group == 2
+
+
+def test_cli_rejects_an_invalid_nozzle_group():
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                        "--nozzle-group", "3"])
+        assert False, "expected SystemExit for --nozzle-group 3 (only 1/2 supported)"
+    except SystemExit:
+        pass
+
+
+def test_cli_rejects_nozzle_group_2_outside_page_mode():
+    # Page mode only (CoverageEngine) -- line/time mode packs fixed frames
+    # through a different path (rendering.frames_from_ink) that --nozzle-group
+    # has no effect on, so it must be rejected there rather than silently
+    # ignored.
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--mode", "line", "--nozzle-group", "2"])
+        assert False, "expected SystemExit: --nozzle-group 2 needs --mode page"
+    except SystemExit:
+        pass
+
+
 def test_cli_simple_boresight_defaults_to_none():
     args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
     assert args.simple_boresight is None
