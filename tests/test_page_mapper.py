@@ -26,7 +26,7 @@ from printhead import diagnostics                          # noqa: E402
 from printhead.calibration import PageCalibration           # noqa: E402
 from printhead.config import TrackingSettings                # noqa: E402
 from printhead.geometry import (                              # noqa: E402
-    NOZZLE_BAR_WIDTH_MM,
+    NOZZLE_BAR_SPAN_MM,
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
@@ -60,16 +60,16 @@ def _quat_about_z(deg: float):
 # the NOTE on _NEUTRAL_ROW_OFFSET below) so it doesn't leak into what they
 # check -- that correction is pinned separately further down.
 #
-# NOTE: PageMapper's row axis always subtracts NOZZLE_BAR_WIDTH_MM/2 from
+# NOTE: PageMapper's row axis always subtracts NOZZLE_BAR_SPAN_MM/2 from
 # whatever sensor_offset_row_mm is given -- that subtraction is the measured-
 # bar-CENTRE-to-nozzle-0 conversion, not "no correction". Passing literal 0.0
 # does NOT cancel to a zero net shift; it means "the bar centre is exactly at
-# the sensor", which still shifts v by -NOZZLE_BAR_WIDTH_MM/2 (nozzle 0 sits
+# the sensor", which still shifts v by -NOZZLE_BAR_SPAN_MM/2 (nozzle 0 sits
 # that far from the centre). The value that actually cancels to zero net
-# shift is NOZZLE_BAR_WIDTH_MM/2.0 (see
+# shift is NOZZLE_BAR_SPAN_MM/2.0 (see
 # test_page_mapper_explicit_offset_matches_pre_offset_behaviour below, which
 # pins this distinction directly).
-_NEUTRAL_ROW_OFFSET = NOZZLE_BAR_WIDTH_MM / 2.0
+_NEUTRAL_ROW_OFFSET = NOZZLE_BAR_SPAN_MM / 2.0
 
 
 def test_page_mapper_delegates_to_the_calibration():
@@ -96,9 +96,9 @@ def test_page_mapper_reflects_scale_correction():
 # ===================================================== sensor->nozzle offset
 def test_page_mapper_default_offset_shifts_uv_by_the_exact_measured_amount():
     # Pin the exact arithmetic (not just "it changed"): default row shift is
-    # the measured bar-CENTRE offset minus half the bar width (converting to
+    # the measured bar-CENTRE offset minus half the bar SPAN (converting to
     # the nozzle-0-referenced v CoverageEngine needs); default col shift is
-    # the raw column offset (no bar-width correction on that axis).
+    # the raw column offset (no bar-span correction on that axis).
     cal = PageCalibration(origin=np.array([1.0, 2.0, 3.0]),
                           e_col=np.array([1.0, 0.0, 0.0]),
                           e_row=np.array([0.0, 1.0, 0.0]))
@@ -108,8 +108,8 @@ def test_page_mapper_default_offset_shifts_uv_by_the_exact_measured_amount():
     mapper = PageMapper(cal)     # default offsets
     u, v, z = mapper.project(pos)
 
-    expected_row_shift = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM / 2.0
-    assert abs(expected_row_shift - (-69.86)) < 1e-9  # -62.36 - 15.0/2 = -69.86
+    expected_row_shift = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_SPAN_MM / 2.0
+    assert abs(expected_row_shift - (-69.91)) < 1e-9  # -62.36 - 15.1/2 = -69.91
     expected_col_shift = SENSOR_TO_NOZZLE_COL_MM      # 0.0, no bar-width term
 
     assert abs(u - (u_raw + expected_col_shift)) < 1e-9
@@ -124,18 +124,18 @@ def test_page_mapper_explicit_offset_matches_pre_offset_behaviour():
     # existed at all.
     #
     # This is NOT sensor_offset_row_mm=0.0: the constructor always subtracts
-    # NOZZLE_BAR_WIDTH_MM/2 from whatever row value is given (the measured-
+    # NOZZLE_BAR_SPAN_MM/2 from whatever row value is given (the measured-
     # bar-CENTRE-to-nozzle-0 conversion), so 0.0 in still leaves a
-    # -NOZZLE_BAR_WIDTH_MM/2 mm net shift, NOT zero -- literal (0.0, 0.0)
+    # -NOZZLE_BAR_SPAN_MM/2 mm net shift, NOT zero -- literal (0.0, 0.0)
     # is checked explicitly below to pin exactly that (real, if easy to miss)
     # gotcha. The value that actually cancels the row conversion to zero net
-    # shift is NOZZLE_BAR_WIDTH_MM/2.0 (col has no such conversion, so 0.0 is
+    # shift is NOZZLE_BAR_SPAN_MM/2.0 (col has no such conversion, so 0.0 is
     # already neutral there).
     cal = PageCalibration(origin=np.array([1.0, 2.0, 3.0]),
                           e_col=np.array([1.0, 0.0, 0.0]),
                           e_row=np.array([0.0, 1.0, 0.0]))
     pos = np.array([11.0, 7.0, 3.0])
-    mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+    mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     assert mapper.project(pos) == cal.project(pos)
 
@@ -143,14 +143,14 @@ def test_page_mapper_explicit_offset_matches_pre_offset_behaviour():
 def test_page_mapper_literal_zero_row_offset_is_not_neutral():
     # The gotcha explained above, pinned directly: sensor_offset_row_mm=0.0
     # is a real, physically meaningful value (bar centre coincident with the
-    # sensor), not an "off switch" -- it still shifts v by -NOZZLE_BAR_WIDTH_MM/2.
+    # sensor), not an "off switch" -- it still shifts v by -NOZZLE_BAR_SPAN_MM/2.
     cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
                           e_row=np.array([0.0, 1.0, 0.0]))
     pos = np.array([3.0, 4.0, 0.0])
     _, v_raw, _ = cal.project(pos)
     mapper = PageMapper(cal, sensor_offset_row_mm=0.0, sensor_offset_col_mm=0.0)
     _, v, _ = mapper.project(pos)
-    assert abs(v - (v_raw - NOZZLE_BAR_WIDTH_MM / 2.0)) < 1e-9
+    assert abs(v - (v_raw - NOZZLE_BAR_SPAN_MM / 2.0)) < 1e-9
     assert abs(v - v_raw) > 1.0     # nowhere near neutral
 
 
@@ -169,10 +169,10 @@ def test_negating_the_row_offset_negates_the_resulting_shift():
 
     shift_pos = v_pos - v_raw
     shift_neg = v_neg - v_raw
-    assert abs(shift_pos - (62.36 - NOZZLE_BAR_WIDTH_MM / 2.0)) < 1e-9
-    assert abs(shift_neg - (-62.36 - NOZZLE_BAR_WIDTH_MM / 2.0)) < 1e-9
+    assert abs(shift_pos - (62.36 - NOZZLE_BAR_SPAN_MM / 2.0)) < 1e-9
+    assert abs(shift_neg - (-62.36 - NOZZLE_BAR_SPAN_MM / 2.0)) < 1e-9
     # Negating the measured value must not simply negate the applied shift
-    # (the -bar_width/2 term is a fixed conversion constant, not part of the
+    # (the -bar_span/2 term is a fixed conversion constant, not part of the
     # measurement) -- but it does flip the sign of the *measurement's own*
     # contribution, which is the actual "wrong direction -> negate" lever.
     assert abs((shift_pos - shift_neg) - 2 * 62.36) < 1e-9
@@ -190,10 +190,10 @@ def test_page_mapper_end_to_end_known_world_position():
     u, v, z = mapper.project(world_pos)
 
     expected_u = 30.0 + SENSOR_TO_NOZZLE_COL_MM
-    expected_v = 12.0 + (SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM / 2.0)
+    expected_v = 12.0 + (SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_SPAN_MM / 2.0)
     expected_z = 5.0
     assert abs(u - expected_u) < 1e-9
-    assert abs(v - expected_v) < 1e-9    # 12 + (SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - 7.5)
+    assert abs(v - expected_v) < 1e-9    # 12 + (SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - 7.55)
     assert abs(z - expected_z) < 1e-9
 
 
@@ -231,12 +231,12 @@ def test_page_mapper_90deg_yaw_moves_a_pure_row_offset_entirely_onto_u():
     # on v.
     cal = _cal_with_boresight()
     row_offset_mm = 10.0
-    # PageMapper's constructor always subtracts NOZZLE_BAR_WIDTH_MM/2 from
+    # PageMapper's constructor always subtracts NOZZLE_BAR_SPAN_MM/2 from
     # the given sensor_offset_row_mm (bar-centre -> nozzle-0 conversion, see
     # its docstring) -- add it back so the NET row offset is exactly 10.0mm,
     # col offset exactly 0.0mm, i.e. a "pure row offset" in the sense this
     # test needs.
-    mapper = PageMapper(cal, sensor_offset_row_mm=row_offset_mm + NOZZLE_BAR_WIDTH_MM / 2.0,
+    mapper = PageMapper(cal, sensor_offset_row_mm=row_offset_mm + NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     pos = np.zeros(3)
     u_raw, v_raw, _ = cal.project(pos)
@@ -256,7 +256,7 @@ def test_page_mapper_quat_none_reuses_the_last_known_yaw():
     # quaternion) must not snap the correction back to 0 -- that would make
     # the correction flicker on/off sample to sample for no physical reason.
     cal = _cal_with_boresight()
-    mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0 + 10.0,
+    mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0 + 10.0,
                         sensor_offset_col_mm=0.0)
     pos = np.zeros(3)
 
@@ -279,7 +279,7 @@ def test_page_mapper_zero_yaw_is_bit_identical_to_no_rotation():
     u, v, z = mapper.project(pos, quat=IDENTITY_QUAT)
     u_expected, v_expected, z_expected = cal.project(pos)
     u_expected += -3.5
-    v_expected += 70.0 - NOZZLE_BAR_WIDTH_MM / 2.0
+    v_expected += 70.0 - NOZZLE_BAR_SPAN_MM / 2.0
     assert u == u_expected and v == v_expected and z == z_expected
 
 
@@ -405,7 +405,7 @@ def test_page_mapper_MUTATION_check_dropping_the_offset_rotation_breaks_the_90de
     mutated_u = u_raw + 0.0
     mutated_v = v_raw + row_offset_mm
 
-    mapper = PageMapper(cal, sensor_offset_row_mm=row_offset_mm + NOZZLE_BAR_WIDTH_MM / 2.0,
+    mapper = PageMapper(cal, sensor_offset_row_mm=row_offset_mm + NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     correct_u, correct_v, _ = mapper.project(np.zeros(3), quat=_quat_about_z(90.0))
 
@@ -455,7 +455,7 @@ def _events(output: str):
 def test_monitor_position_reports_page_uvz_when_calibration_given():
     # Identity-ish calibration in the XY plane: SimulatedTracker's default
     # motion (50 mm/s along the default advance axis, x) should come straight
-    # through as page_u. Sensor row offset neutralised (NOZZLE_BAR_WIDTH_MM/2,
+    # through as page_u. Sensor row offset neutralised (NOZZLE_BAR_SPAN_MM/2,
     # NOT 0.0 -- see the NOTE near the top of this file) so this test stays
     # about the --pos/PageMapper wiring itself, not the offset feature
     # (pinned separately below).
@@ -466,7 +466,7 @@ def test_monitor_position_reports_page_uvz_when_calibration_given():
         cal.save(path)
         output = asyncio.run(_run_monitor_briefly(
             page_calibration_path=path,
-            sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+            sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
             sensor_offset_col_mm=0.0))
 
     positions = [e for e in _events(output) if e.get("event") == "position"]
@@ -492,7 +492,7 @@ def test_monitor_position_page_v_reflects_default_sensor_offset():
     positions = [e for e in _events(output) if e.get("event") == "position"]
     assert positions, output
     last = positions[-1]
-    expected_row_shift = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM / 2.0
+    expected_row_shift = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_SPAN_MM / 2.0
     assert abs(last["page_v"] - expected_row_shift) < 0.5   # travel is along x only
 
 
@@ -571,9 +571,9 @@ def test_monitor_position_reports_an_error_for_a_bad_calibration_path():
 # ======================================== simple frame origin zeroing (M10)
 def test_zero_at_nozzle_puts_the_origin_under_the_nozzle_bar():
     # The bug this method exists for: set_origin() alone zeroes at the
-    # SENSOR, leaving the nozzle bar ~69.9mm away along v (magnitude only --
+    # SENSOR, leaving the nozzle bar ~69.91mm away along v (magnitude only --
     # direction depends on the constant's current, hardware-measured sign),
-    # so every sample reads out of bounds on a 15mm-tall page and nothing
+    # so every sample reads out of bounds on a 15.2mm-tall page and nothing
     # prints (observed on the first simulated simple-frame pass). After
     # zero_at_nozzle, the start pose must project to exactly (0, 0).
     mapper = PageMapper(PageCalibration.simple_frame())
@@ -581,7 +581,7 @@ def test_zero_at_nozzle_puts_the_origin_under_the_nozzle_bar():
 
     mapper.set_origin(start)
     u_sensor, v_sensor, _ = mapper.project(start, IDENTITY_QUAT)
-    expected_v = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM / 2.0
+    expected_v = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_SPAN_MM / 2.0
     assert abs(u_sensor - SENSOR_TO_NOZZLE_COL_MM) < 1e-9
     assert abs(v_sensor - expected_v) < 1e-9, v_sensor   # the off-page offset
 

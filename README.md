@@ -188,8 +188,8 @@ Live-`--pos`-Verifikationsbefehl als auch den eigentlichen Druckbefehl an.
 ⚠️ **Wichtig:** Beim ersten echten Hardware-Bring-up ist der Modus ohne
 Fehlermeldung leer durchgelaufen (`active=0` die ganze Zeit, Exit-Code 0,
 nichts auf dem Papier) — der Grund war genau der folgende Punkt: Das
-gerenderte Zielbild ist mit 152 Düsenreihen nur ca. 15 mm
-hoch (`NOZZLE_PITCH_MM * 151`). Damit überhaupt eine Düse zündet, muss der
+gerenderte Zielbild ist mit 152 Düsenreihen nur ca. 15,1 mm
+hoch (`NOZZLE_PITCH_MM * 151`, = `NOZZLE_BAR_SPAN_MM`). Damit überhaupt eine Düse zündet, muss der
 Wagen in `v`-Richtung auf ca. ±15 mm um die abgefahrene Spaltenkante herum
 bleiben — außerhalb dieses schmalen Streifens ist für *jede* Düse `active=0`,
 und der Pass läuft klaglos (Exit-Code 0) durch, ohne dass etwas gedruckt wird.
@@ -241,8 +241,9 @@ konkrete Fehler:
   ist ein Vektor im Wagen-Koordinatensystem, dreht sich also mit dem Wagen
   mit. Als fester Seiten-Versatz behandelt (wie bisher), erzeugt das bei
   75,6° Yaw bis zu **76 mm** Positionsfehler.
-- Die 15 mm breite Düsenleiste selbst fächert bei Drehung über mehrere
-  Spalten auf: bei 75° sind das ca. **14,5 mm** (≈72 Spalten bei
+- Die 15,1 mm lange Spanne der Düsenleiste selbst (Düse 0 → Düse 151,
+  `NOZZLE_BAR_SPAN_MM`) fächert bei Drehung über mehrere
+  Spalten auf: bei 75° sind das ca. **14,6 mm** (≈73 Spalten bei
   0,2 mm/Spalte) statt einer einzigen Spalte für alle 152 Düsen.
 
 Voraussetzung für die Korrektur ist eine **Boresight-Aufnahme** — die
@@ -278,18 +279,18 @@ liegen — weicht es deutlich ab, per `--boresight-deg` nachjustieren oder neu
 kalibrieren (Boresight neu aufnehmen).
 
 **Größeres, richtig proportioniertes Testmuster in `--mode page`:** Genau weil
-`--mode page` nicht auf die ~15 mm der 152 Düsen begrenzt ist, lohnt sich für
+`--mode page` nicht auf die 15,2 mm der 152 Düsen begrenzt ist, lohnt sich für
 den Bring-up ein deutlich größeres `--calibrate`/`--pattern`-Bild als die
 sonst übliche `IMAGE_HEIGHT`-Zeilenzahl:
 
 | Option | Bedeutung |
 |---|---|
-| `--pattern-height-mm MM` | Physische Gesamthöhe von `--calibrate`/`--pattern` in mm (`rows = height_mm / NOZZLE_PITCH_MM`). Nur mit `--mode page` gültig — im Zeilen-/Zeit-Modus packt `frames_from_ink()` feste Frames mit genau `IMAGE_HEIGHT` Zeilen, eine andere Höhe wird dort mit einem klaren Fehler abgelehnt. Ohne diese Option bleibt das Muster bei `IMAGE_HEIGHT` Zeilen (~15 mm) gedeckelt. |
+| `--pattern-height-mm MM` | Physische Gesamthöhe von `--calibrate`/`--pattern` in mm (`rows = height_mm / NOZZLE_PITCH_MM`). Nur mit `--mode page` gültig — im Zeilen-/Zeit-Modus packt `frames_from_ink()` feste Frames mit genau `IMAGE_HEIGHT` Zeilen, eine andere Höhe wird dort mit einem klaren Fehler abgelehnt. Ohne diese Option bleibt das Muster bei `IMAGE_HEIGHT` Zeilen (15,2 mm, = `NOZZLE_BAR_WIDTH_MM`) gedeckelt. |
 | `--pattern-square-height-mm MM` | Zeilenperiode in mm für checkerboard/h-stripes, überschreibt `--pattern-square-rows` (`square_rows = v / NOZZLE_PITCH_MM`). |
 
-⚠️ **Seitenverhältnis-Falle:** Eine Bildzeile ist nur **~0.0993 mm** hoch
-(`NOZZLE_PITCH_MM`). `--pattern-square-rows 20` (der Default) ist damit nur
-knapp **2 mm** hoch, während `--pattern-square-mm 10` (der Default) **10 mm**
+⚠️ **Seitenverhältnis-Falle:** Eine Bildzeile ist nur **0,1 mm** hoch
+(`NOZZLE_PITCH_MM`, exakt seit der Neuvermessung). `--pattern-square-rows 20` (der Default) ist damit
+genau **2 mm** hoch, während `--pattern-square-mm 10` (der Default) **10 mm**
 breit ist — ein 5:1-Streifen statt eines Quadrats. Für tatsächlich quadratische
 Kacheln `--pattern-square-height-mm` statt `--pattern-square-rows` verwenden.
 
@@ -379,7 +380,7 @@ es wird erneut über Papier gedruckt, auf dem längst Tinte ist.
 
 | Option | Bedeutung |
 |---|---|
-| `--spray-radius-mm MM` | Physischer Radius um ein fertiges Pixel, der eine Teildosis abbekommt. **In Millimetern, nicht in Pixeln** — eine Zelle ist ~0.0993 mm hoch, aber `--mm-per-column` (Default 0.2 mm) breit, ein runder Tropfen ist im Raster also ~2:1 elliptisch. Default `0` = aus. |
+| `--spray-radius-mm MM` | Physischer Radius um ein fertiges Pixel, der eine Teildosis abbekommt. **In Millimetern, nicht in Pixeln** — eine Zelle ist 0,1 mm hoch, aber `--mm-per-column` (Default 0.2 mm) breit, ein runder Tropfen ist im Raster also ~2:1 elliptisch. Default `0` = aus. |
 | `--spray-strength F` | Dosis, die ein **direkt angrenzendes** Pixel abbekommt (0.0–1.0), linear abfallend bis 0 am Radius. Ein Pixel gilt ab Gesamtdosis 1.0 als gedruckt: bei `1.0` markiert ein einzelner Tropfen die Nachbarzelle sofort mit, bei `0.5` sind zwei Tropfen nötig. Default `0` = aus. |
 
 Beide müssen `> 0` sein, damit das Modell greift; sonst verhält sich die Engine
@@ -451,10 +452,10 @@ Pfad (`rendering.frames_from_ink`), den diese Option nicht berührt;
 `--nozzle-group 2` außerhalb von `--mode page` wird deshalb beim Parsen
 abgelehnt.
 
-Der physische Düsenabstand (`NOZZLE_PITCH_MM`, ~0,0993 mm) ändert sich dadurch
+Der physische Düsenabstand (`NOZZLE_PITCH_MM`, 0,1 mm) ändert sich dadurch
 **nicht** — nur die kleinste noch einzeln ansprechbare vertikale Einheit wird
-doppelt so groß: aus ~0,0993 mm pro Düse werden bei `--nozzle-group 2`
-~0,1986 mm pro adressierbarer Einheit.
+doppelt so groß: aus 0,1 mm pro Düse werden bei `--nozzle-group 2`
+0,2 mm pro adressierbarer Einheit.
 
 **Feuerregel (OR):** Eine Gruppe feuert, sobald **mindestens eine** ihrer
 beiden Düsen ihr Pixel noch braucht (angefordert und noch nicht gedruckt) —

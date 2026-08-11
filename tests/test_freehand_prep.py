@@ -24,7 +24,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printhead.geometry import (                                     # noqa: E402
-    IMAGE_HEIGHT, NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES,
+    IMAGE_HEIGHT, NOZZLE_BAR_SPAN_MM, NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM,
+    NUM_NOZZLES,
 )
 from printhead.rendering import frames_from_ink, pack_nozzle_bits    # noqa: E402
 from printhead.tracking import (                                     # noqa: E402
@@ -36,11 +37,23 @@ from printhead.ui.server import _try_parse_json                      # noqa: E40
 
 # =================================================================== geometry
 def test_nozzle_pitch_matches_measured_bar_width():
-    # User measurement: 152 nozzles span a 15mm-wide bar edge-to-edge, i.e.
-    # 151 gaps between 152 nozzle centres.
-    assert NOZZLE_BAR_WIDTH_MM == 15.0
+    # User re-measurement: 152 nozzles span a 15.2mm-wide bar edge-to-edge,
+    # i.e. 152 cells of NOZZLE_PITCH_MM each (not 151 gaps between centres --
+    # that reading is NOZZLE_BAR_SPAN_MM below, a different, smaller number).
+    # 15.2 / 152 == 0.1 exactly, which is what makes NOZZLE_PITCH_MM the
+    # primary constant now (see geometry.py's comment).
     assert NUM_NOZZLES == 152
-    assert math.isclose(NOZZLE_PITCH_MM * (NUM_NOZZLES - 1), NOZZLE_BAR_WIDTH_MM)
+    assert NOZZLE_PITCH_MM == 0.1
+    assert math.isclose(NOZZLE_PITCH_MM * NUM_NOZZLES, NOZZLE_BAR_WIDTH_MM)
+    assert math.isclose(NOZZLE_BAR_WIDTH_MM, 15.2)
+
+    # NOZZLE_BAR_SPAN_MM is the OTHER quantity: nozzle-0-to-nozzle-151
+    # centre-to-centre distance (151 gaps), used for "nozzle 0 -> bar centre"
+    # conversions (tracking.PageMapper) -- deliberately NOT the same value as
+    # NOZZLE_BAR_WIDTH_MM under the new cell-based pitch definition.
+    assert math.isclose(NOZZLE_PITCH_MM * (NUM_NOZZLES - 1), NOZZLE_BAR_SPAN_MM)
+    assert math.isclose(NOZZLE_BAR_SPAN_MM, 15.1)
+    assert not math.isclose(NOZZLE_BAR_WIDTH_MM, NOZZLE_BAR_SPAN_MM)
 
 
 # ============================================================== waypoints_path

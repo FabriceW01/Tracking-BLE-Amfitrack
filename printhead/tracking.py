@@ -34,7 +34,7 @@ import numpy as np
 from .calibration import PageCalibration
 from .config import TrackingSettings
 from .geometry import (
-    NOZZLE_BAR_WIDTH_MM,
+    NOZZLE_BAR_SPAN_MM,
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
@@ -176,11 +176,16 @@ class PageMapper:
         # referenced one CoverageEngine actually needs: CoverageEngine places
         # nozzle p at row base_row + p for p in 0..NUM_NOZZLES-1, so the bar's
         # centre (nozzle index (NUM_NOZZLES-1)/2) sits exactly
-        # NOZZLE_BAR_WIDTH_MM/2 further along +v than nozzle 0 -- exact, not
-        # approximate, because NOZZLE_BAR_WIDTH_MM is defined in geometry.py
-        # as exactly (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM. See geometry.py's
-        # SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM for the measurement itself.
-        self._row_offset_mm = sensor_offset_row_mm - NOZZLE_BAR_WIDTH_MM / 2.0
+        # NOZZLE_BAR_SPAN_MM/2 further along +v than nozzle 0 -- exact, not
+        # approximate, because NOZZLE_BAR_SPAN_MM is defined in geometry.py as
+        # exactly (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM. Deliberately NOT
+        # NOZZLE_BAR_WIDTH_MM/2: that constant is the bar's OUTER edge-to-edge
+        # width (152 cells), which is half a pitch too wide for a nozzle-0-
+        # to-centre distance -- see geometry.py's comment above
+        # NOZZLE_BAR_SPAN_MM for why the two are no longer interchangeable.
+        # See geometry.py's SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM for the
+        # measurement itself.
+        self._row_offset_mm = sensor_offset_row_mm - NOZZLE_BAR_SPAN_MM / 2.0
         self._col_offset_mm = sensor_offset_col_mm
         # Additive fine-tune on top of the yaw computed from the captured
         # boresight (see cli.py's --boresight-deg): lets a print that comes
@@ -261,11 +266,11 @@ class PageMapper:
         it puts the origin at the *sensor*, but ``project()`` deliberately
         reports where the nozzle bar is, a fixed
         ``SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM`` (~62mm) away. Zeroing at the
-        sensor therefore leaves the bar at ``v ~ 54.9mm`` (at the +62.36mm
+        sensor therefore leaves the bar at ``v ~ 54.8mm`` (at the +62.36mm
         sign this constant originally shipped with -- ``62.36 -
-        NOZZLE_BAR_WIDTH_MM / 2``; magnitude only changes with the
+        NOZZLE_BAR_SPAN_MM / 2``; magnitude only changes with the
         constant's current sign, the failure mode does not) -- far outside a
-        15mm-tall page -- so every sample reads out of bounds and NOTHING
+        15.2mm-tall page -- so every sample reads out of bounds and NOTHING
         prints. Seen for real on the first simulated simple-frame pass.
 
         Shifting the origin by ``d`` along ``e_col`` moves ``u`` by

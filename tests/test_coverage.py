@@ -19,7 +19,7 @@ from printhead.coverage import (                                       # noqa: E
     CoverageEngine, DEFAULT_DOSE_HOLD_S, bar_offset_uv,
 )
 from printhead.geometry import (                                       # noqa: E402
-    NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
+    NOZZLE_BAR_SPAN_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
 )
 from printhead.rendering import pack_nozzle_bits                       # noqa: E402
 from printhead.tracking import PageMapper                              # noqa: E402
@@ -136,7 +136,7 @@ def test_spray_kernel_gives_the_nearest_neighbour_exactly_the_strength():
 
 
 def test_spray_radius_is_physical_so_the_kernel_is_anisotropic():
-    # A cell is NOZZLE_PITCH_MM (~0.0993mm) tall but mm_per_column (0.2mm)
+    # A cell is NOZZLE_PITCH_MM (0.1mm) tall but mm_per_column (0.2mm)
     # wide, so a round drop must reach further in ROWS than in COLUMNS. A
     # pixel-count radius would silently mean two different real distances.
     kernel = _spray_engine(0.2, 1.0, mm_per_column=0.2)._spray_kernel
@@ -145,12 +145,29 @@ def test_spray_radius_is_physical_so_the_kernel_is_anisotropic():
     assert max_dr > max_dc, (max_dr, max_dc)
     assert abs(max_dr - round(0.2 / NOZZLE_PITCH_MM)) <= 1
 
-    # Square-ish cells (0.1mm/col ~= the 0.0993mm row pitch) must instead
-    # give a near-symmetric kernel -- proving it tracks physical mm, not
-    # an axis-specific fudge.
-    square = _spray_engine(0.2, 1.0, mm_per_column=0.1)._spray_kernel
-    assert abs(max(abs(dr) for dr, _, _ in square)
-               - max(abs(dc) for _, dc, _ in square)) <= 1
+    # mm_per_column == NOZZLE_PITCH_MM exactly (0.1mm, unlike the old
+    # ~0.0993mm pitch this pins to a round number) means the cells are
+    # exactly square, so the kernel must be EXACTLY symmetric, not just
+    # close -- both axes run the identical radius/mm_per_column formula
+    # against the identical mm value.
+    square = _spray_engine(0.2, 1.0, mm_per_column=NOZZLE_PITCH_MM)._spray_kernel
+    square_max_dr = max(abs(dr) for dr, _, _ in square)
+    square_max_dc = max(abs(dc) for _, dc, _ in square)
+    assert square_max_dr == square_max_dc, (square_max_dr, square_max_dc)
+
+    # The exact-match case above can't by itself rule out a bug that just
+    # happens to look square whenever the two axes share one pixel-count
+    # radius (e.g. converting both from raw pixel counts instead of real
+    # mm) -- so also check a mm_per_column NARROWER than the row pitch
+    # (finer columns than rows) and confirm the anisotropy actually
+    # FLIPS DIRECTION (more columns than rows touched), the opposite of
+    # the mm_per_column=0.2 case above. Only a genuine per-axis physical
+    # conversion produces that flip; a pixel-count-based implementation
+    # would not.
+    narrow = _spray_engine(0.2, 1.0, mm_per_column=0.05)._spray_kernel
+    narrow_max_dr = max(abs(dr) for dr, _, _ in narrow)
+    narrow_max_dc = max(abs(dc) for _, dc, _ in narrow)
+    assert narrow_max_dc > narrow_max_dr, (narrow_max_dr, narrow_max_dc)
 
 
 def test_spray_at_full_strength_marks_the_adjacent_pixel_printed():
@@ -425,10 +442,10 @@ def test_step_nonzero_yaw_spreads_nozzles_across_columns_by_the_expected_amount(
     assert touched_cols.size > 1, "a nonzero yaw must spread ink across more than one column"
     spread_cols = int(touched_cols.max() - touched_cols.min())
 
-    # bar_length == (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM == NOZZLE_BAR_WIDTH_MM
+    # bar_length == (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM == NOZZLE_BAR_SPAN_MM
     # exactly (see geometry.py) -- the u-extent across the whole bar is
     # bar_length * sin(yaw_rad), converted to columns.
-    expected_spread_cols = NOZZLE_BAR_WIDTH_MM * math.sin(yaw) / mm_per_column
+    expected_spread_cols = NOZZLE_BAR_SPAN_MM * math.sin(yaw) / mm_per_column
     assert abs(spread_cols - expected_spread_cols) <= 1.0, (spread_cols, expected_spread_cols)
 
 
@@ -448,8 +465,8 @@ def test_step_90deg_yaw_swings_the_bar_to_lower_columns_not_higher():
     #
     # yaw = +90 deg makes this exact and hand-checkable: sin(90deg) == 1.0,
     # cos(90deg) == 0.0 (both exact in IEEE 754), so nozzle NUM_NOZZLES-1
-    # (the far end of the bar, offset_along_bar == NOZZLE_BAR_WIDTH_MM
-    # exactly -- see geometry.py) lands at u = u_mm - NOZZLE_BAR_WIDTH_MM,
+    # (the far end of the bar, offset_along_bar == NOZZLE_BAR_SPAN_MM
+    # exactly -- see geometry.py) lands at u = u_mm - NOZZLE_BAR_SPAN_MM,
     # v == v_mm unchanged -- the whole bar stays on nozzle 0's row and
     # spreads purely in u.
     mm_per_column = 0.5
@@ -464,7 +481,7 @@ def test_step_90deg_yaw_swings_the_bar_to_lower_columns_not_higher():
     col0 = int(round(u_mm / mm_per_column))
     assert eng.printed[row0, col0], "nozzle 0 must stay at its un-rotated (row, col)"
 
-    expected_last_col = col0 - int(round(NOZZLE_BAR_WIDTH_MM / mm_per_column))
+    expected_last_col = col0 - int(round(NOZZLE_BAR_SPAN_MM / mm_per_column))
     touched_cols = np.nonzero(eng.printed[row0])[0]
     actual_last_col = int(touched_cols.min())        # bar swept toward LOWER columns
 
@@ -492,7 +509,7 @@ def test_bar_offset_uv_matches_the_bar_centre_of_steps_own_spread():
     # written, NOT calling this function -- see bar_offset_uv's docstring)
     # per-nozzle placement: NUM_NOZZLES is even, so no single nozzle sits
     # exactly at the geometric bar centre (offset_along_bar_mm =
-    # NOZZLE_BAR_WIDTH_MM / 2, halfway between nozzles 75 and 76) -- but that
+    # NOZZLE_BAR_SPAN_MM / 2, halfway between nozzles 75 and 76) -- but that
     # centre must fall at the midpoint of the column range step() actually
     # spreads across. Same 90 deg exact-arithmetic setup (sin=1, cos=0
     # exactly in IEEE 754) as the "swings to lower columns" test above, so
@@ -509,13 +526,13 @@ def test_bar_offset_uv_matches_the_bar_centre_of_steps_own_spread():
     touched_cols = np.nonzero(eng.printed[row0])[0]
     observed_centre_col = (touched_cols.min() + touched_cols.max()) / 2.0
 
-    du, dv = bar_offset_uv(NOZZLE_BAR_WIDTH_MM / 2.0, yaw)
+    du, dv = bar_offset_uv(NOZZLE_BAR_SPAN_MM / 2.0, yaw)
     predicted_centre_col = (u_mm + du) / mm_per_column
     assert abs(predicted_centre_col - observed_centre_col) <= 1.0, (
         predicted_centre_col, observed_centre_col)
     # math.pi/2 isn't bit-exact (math.pi is a finite approximation of pi),
     # so cos(yaw) is ~6e-17, not exactly 0.0 -- negligible against
-    # NOZZLE_PITCH_MM (~0.099mm) and rounds away in row0 above, but not
+    # NOZZLE_PITCH_MM (0.1mm) and rounds away in row0 above, but not
     # literally zero; assert "negligible", not "==".
     assert abs(dv) < 1e-9, "bar centre must stay on nozzle 0's row at 90 deg yaw"
 
@@ -536,7 +553,7 @@ def test_step_and_page_mapper_rotate_a_body_fixed_row_vector_the_same_direction(
     cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
                           e_row=np.array([0.0, 1.0, 0.0]),
                           boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]))
-    mapper = PageMapper(cal, sensor_offset_row_mm=offset_mm + NOZZLE_BAR_WIDTH_MM / 2.0,
+    mapper = PageMapper(cal, sensor_offset_row_mm=offset_mm + NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     half = yaw / 2.0
     quat = (0.0, 0.0, math.sin(half), math.cos(half))

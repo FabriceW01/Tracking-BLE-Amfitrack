@@ -52,13 +52,44 @@ BLANK_FRAME = bytes(ROW_BYTES)
 # ----------------------------------------------------------------------------
 # Physical nozzle-bar spacing (freehand page-mode; user-measured, confirmed)
 # ----------------------------------------------------------------------------
-# The 152-nozzle bar is 15mm wide edge-to-edge ("152 Duesen, 1,5 cm breit").
-NOZZLE_BAR_WIDTH_MM = 15.0
-# Centre-to-centre spacing between adjacent nozzles: NUM_NOZZLES equally spaced
-# points spanning NOZZLE_BAR_WIDTH_MM edge-to-edge have NUM_NOZZLES - 1 gaps.
-# Needed to convert a page-plane position perpendicular to travel (v_mm) into a
-# nozzle-row index in the freehand coverage engine.
-NOZZLE_PITCH_MM = NOZZLE_BAR_WIDTH_MM / (NUM_NOZZLES - 1)
+# Re-measured directly against the bar: 15.2mm wide across 152 nozzles. That
+# only comes out to a clean number under a CELL interpretation -- each of the
+# 152 nozzles owns its own NOZZLE_PITCH_MM-wide cell, 152 cells side by side
+# span 15.2mm edge-to-edge -- since 15.2 / 152 == 0.1 exactly, whereas
+# 15.2 / 151 == 0.100662..., NOT a clean 0.1. That rules out the earlier
+# ("152 Duesen, 1,5 cm breit") reading, which had instead treated 15.0mm as
+# the CENTRE-TO-CENTRE span from nozzle 0 to nozzle 151 (151 gaps between 152
+# nozzle centres, not 152 cells) -- a different, less precise measurement
+# that gave 15.0 / 151 = 0.099338mm, not the clean 0.1mm this remeasurement
+# confirms.
+#
+# Because the two readings disagree about what "15mm-ish" refers to (152
+# cells vs. 151 gaps), this file now carries BOTH quantities as separate,
+# named constants rather than picking one and hoping every caller means the
+# same thing:
+#
+#   NOZZLE_PITCH_MM     -- the PRIMARY, exact measurement (0.1mm/nozzle).
+#                          Everything else here is derived from it, not the
+#                          other way around, unlike the old width-first
+#                          formula this replaces.
+#   NOZZLE_BAR_WIDTH_MM -- the total INKED width: 152 cells of
+#                          NOZZLE_PITCH_MM each, side by side (15.2mm). This
+#                          is the bar's OUTER edge-to-edge extent -- do NOT
+#                          halve it to get "nozzle 0 -> bar centre" (that is
+#                          off by half a pitch, 0.05mm -- easy to get wrong
+#                          since the two constants are so close). Use
+#                          NOZZLE_BAR_SPAN_MM below for that instead.
+#   NOZZLE_BAR_SPAN_MM  -- the CENTRE-TO-CENTRE distance from nozzle 0 to
+#                          nozzle NUM_NOZZLES - 1 (151 gaps, 15.1mm). The
+#                          bar's centre sits at nozzle index
+#                          (NUM_NOZZLES - 1) / 2, i.e. exactly
+#                          NOZZLE_BAR_SPAN_MM / 2 from nozzle 0 -- THIS is
+#                          the one to halve for "nozzle 0 -> bar centre" (see
+#                          tracking.PageMapper.__init__, the one place that
+#                          conversion happens).
+NOZZLE_PITCH_MM = 0.1
+NOZZLE_BAR_WIDTH_MM = NUM_NOZZLES * NOZZLE_PITCH_MM
+NOZZLE_BAR_SPAN_MM = (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM
 
 # ----------------------------------------------------------------------------
 # Sensor-to-nozzle-bar mechanical offset (freehand page-mode; user-measured)
