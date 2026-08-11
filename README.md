@@ -630,6 +630,7 @@ python main.py --calibrate --pattern-length-mm 200 --mm-per-column 0.2 --preview
 | `v-stripes` | Volle Spaltenbänder – prüft Spalten-/Trackingtiming; ungleiche Streifenbreite = ungleichmäßiger Vorschub |
 | `diagonal` | Wiederkehrende Diagonale – eine vertauschte Düsenzeile zeigt sich sofort als Knick (siehe Düsen-Mapping unten) |
 | `solid` | Vollfläche – prüft Ink-Deckung/Banding |
+| `drill_pattern` | Rastert eine externe Bilddatei (z. B. ein Bohr-/Fadenkreuz-Justiermuster) auf die gewünschte physische Größe, statt ein Muster zu berechnen – siehe `--pattern-image` unten |
 
 ```bash
 python main.py --pattern checkerboard --pattern-square-mm 10 --pattern-square-rows 20
@@ -641,6 +642,35 @@ python main.py --pattern diagonal --mode line --preview diag.png
 | `--pattern-length-mm` | Physische Länge des Musters in mm (Default 200) |
 | `--pattern-square-mm` | Kachel-/Streifenbreite in mm (checkerboard, v-stripes, diagonal-Periode) |
 | `--pattern-square-rows` | Kachel-/Streifenhöhe in Zeilen (checkerboard, h-stripes) — Achtung Seitenverhältnis, siehe `--pattern-square-height-mm` im `--mode page`-Abschnitt oben |
+| `--pattern-image PATH` | Bilddatei für `--pattern drill_pattern` (jedes von PIL lesbare Format: PNG, JPG, BMP, …) |
+
+⚠️ **`drill_pattern` liefert kein Bild mit.** Anders als die übrigen Presets
+berechnet `drill_pattern` nichts selbst, sondern liest eine Bilddatei ein.
+Diese Datei ist **nicht** Teil dieses Repos — sie muss vom Anlagenbesitzer
+selbst bereitgestellt werden, entweder am Default-Pfad
+`assets/drill_pattern.png` (relativ zum `printhead/`-Paket, unabhängig vom
+aktuellen Arbeitsverzeichnis) oder über `--pattern-image PATH` an einer
+beliebigen anderen Stelle. Fehlt die Datei an beiden Stellen, bricht der
+Befehl mit einer klaren Fehlermeldung ab (kein Traceback), die den exakt
+gesuchten Pfad nennt:
+
+```bash
+$ python main.py --pattern drill_pattern --dry-run --mode line
+printhead: error: --pattern drill_pattern needs an image, but none was found
+at '/pfad/zum/repo/assets/drill_pattern.png'. Place an image there (any
+PIL-readable format: PNG, JPG, BMP, ...), or point at a different one with
+--pattern-image PATH.
+
+$ python main.py --pattern drill_pattern --pattern-image mein_muster.png \
+    --dry-run --mode line --preview drill.png
+```
+
+Das Bild wird unabhängig für Breite (`length_mm / mm_per_column` Spalten) und
+Höhe (`rows`, standardmäßig `IMAGE_HEIGHT`) skaliert — **nicht** seitenverhältnis-
+erhaltend. Das sieht auf den ersten Blick wie ein Bug aus, ist aber richtig: eine
+Druck-Zelle ist `mm_per_column` breit, aber `NOZZLE_PITCH_MM` hoch, also zwei
+unterschiedliche physische Maße — nur die unabhängige Skalierung auf die
+angeforderte Spalten-/Zeilenzahl ergibt auf dem Papier die korrekten Proportionen.
 
 ## Düsen-Mapping
 

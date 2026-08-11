@@ -69,6 +69,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--pattern", choices=sorted(patterns.PATTERNS),
                    help="Print a test pattern instead of text; runs through the "
                         "same tracking/time pipeline as text")
+    g.add_argument("--pattern-image", type=str, default=None,
+                   help="Image file for --pattern drill_pattern (any "
+                        "PIL-readable format: PNG, JPG, BMP, ...), rasterised "
+                        "to the requested --pattern-length-mm/--pattern-height-mm "
+                        "size. No image ships with this repo -- without this "
+                        "flag drill_pattern looks for one at "
+                        "assets/drill_pattern.png next to the printhead/ "
+                        "package (see README); if it's not there, place one "
+                        "or pass this flag instead. Ignored by every other "
+                        "--pattern")
     g.add_argument("--pattern-length-mm", type=float, default=200.0,
                    help="Physical length of --calibrate/--pattern (default 200)")
     g.add_argument("--pattern-square-mm", type=float, default=10.0,
@@ -475,7 +485,7 @@ def build_ink(args: argparse.Namespace, mm_per_column: float):
         ink = patterns.PATTERNS[args.pattern](
             args.pattern_length_mm, mm_per_column,
             square_mm=args.pattern_square_mm, square_rows=square_rows,
-            rows=rows)
+            rows=rows, pattern_image=args.pattern_image)
         return ink, f"[pattern {args.pattern} {args.pattern_length_mm:.0f}mm x {height_mm:.0f}mm]"
     render = RenderSettings(
         text=args.text, font=args.font, render_size=args.render_size,

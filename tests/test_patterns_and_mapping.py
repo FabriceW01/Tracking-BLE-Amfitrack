@@ -6,8 +6,10 @@ Run with:  python tests/test_patterns_and_mapping.py
 
 import os
 import sys
+import tempfile
 
 import numpy as np
+from PIL import Image, ImageDraw
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,10 +18,28 @@ from printhead.geometry import IMAGE_HEIGHT, NOZZLE_PITCH_MM  # noqa: E402
 from printhead.nozzle_map import parse_order, remap_rows     # noqa: E402
 from printhead.rendering import frames_from_ink              # noqa: E402
 
-# All six generators that must honour an explicit rows= override (Change 2):
-# the five PATTERNS presets plus ruler_pattern, which isn't in that dict
-# because --calibrate reaches it directly rather than through --pattern NAME.
-_ALL_GENERATORS = list(patterns.PATTERNS.values()) + [patterns.ruler_pattern]
+# All PATTERNS presets except drill_pattern, plus ruler_pattern (which isn't
+# in that dict -- --calibrate reaches it directly, not through --pattern
+# NAME): six generators total that must honour an explicit rows= override
+# (Change 2). drill_pattern is intentionally EXCLUDED here: unlike the other
+# six, it rasterises an external image instead of drawing one proceduraly,
+# and no image ships with this repo (the hardware owner supplies their own,
+# see README) -- calling it with no --pattern-image would just hit its
+# "no image found" SystemExit by design, not exercise rows= at all. It gets
+# its own dedicated tests below, each supplying a throwaway temp image.
+_ALL_GENERATORS = [fn for name, fn in patterns.PATTERNS.items()
+                   if name != "drill_pattern"] + [patterns.ruler_pattern]
+
+
+def _make_test_image(path, size=(40, 40)):
+    """A small synthetic image for drill_pattern tests -- NOT a stand-in for
+    any real asset (none ships with this repo, see README): a black square
+    on a white background, enough to prove ink is produced/thresholded
+    correctly without needing a real crosshair image."""
+    img = Image.new("L", size, 255)
+    ImageDraw.Draw(img).rectangle(
+        (size[0] // 4, size[1] // 4, 3 * size[0] // 4, 3 * size[1] // 4), fill=0)
+    img.save(path)
 
 
 # ============================================================================
@@ -56,6 +76,8 @@ def test_ruler_pattern_ticks():
 def test_pattern_shapes_and_framing():
     mm_per_column = 0.2
     for name, fn in patterns.PATTERNS.items():
+        if name == "drill_pattern":
+            continue    # needs an image; covered by its own tests below
         ink = fn(20.0, mm_per_column, square_mm=5.0, square_rows=10)
         assert ink.dtype == bool, name
         assert ink.shape[0] == IMAGE_HEIGHT, name
@@ -79,6 +101,108 @@ def test_solid_and_stripes_are_nonempty():
     assert h_stripes.any() and not h_stripes.all()
     v_stripes = patterns.v_stripes_pattern(10.0, 1.0, square_mm=2.0)
     assert v_stripes.any() and not v_stripes.all()
+
+
+# ============================================================================
+# drill_pattern -- rasterises an external image (no image ships with this
+# repo; every test below supplies its own throwaway one via --pattern-image,
+# see README)
+# ============================================================================
+def test_drill_pattern_is_registered_and_cli_pattern_parses():
+    assert "drill_pattern" in patterns.PATTERNS
+    args = cli.parse_args(["--pattern", "drill_pattern", "--dry-run", "--mode", "line"])
+    assert args.pattern == "drill_pattern"
+    assert args.pattern_image is None      # not passed -- defaults to None
+
+
+def test_drill_pattern_cli_pattern_image_round_trips():
+    args = cli.parse_args(["--pattern", "drill_pattern", "--dry-run", "--mode", "line",
+                           "--pattern-image", "/some/path.png"])
+    assert args.pattern_image == "/some/path.png"
+
+
+def test_drill_pattern_shape_at_a_couple_of_sizes_with_rows_override():
+    with tempfile.TemporaryDirectory() as tmp:
+        img_path = os.path.join(tmp, "drill.png")
+        _make_test_image(img_path)
+
+        # Default rows (matches every other generator's IMAGE_HEIGHT default).
+        ink = patterns.drill_pattern(20.0, 0.2, pattern_image=img_path)
+        assert ink.dtype == bool
+        assert ink.shape == (IMAGE_HEIGHT, patterns._columns(20.0, 0.2))
+
+        # A second, different physical size...
+        ink2 = patterns.drill_pattern(60.0, 0.1, pattern_image=img_path)
+        assert ink2.shape == (IMAGE_HEIGHT, patterns._columns(60.0, 0.1))
+        assert ink2.shape != ink.shape
+
+        # ...and rows= actually honoured (page mode's taller-than-
+        # IMAGE_HEIGHT targets, same contract as every other generator).
+        ink3 = patterns.drill_pattern(20.0, 0.2, rows=300, pattern_image=img_path)
+        assert ink3.shape == (300, patterns._columns(20.0, 0.2))
+
+
+def test_drill_pattern_has_ink_and_is_not_all_ink():
+    # Catches a threshold inverted (whole image comes out black) or set so
+    # nothing ever crosses it (whole image comes out white).
+    with tempfile.TemporaryDirectory() as tmp:
+        img_path = os.path.join(tmp, "drill.png")
+        _make_test_image(img_path)
+        ink = patterns.drill_pattern(20.0, 0.2, pattern_image=img_path)
+        assert ink.any(), "expected some ink from a source image with a black square"
+        assert not ink.all(), "expected some non-ink from a source image with white background"
+
+
+def test_drill_pattern_missing_file_raises_an_actionable_error():
+    missing = "/definitely/does/not/exist/drill.png"
+    try:
+        patterns.drill_pattern(20.0, 0.2, pattern_image=missing)
+        assert False, "expected SystemExit for a missing --pattern-image file"
+    except SystemExit as exc:
+        assert missing in str(exc), str(exc)
+        assert "--pattern-image" in str(exc), str(exc)
+
+
+def test_drill_pattern_pattern_image_override_works_from_a_different_cwd():
+    # Packaging bug this guards: loading must not depend on the process's
+    # current working directory. Point --pattern-image at an image in one
+    # temp dir, then chdir somewhere else entirely before calling -- since
+    # no default asset ships with this repo, this (not the default path)
+    # is the realistic cwd-independence scenario to prove out.
+    old_cwd = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as image_dir, \
+             tempfile.TemporaryDirectory() as elsewhere:
+            img_path = os.path.join(image_dir, "drill.png")
+            _make_test_image(img_path)
+            os.chdir(elsewhere)
+            ink = patterns.drill_pattern(20.0, 0.2, pattern_image=img_path)
+            assert ink.shape[0] == IMAGE_HEIGHT
+            assert ink.any() and not ink.all()
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_drill_pattern_default_path_is_package_relative_not_cwd_relative():
+    # The other half of the packaging bug: DEFAULT_DRILL_PATTERN_PATH itself
+    # must resolve from this file's own on-disk location (patterns.py's
+    # Path(__file__).resolve()), not the cwd -- otherwise the same command
+    # would look in a different place depending on where it was launched
+    # from. No image ships with this repo (see README), so the observable
+    # proof is the path named in the "not found" error, not a successful
+    # load: it must stay pinned to the real assets/ dir even after chdir.
+    expected = str(patterns.DEFAULT_DRILL_PATTERN_PATH.resolve())
+    old_cwd = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            os.chdir(elsewhere)
+            try:
+                patterns.drill_pattern(20.0, 0.2)
+                assert False, "expected SystemExit: no default asset ships with this repo"
+            except SystemExit as exc:
+                assert expected in str(exc), (expected, str(exc))
+    finally:
+        os.chdir(old_cwd)
 
 
 # ============================================================================
