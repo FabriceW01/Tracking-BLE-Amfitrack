@@ -153,7 +153,9 @@ class CoverageEngine:
     """
 
     def __init__(self, ink: np.ndarray, mm_per_column: float,
-                 dose_hold_s: float = DEFAULT_DOSE_HOLD_S):
+                 dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
+                 spray_radius_mm: float = 0.0,
+                 spray_strength: float = 0.0):
         ink = np.asarray(ink, dtype=bool)
         if ink.ndim != 2:
             raise ValueError(f"ink must be a 2-D (H, W) array, got shape {ink.shape}")
@@ -161,6 +163,16 @@ class CoverageEngine:
         self.printed = np.zeros_like(ink, dtype=bool)
         self.mm_per_column = mm_per_column
         self.dose_hold_s = dose_hold_s
+        self.spray_radius_mm = spray_radius_mm
+        self.spray_strength = spray_strength
+
+        # Fractional dose per pixel, 0.0 .. 1.0 (1.0 == printed). Without
+        # spray this only ever holds 0.0/1.0 and `printed` is simply its
+        # threshold, i.e. behaviour is bit-identical to the pre-spray
+        # engine; with spray it also carries the partial doses neighbours
+        # pick up from a drop landing next to them (see _build_spray_kernel).
+        self.dose = np.zeros(ink.shape, dtype=np.float32)
+        self._spray_kernel = self._build_spray_kernel()
 
         # Per-nozzle dwell state: which pixel each nozzle is currently over
         # (None if not over a wanted, unprinted pixel) and when it arrived.
@@ -190,6 +202,90 @@ class CoverageEngine:
     def done(self) -> bool:
         """True once every wanted ink pixel has been printed."""
         return bool(np.all(self.printed[self.ink]))
+
+    def _build_spray_kernel(self) -> "List[Tuple[int, int, float]]":
+        """
+        Precompute the ``(d_row, d_col, weight)`` splat a single completed
+        drop deposits around itself -- an "ink spread" / dot-gain model.
+
+        A real thermal-inkjet drop does not land inside exactly one grid
+        cell: it wets a small area around where it was aimed. Without
+        modelling that, a return pass whose ``v`` sits a fraction of a
+        millimetre off the outbound one addresses DIFFERENT row indices,
+        finds them unprinted, and fires again over paper that already has
+        ink on it -- the repeated over-printing seen on the rig when driving
+        back and forth over the same strip.
+
+        The radius is given in MILLIMETRES, not pixels, and converted per
+        axis, because the grid is strongly anisotropic: a cell is
+        ``NOZZLE_PITCH_MM`` (~0.0993mm) tall but ``mm_per_column`` (0.2mm by
+        default) wide, so a physically round drop is about 2:1 elliptical in
+        pixel space. A pixel-count radius would silently mean two different
+        physical distances on the two axes.
+
+        Weight falls off linearly with physical distance, NORMALISED so the
+        CLOSEST neighbour in the kernel receives exactly ``spray_strength``
+        and the falloff reaches 0 at ``spray_radius_mm``. That normalisation
+        is what makes the parameter mean something operationally: at
+        ``spray_strength = 1.0`` an immediately adjacent pixel is treated as
+        fully printed (dose 1.0) by a single drop, so a return pass drifting
+        one row over will not fire it again; at 0.5 it takes two drops.
+
+        Without the normalisation ``strength`` would scale a raw
+        ``1 - d/radius`` term, and since the nearest neighbour already sits
+        about half a radius out, even ``strength = 1.0`` could only ever give
+        it ~0.5 -- never enough to complete a pixel from spray alone, and
+        measurably useless for the repeat-printing case this exists to fix
+        (verified: it changed the per-pass firing counts by exactly zero).
+
+        The centre itself is not in the kernel -- it always receives a full
+        1.0 dose from the dwell that completed it (see ``_deposit``).
+
+        Returns an empty kernel (spray disabled, behaviour identical to the
+        pre-spray engine) when either parameter is <= 0.
+        """
+        if self.spray_radius_mm <= 0.0 or self.spray_strength <= 0.0:
+            return []
+        r_rows = int(self.spray_radius_mm / NOZZLE_PITCH_MM)
+        r_cols = int(self.spray_radius_mm / self.mm_per_column) if self.mm_per_column else 0
+        raw = []
+        for dr in range(-r_rows, r_rows + 1):
+            for dc in range(-r_cols, r_cols + 1):
+                if dr == 0 and dc == 0:
+                    continue
+                d_mm = math.hypot(dr * NOZZLE_PITCH_MM, dc * self.mm_per_column)
+                if d_mm > self.spray_radius_mm:
+                    continue           # outside the round drop, not the box
+                f = 1.0 - d_mm / self.spray_radius_mm
+                if f > 0.0:
+                    raw.append((dr, dc, f))
+        if not raw:
+            return []
+        f_max = max(f for _, _, f in raw)      # the closest neighbour's falloff
+        return [(dr, dc, self.spray_strength * f / f_max) for dr, dc, f in raw]
+
+    def _deposit(self, row: int, col: int) -> None:
+        """Land a completed drop at ``(row, col)``: full dose at the centre,
+        plus the spray kernel's partial doses around it. Any pixel whose
+        accumulated dose reaches 1.0 counts as printed.
+
+        Called exactly once per completing pixel: the centre always reaches
+        1.0 here, so the pixel is `printed` on return, which makes it
+        unwanted and releases the nozzle -- it cannot deposit twice."""
+        h, w = self.ink.shape
+        self.dose[row, col] = 1.0
+        self.printed[row, col] = True
+        if not self._spray_kernel:
+            return
+        for dr, dc, weight in self._spray_kernel:
+            r, c = row + dr, col + dc
+            if 0 <= r < h and 0 <= c < w and not self.printed[r, c]:
+                acc = self.dose[r, c] + weight
+                if acc >= 1.0:
+                    self.dose[r, c] = 1.0
+                    self.printed[r, c] = True
+                else:
+                    self.dose[r, c] = acc
 
     def step(self, u_mm: float, v_mm: float, t: float,
              yaw_rad: float = 0.0) -> "Tuple[bytes, bool]":
@@ -287,7 +383,7 @@ class CoverageEngine:
 
             active[p] = True
             if t - self._nozzle_since[p] >= self.dose_hold_s:
-                self.printed[row, col] = True
+                self._deposit(row, col)
 
         self.last_in_bounds = in_bounds_any
         pattern = pack_nozzle_bits(active)
