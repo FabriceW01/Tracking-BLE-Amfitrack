@@ -21,6 +21,7 @@ from printhead.coverage import (                                       # noqa: E
 from printhead.geometry import (                                       # noqa: E402
     NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
 )
+from printhead.rendering import pack_nozzle_bits                       # noqa: E402
 from printhead.tracking import PageMapper                              # noqa: E402
 
 DOSE_HOLD_S = 0.1
@@ -601,6 +602,57 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
     assert np.array_equal(printed_default, printed_g1), (
         "nozzle_group=1 must leave an identical printed mask to the "
         "no-argument default")
+
+    # The check above only proves the default IS 1 -- both runs go through
+    # the same grouped code path, so on its own it cannot catch the grouping
+    # rewrite changing behaviour. Compare against an INDEPENDENT
+    # reimplementation of the original per-nozzle rule (the code this
+    # replaced) to actually pin the equivalence.
+    def reference(yaw_rad):
+        """The pre-grouping per-nozzle rule, written out standalone."""
+        printed = np.zeros_like(ink, dtype=bool)
+        nozzle_pixel = [None] * NUM_NOZZLES
+        nozzle_since = [None] * NUM_NOZZLES
+        out = []
+        for u_mm, v_mm, t in samples:
+            active = np.zeros(NUM_NOZZLES, dtype=bool)
+            zero_yaw = yaw_rad == 0.0
+            if zero_yaw:
+                col_fixed = int(round(u_mm / 0.2))
+                base_row = int(round(v_mm / NOZZLE_PITCH_MM))
+            for p in range(NUM_NOZZLES):
+                if zero_yaw:
+                    col, row = col_fixed, base_row + p
+                else:
+                    d = p * NOZZLE_PITCH_MM
+                    col = int(round((u_mm - d * math.sin(yaw_rad)) / 0.2))
+                    row = int(round((v_mm + d * math.cos(yaw_rad)) / NOZZLE_PITCH_MM))
+                in_bounds = 0 <= row < ink.shape[0] and 0 <= col < ink.shape[1]
+                wanted = in_bounds and bool(ink[row, col]) and not printed[row, col]
+                if not wanted:
+                    nozzle_pixel[p] = None
+                    nozzle_since[p] = None
+                    continue
+                if nozzle_pixel[p] != (row, col):
+                    nozzle_pixel[p] = (row, col)
+                    nozzle_since[p] = t
+                active[p] = True
+                if t - nozzle_since[p] >= 0.0018:
+                    printed[row, col] = True
+            out.append(pack_nozzle_bits(active))
+        return out, printed
+
+    for yaw in (0.0, math.radians(30.0)):
+        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018,
+                             nozzle_group=1)
+        got = [eng.step(u_mm=u, v_mm=v, t=t, yaw_rad=yaw)[0] for u, v, t in samples]
+        ref_patterns, ref_printed = reference(yaw)
+        assert got == ref_patterns, (
+            f"nozzle_group=1 diverged from the original per-nozzle rule at "
+            f"yaw={yaw}")
+        assert np.array_equal(eng.printed, ref_printed), (
+            f"nozzle_group=1 printed mask diverged from the original rule at "
+            f"yaw={yaw}")
 
 
 def test_nozzle_group_2_fires_both_members_when_only_one_row_is_wanted():
