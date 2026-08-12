@@ -299,7 +299,25 @@ class CoverageEngine:
 
         Called exactly once per completing pixel: the centre always reaches
         1.0 here, so the pixel is `printed` on return, which makes it
-        unwanted and releases the nozzle -- it cannot deposit twice."""
+        unwanted and releases the nozzle -- it cannot deposit twice.
+
+        CORRECTION: the spray loop used to mark a neighbour ``printed`` on
+        dose alone, without checking ``self.ink[r, c]`` -- i.e. it could
+        mark a pixel that was never ``wanted`` (no ink asked for there) as
+        printed anyway. Confirmed harmless for the CENTRE (only ever called
+        on a pixel that WAS wanted -- see ``step()``), but the neighbours it
+        splats onto get no such guarantee. Concretely, a completed pixel
+        sitting near a pattern boundary (e.g. a checkerboard square's edge)
+        could spray a "printed" mark onto the far side of that boundary --
+        a pixel that was never fired at all, now permanently skipped if a
+        later pass tries to reach it (``wanted`` requires ``not
+        self.printed``), silently eating a real corner/edge of the pattern.
+        Reproduced directly: a 1-pixel-wide unwanted neighbour one row over
+        from a completed wanted pixel came back ``printed=True`` with
+        ``dose=1.0`` despite ``ink`` being False there and no fire ever
+        having reached it. Now gated on ``self.ink[r, c]`` the same way the
+        centre already effectively is (via ``wanted`` in ``step()``): spray
+        only ever finishes a pixel that was already asked for."""
         h, w = self.ink.shape
         self.dose[row, col] = 1.0
         self.printed[row, col] = True
@@ -307,7 +325,8 @@ class CoverageEngine:
             return
         for dr, dc, weight in self._spray_kernel:
             r, c = row + dr, col + dc
-            if 0 <= r < h and 0 <= c < w and not self.printed[r, c]:
+            if (0 <= r < h and 0 <= c < w and self.ink[r, c]
+                    and not self.printed[r, c]):
                 acc = self.dose[r, c] + weight
                 if acc >= 1.0:
                     self.dose[r, c] = 1.0

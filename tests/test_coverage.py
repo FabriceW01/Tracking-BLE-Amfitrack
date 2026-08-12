@@ -234,6 +234,39 @@ def test_spray_can_only_ever_add_coverage_never_remove_it():
     assert sprayed.sum() >= plain.sum()
 
 
+def test_spray_never_marks_a_pixel_that_was_never_wanted():
+    # REGRESSION, found while analysing a real checkerboard print
+    # (pass_spray.csv, --dose-hold-s 0.001 --spray-radius-mm 0.3
+    # --spray-strength 0.8): the physical print lost the checkerboard's
+    # black/white alternation and came out as one solid inked blob. The
+    # dominant cause turned out to be BLE write backlog (dose_hold_s far too
+    # short -- see the module's own dose_hold_s guidance), NOT this bug --
+    # 0.3mm cannot bridge a 10mm checkerboard square either way -- but while
+    # ruling spray out, _deposit's spray loop turned out to mark a
+    # neighbour `printed` on accumulated dose alone, with no check of
+    # `self.ink[r, c]`. A pixel that was never `wanted` -- e.g. a white
+    # checkerboard cell one row across a pattern boundary from a completed
+    # black cell -- could come back `printed=True` despite never having
+    # been fired at. Harmless for the print itself (a pixel with ink=False
+    # was never going to fire regardless of `printed`), but it corrupts the
+    # COVERAGE BOOKKEEPING: if that same (row, col) is later wanted by a
+    # DIFFERENT pattern reusing this engine, or the false "printed" bit
+    # otherwise gets trusted, a genuinely wanted pixel would be silently
+    # skipped, having never actually been inked.
+    ink = np.zeros((41, 41), dtype=bool)
+    ink[20, 20] = True                       # the only wanted pixel
+    # ink[21, 20] stays False -- one row over, inside the spray radius below.
+    eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.001,
+                         spray_radius_mm=0.25, spray_strength=1.0)
+    eng._deposit(20, 20)
+    assert eng.printed[20, 20], "the actually-wanted centre must still print"
+    assert not eng.printed[21, 20], (
+        "a pixel with ink=False was marked printed by spray alone, despite "
+        "never being fired at")
+    assert eng.dose[21, 20] == 0.0, (
+        "an unwanted neighbour must not accumulate spray dose either")
+
+
 # ============================================================== basic dosing
 def test_single_pass_completes_after_dose_hold_elapses():
     ink = np.ones((10, 5), dtype=bool)
