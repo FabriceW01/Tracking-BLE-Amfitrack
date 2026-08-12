@@ -782,6 +782,16 @@ $('btnCalReset').onclick=()=>{
   setBoresightStatus('not captured -- rotation correction will be disabled');
   $('calResult').style.display='none'; $('btnCalSave').disabled=true;
 };
+function fmtQuality(q){
+  // q's fields are all null on a calibration with no measured quality --
+  // saved before this feature existed, or built without calibrate_page
+  // (see PageCalibration's docstring) -- report that plainly rather than
+  // printing "null" or a fabricated 0.
+  if(!q || q.col_trace_length_mm==null){ return 'quality: n/a (no metrics on this calibration)'; }
+  return `quality: normal tilt ${q.normal_tilt_deg.toFixed(2)}°  |  `+
+    `col edge ${q.col_trace_length_mm.toFixed(0)}mm, ${q.col_sample_count} samples, ${q.col_rms_residual_mm.toFixed(2)}mm RMS  |  `+
+    `row edge ${q.row_trace_length_mm.toFixed(0)}mm, ${q.row_sample_count} samples, ${q.row_rms_residual_mm.toFixed(2)}mm RMS`;
+}
 $('btnCalCompute').onclick=async()=>{
   if(colSamples.length<2 || rowSamples.length<2){
     log('! need at least 2 samples on each edge -- trace both edges first','err'); return;
@@ -796,7 +806,9 @@ $('btnCalCompute').onclick=async()=>{
   $('calResult').style.display='';
   let txt=`angle error: ${r.angle_error_deg.toFixed(1)}°  |  scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}`;
   txt+=`\nboresight: ${r.has_boresight ? 'captured (rotation correction enabled)' : 'NOT captured (rotation correction disabled)'}`;
+  txt+='\n'+fmtQuality(r.quality);
   if(r.warning) txt+='\n⚠ '+r.warning;
+  if(r.quality_warning) txt+='\n⚠ '+r.quality_warning;
   $('calSummary').textContent=txt;
   $('btnCalSave').disabled=false;
 };
@@ -818,7 +830,8 @@ $('btnCalLoad').onclick=async()=>{
   $('calResult').style.display='';
   $('calSummary').textContent=`loaded '${val('cal_load_path')}'  |  angle error: ${r.angle_error_deg.toFixed(1)}°  |  `+
     `scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}  |  `+
-    `boresight: ${hasBoresight ? 'yes' : 'no'}`;
+    `boresight: ${hasBoresight ? 'yes' : 'no'}`+
+    `\n`+fmtQuality(r.quality);
   $('btnCalSave').disabled=false;
   $('page_calibration').value=val('cal_load_path');
 };

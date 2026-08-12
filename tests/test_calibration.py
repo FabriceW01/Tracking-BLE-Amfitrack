@@ -16,8 +16,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printhead.calibration import (                                  # noqa: E402
-    CalibrationAngleWarning, PageCalibration, calibrate_page, fit_axis,
-    trace_length_mm,
+    CalibrationAngleWarning, CalibrationQualityWarning, PageCalibration,
+    calibrate_page, fit_axis, fit_axis_quality, trace_length_mm,
 )
 from printhead.rotation import cart_rotation_angles, yaw_about_normal  # noqa: E402
 
@@ -77,6 +77,48 @@ def test_trace_length_mm_matches_known_span():
     assert abs(length - 210.0) < 1.0                  # noise is tiny relative to span
 
 
+# ============================================================= fit_axis_quality
+def test_fit_axis_quality_reports_length_count_and_near_zero_rms_when_clean():
+    direction = np.array([1.0, 0.0, 0.0])
+    samples = _noisy_line(np.zeros(3), direction, 210.0, n=50, noise_mm=0.0)
+    _, fitted_dir = fit_axis(samples)
+    q = fit_axis_quality(samples, fitted_dir)
+    assert abs(q.length_mm - 210.0) < 1e-6
+    assert q.sample_count == 50
+    assert q.rms_residual_mm < 1e-9                    # noise-free -> perfectly on the line
+
+
+def test_fit_axis_quality_rms_residual_reflects_injected_noise():
+    # Noise is injected PERPENDICULAR to the fitted direction here (the
+    # direction itself is along x, noise along y/z only), so the RMS
+    # residual should land close to the injected noise std, not near zero.
+    direction = np.array([1.0, 0.0, 0.0])
+    rng = np.random.default_rng(0)
+    t = np.linspace(0.0, 200.0, 100)
+    samples = np.zeros((100, 3))
+    samples[:, 0] = t
+    samples[:, 1] = rng.normal(0.0, 0.8, 100)
+    samples[:, 2] = rng.normal(0.0, 0.8, 100)
+    _, fitted_dir = fit_axis(samples)
+    q = fit_axis_quality(samples, fitted_dir)
+    # RMS of two independent N(0, 0.8) components combined -> sqrt(2)*0.8 ~= 1.13
+    assert 0.7 < q.rms_residual_mm < 1.6, q.rms_residual_mm
+
+
+def test_fit_axis_quality_does_not_change_with_more_noise_free_samples():
+    # Sample count is reported, not baked into length/rms: doubling the
+    # sample density along the same clean line should leave length/rms
+    # essentially unchanged, only sample_count should differ.
+    direction = np.array([0.0, 1.0, 0.0])
+    sparse = _noisy_line(np.zeros(3), direction, 100.0, n=10, noise_mm=0.0)
+    dense = _noisy_line(np.zeros(3), direction, 100.0, n=100, noise_mm=0.0)
+    q_sparse = fit_axis_quality(sparse, direction)
+    q_dense = fit_axis_quality(dense, direction)
+    assert abs(q_sparse.length_mm - q_dense.length_mm) < 1e-6
+    assert q_sparse.sample_count == 10
+    assert q_dense.sample_count == 100
+
+
 # ============================================================== calibrate_page
 def _page_traces(width_mm=210.0, height_mm=297.0, corner=(0.0, 0.0, 0.0),
                   col_dir=(1.0, 0.0, 0.0), row_dir=(0.0, 1.0, 0.0),
@@ -123,6 +165,77 @@ def test_calibrate_page_does_not_warn_on_near_perpendicular_edges():
     with warnings.catch_warnings():
         warnings.simplefilter("error", CalibrationAngleWarning)
         calibrate_page(col_samples, row_samples)   # would raise if it warned
+
+
+# ================================================== fit-quality metrics + warnings
+def test_calibrate_page_populates_quality_metrics():
+    col_samples, row_samples = _page_traces()          # 210mm x 297mm, 40 samples each
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", CalibrationQualityWarning)
+        cal = calibrate_page(col_samples, row_samples)  # must not warn -- good trace
+    assert abs(cal.col_trace_length_mm - 210.0) < 1.0
+    assert abs(cal.row_trace_length_mm - 297.0) < 1.0
+    assert cal.col_sample_count == 40
+    assert cal.row_sample_count == 40
+    assert cal.col_rms_residual_mm < 0.1               # noise_mm=0.02 default
+    assert cal.row_rms_residual_mm < 0.1
+    # e_col~=(1,0,0), e_row~=(0,1,0) -> normal is close to the tracker's own
+    # z axis (not bit-exact: noise_mm=0.02 default noise nudges the fit).
+    assert abs(cal.normal_tilt_deg) < 0.1, cal.normal_tilt_deg
+
+
+def test_calibrate_page_warns_on_short_trace():
+    # 30mm column edge -- under the 50mm MIN_TRACE_LENGTH_MM threshold.
+    col_samples, row_samples = _page_traces(width_mm=30.0, noise_mm=0.02)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cal = calibrate_page(col_samples, row_samples)
+    assert cal.col_trace_length_mm < 50.0
+    quality_warnings = [w for w in caught if issubclass(w.category, CalibrationQualityWarning)]
+    assert quality_warnings, caught
+    assert "column" in str(quality_warnings[0].message)
+    assert "mm long" in str(quality_warnings[0].message)
+
+
+def test_calibrate_page_warns_on_noisy_trace():
+    # 2mm RMS-scale noise on the row edge -- well above the 1mm MAX_RMS_RESIDUAL_MM.
+    col_samples, row_samples = _page_traces(noise_mm=0.02)
+    _, noisy_row_samples = _page_traces(noise_mm=2.0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cal = calibrate_page(col_samples, noisy_row_samples)
+    assert cal.row_rms_residual_mm > 1.0
+    quality_warnings = [w for w in caught if issubclass(w.category, CalibrationQualityWarning)]
+    assert quality_warnings, caught
+    assert "row" in str(quality_warnings[0].message)
+    assert "RMS residual" in str(quality_warnings[0].message)
+
+
+def test_calibrate_page_warns_on_few_samples():
+    # Only 8 samples per edge -- under the 20-sample MIN_SAMPLE_COUNT.
+    col_samples = _noisy_line(np.zeros(3), np.array([1.0, 0.0, 0.0]), 210.0, n=8, noise_mm=0.02)
+    row_samples = _noisy_line(np.zeros(3), np.array([0.0, 1.0, 0.0]), 297.0, n=8, noise_mm=0.02, seed=1)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cal = calibrate_page(col_samples, row_samples)
+    assert cal.col_sample_count == 8 and cal.row_sample_count == 8
+    quality_warnings = [w for w in caught if issubclass(w.category, CalibrationQualityWarning)]
+    assert quality_warnings, caught
+    assert "samples" in str(quality_warnings[0].message)
+
+
+def test_calibrate_page_normal_tilt_reflects_a_tilted_page():
+    # Tilt the ROW edge 20 deg out of the xy plane (nonzero z component) --
+    # the fitted page normal should tilt away from tracker z by roughly the
+    # same amount (not exactly: e_col stays in-plane, only e_row tilts, and
+    # Gram-Schmidt only forces perpendicularity, not planarity).
+    tilt = np.radians(20.0)
+    row_dir = (0.0, np.cos(tilt), np.sin(tilt))
+    col_samples, row_samples = _page_traces(row_dir=row_dir, noise_mm=0.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", CalibrationAngleWarning)
+        cal = calibrate_page(col_samples, row_samples)
+    assert cal.normal_tilt_deg > 5.0, cal.normal_tilt_deg
 
 
 def test_calibrate_page_scale_from_known_sheet_size():
@@ -250,6 +363,71 @@ def test_save_and_load_roundtrip_without_boresight_quat():
         loaded = PageCalibration.load(path)
 
     assert loaded.boresight_quat is None
+
+
+def test_save_and_load_roundtrip_includes_quality_metrics():
+    col_samples, row_samples = _page_traces()
+    cal = calibrate_page(col_samples, row_samples)
+    assert cal.col_trace_length_mm is not None          # calibrate_page always fills these
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "page_calibration.json")
+        cal.save(path)
+        loaded = PageCalibration.load(path)
+
+    assert abs(loaded.col_trace_length_mm - cal.col_trace_length_mm) < 1e-9
+    assert abs(loaded.row_trace_length_mm - cal.row_trace_length_mm) < 1e-9
+    assert abs(loaded.col_rms_residual_mm - cal.col_rms_residual_mm) < 1e-9
+    assert abs(loaded.row_rms_residual_mm - cal.row_rms_residual_mm) < 1e-9
+    assert loaded.col_sample_count == cal.col_sample_count
+    assert loaded.row_sample_count == cal.row_sample_count
+    assert abs(loaded.normal_tilt_deg - cal.normal_tilt_deg) < 1e-9
+
+
+def test_quality_metrics_default_to_none_when_built_directly():
+    # A calibration built directly (not via calibrate_page) -- e.g. every
+    # PageCalibration(...) call elsewhere in this file -- has no measured
+    # quality. None, not a fabricated 0.0, is what must come back: 0.0 would
+    # read as "measured, and perfect", which is simply false here.
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]))
+    assert cal.col_trace_length_mm is None
+    assert cal.row_trace_length_mm is None
+    assert cal.col_rms_residual_mm is None
+    assert cal.row_rms_residual_mm is None
+    assert cal.col_sample_count is None
+    assert cal.row_sample_count is None
+    assert cal.normal_tilt_deg is None
+
+
+def test_to_dict_omits_absent_quality_fields():
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]))
+    d = cal.to_dict()
+    for key in ("col_trace_length_mm", "row_trace_length_mm",
+               "col_rms_residual_mm", "row_rms_residual_mm",
+               "col_sample_count", "row_sample_count", "normal_tilt_deg"):
+        assert key not in d, key
+
+
+def test_from_dict_loads_a_pre_feature_json_with_no_quality_fields():
+    # REGRESSION: the operator has a real saved page_calibration.json from
+    # before this feature existed -- from_dict must load it fine, with the
+    # quality fields defaulting to None rather than raising a KeyError or
+    # fabricating numbers. Built as a plain dict here (not via to_dict) to
+    # simulate exactly that older file on disk.
+    old_style = {
+        "origin": [0.0, 0.0, 0.0],
+        "e_col": [1.0, 0.0, 0.0],
+        "e_row": [0.0, 1.0, 0.0],
+        "scale_col": 1.0,
+        "scale_row": 1.0,
+        "angle_error_deg": 0.3,
+    }
+    cal = PageCalibration.from_dict(old_style)
+    assert cal.col_trace_length_mm is None
+    assert cal.normal_tilt_deg is None
+    assert abs(cal.angle_error_deg - 0.3) < 1e-9        # unaffected fields still load
 
 
 # ===================================================== simple (uncalibrated)
