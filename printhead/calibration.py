@@ -154,10 +154,32 @@ def fit_axis_quality(samples: np.ndarray, direction: np.ndarray) -> AxisFitQuali
     direction = np.asarray(direction, dtype=float)
     length_mm = trace_length_mm(samples, direction)
 
-    # Perpendicular residual: subtract off each sample's component ALONG the
-    # fitted direction (mirrors trace_length_mm's own "relative to the first
-    # sample" convention), leaving only the part across the line.
-    rel = samples - samples[0]
+    # Perpendicular residual: distance of each sample from the FITTED LINE,
+    # i.e. measured relative to the sample CENTROID, which is the point
+    # fit_axis's PCA line actually passes through (it SVDs
+    # `samples - samples.mean(axis=0)`).
+    #
+    # CORRECTION: this first measured residuals relative to `samples[0]`
+    # instead -- copying trace_length_mm's "relative to the first sample"
+    # convention, which is harmless THERE (it takes max-minus-min, so the
+    # reference point cancels) but wrong here, because samples[0] is just
+    # another noisy sample, not a point on the line. Measured consequences
+    # of that version, all three of which made this metric unusable as the
+    # threshold it feeds (MAX_RMS_RESIDUAL_MM):
+    #   * a systematic 1.33x inflation (400 trials/level, perpendicular
+    #     noise sigma 0.1-0.8mm) -- it reported each sample's distance from
+    #     sample 0 rather than from the line, so sample 0's own noise was
+    #     added to every residual, and a real 0.71mm trace tripped the
+    #     1.0mm threshold;
+    #   * order dependence: the SAME 60 points, merely rotated so a
+    #     different sample came first, gave 0.49 to 1.04mm -- a "quality"
+    #     number that straddled its own threshold based on nothing but
+    #     which sample arrived first;
+    #   * a single outlier landing FIRST reported 4.97mm against a true
+    #     0.81mm -- a 6x false alarm on an otherwise clean trace.
+    # The centroid has none of those properties: it is what the fit is
+    # actually anchored to, and no single sample can move it far.
+    rel = samples - samples.mean(axis=0)
     along = rel @ direction
     perp = rel - np.outer(along, direction)
     rms_residual_mm = float(np.sqrt(np.mean(np.sum(perp * perp, axis=1))))

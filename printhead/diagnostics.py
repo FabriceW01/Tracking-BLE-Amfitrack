@@ -19,7 +19,7 @@ from typing import Optional
 import numpy as np
 
 from .ble_client import PrintheadBLE
-from .calibration import PageCalibration
+from .calibration import MIN_SAMPLE_COUNT, MIN_TRACE_LENGTH_MM, PageCalibration
 from .config import BleSettings, NozzleMapSettings, TrackingSettings
 from .geometry import (
     BLANK_FRAME,
@@ -226,6 +226,31 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
 CALIBRATION_CHECK_YAW_SPAN_FINE_DEG = 2.0
 CALIBRATION_CHECK_YAW_SPAN_WARN_DEG = 4.0
 
+# ...but a yaw span only means anything if the cart actually MOVED, and moved
+# over enough samples for the span to be more than one noisy reading. Below
+# either of these, the verdict is INCONCLUSIVE rather than OK.
+#
+# CORRECTION: the verdict first keyed on yaw span alone, so a run with ZERO
+# samples -- tracker never delivered a pose, or Ctrl+C hit immediately --
+# reported "OK: yaw span 0.00 deg ... consistent with a good calibration".
+# A health check that declares the calibration healthy after measuring
+# nothing at all is worse than no health check: it is a false all-clear on
+# exactly the question the operator ran it to answer. The same held for a
+# two-centimetre wiggle, whose near-zero yaw span proves nothing either.
+# _calibration_check_summary already computed u_travel_mm/v_travel_mm and
+# its own docstring called them "the headline 'did the operator actually
+# slide it far enough to mean anything' sanity check" -- the verdict simply
+# never consulted them. It does now.
+#
+# Deliberately the SAME numbers as calibration.MIN_TRACE_LENGTH_MM /
+# MIN_SAMPLE_COUNT, imported rather than redeclared: "enough travel and
+# enough samples for a straight-line fit over the page to mean something"
+# is the same question in both places, already backed by the measurement
+# table in calibration.py, and two independently drifting copies of that
+# judgement would be worse than one.
+CALIBRATION_CHECK_MIN_TRAVEL_MM = MIN_TRACE_LENGTH_MM
+CALIBRATION_CHECK_MIN_SAMPLES = MIN_SAMPLE_COUNT
+
 
 def _calibration_check_summary(u_samples, v_samples, yaw_deg_samples,
                                roll_deg_samples, pitch_deg_samples) -> dict:
@@ -294,6 +319,26 @@ def _calibration_check_summary(u_samples, v_samples, yaw_deg_samples,
         "yaw_u_correlation": _correlation(yaw, u),
         "yaw_v_correlation": _correlation(yaw, v),
     }
+
+    # Did the sweep measure enough to judge at all? Checked BEFORE the yaw
+    # thresholds, because a sweep that never happened trivially satisfies
+    # all of them (see CALIBRATION_CHECK_MIN_TRAVEL_MM for the false
+    # all-clear this prevents). Travel is the bounding-box diagonal of the
+    # (u, v) sweep -- a sweep that ran 60mm along u alone counts just as
+    # much as one that ran diagonally, which matches how the operator
+    # actually slides the cart.
+    travel_mm = math.hypot(summary["u_travel_mm"], summary["v_travel_mm"])
+    if (summary["sample_count"] < CALIBRATION_CHECK_MIN_SAMPLES
+            or travel_mm < CALIBRATION_CHECK_MIN_TRAVEL_MM):
+        summary["verdict"] = (
+            f"INCONCLUSIVE: only {summary['sample_count']} sample(s) over "
+            f"{travel_mm:.1f} mm of travel -- too little to judge (need at "
+            f"least {CALIBRATION_CHECK_MIN_SAMPLES} samples and "
+            f"{CALIBRATION_CHECK_MIN_TRAVEL_MM:.0f} mm). Slide the cart flat "
+            f"across the page, ideally its full width, WITHOUT rotating it, "
+            f"then stop with Ctrl+C. This says nothing about the calibration "
+            f"either way -- it is not a pass.")
+        return summary
 
     if yaw_span_deg <= CALIBRATION_CHECK_YAW_SPAN_FINE_DEG:
         verdict = (

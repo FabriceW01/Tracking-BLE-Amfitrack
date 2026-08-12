@@ -186,21 +186,45 @@ def yaw_about_normal(quat, boresight_quat, e_col, e_row) -> float:
     superimposed on an injected yaw recovers that yaw exactly, where the old
     rotation-vector method visibly drifts.
 
-    Range: this recovers the injected twist angle continuously and exactly
-    for any relative rotation up to just under a full turn either way (see
-    ``tests/test_rotation.py``'s 0/45/.../315-degree cases) -- there is no
-    narrower clamp imposed. Some wrap is mathematically unavoidable for ANY
-    single real number standing in for a quantity that can keep turning
-    past a full circle (the same physical orientation is then reachable by
-    two differently-signed quaternions, and ``atan2`` has to pick one), but
-    that boundary sits at a FULL TURN here, not at 180 degrees -- an order
-    of magnitude past the largest yaw ever measured on this rig (75.6
-    degrees over a full freehand pass, see the module docstring) -- so nothing
-    a real print encounters gets anywhere near it. And wherever it does
-    fall, it is harmless for the print correction either way: ``tracking.
-    PageMapper.project`` only ever consumes ``sin``/``cos`` of the returned
-    yaw, both exactly 360-degree periodic, so it cannot matter which of the
-    two equally-valid quaternion signs a boundary case happens to land on.
+    Range, and the one property this method gives up to get it: the return
+    value spans ``(-360, +360]`` degrees, recovering the injected twist
+    continuously and exactly right through 180 (see
+    ``tests/test_rotation.py``'s 0/45/.../315-degree cases) -- deliberately
+    NOT clamped to ``(-180, +180]``, because a clamp would only relocate the
+    operator's reported jump back to 180 degrees instead of removing it.
+
+    The price is that this is NOT invariant to the quaternion double cover.
+    ``q`` and ``-q`` are the same physical orientation, and the old
+    matrix-based method was immune by construction (``R(q) == R(-q)``); this
+    one reads the quaternion's components directly, so it is not. MEASURED,
+    against the operator's own real calibration: feeding ``-q`` instead of
+    ``q`` shifts the returned yaw by exactly 360 degrees, at EVERY angle
+    tested (0/30/75/90/135/179/180/225/270/315), not merely near a full
+    turn. Same for a sign-flipped ``boresight_quat``. So IF the tracker ever
+    emitted a sign-flipped quaternion mid-stream, the displayed yaw would
+    jump 360 degrees with the cart standing still.
+
+    Accepted deliberately, on this evidence:
+
+      * The print correction cannot be affected at all. ``tracking.
+        PageMapper.project`` and ``coverage.CoverageEngine`` only ever
+        consume ``sin``/``cos`` of this value, both exactly 360-degree
+        periodic -- verified numerically over a full sweep, not just
+        asserted: 0 of 52 sampled angles showed any ``sin``/``cos``
+        difference between the two signs. ``cart_rotation_angles``'s
+        roll/pitch are likewise unaffected (they are read off the SWING
+        quaternion, after the twist is divided out).
+      * Only the displayed yaw number could move, and only on a real sign
+        flip. The operator's reported symptom was a jump reproducibly at
+        REAL 180 degrees -- the old method's actual singularity -- never at
+        random moments, which is what a sign-flipping tracker stream would
+        have produced instead.
+
+    If a 360-degree jump at a standstill is ever observed on hardware, that
+    is the diagnosis, and the fix is one line: canonicalise ``quat_rel`` to
+    ``qw >= 0`` before the ``atan2`` below. That restores double-cover
+    invariance and costs exactly the wide range -- yaw would then wrap at
+    +-180 again, so do it only if the flip is actually seen, not pre-emptively.
 
     This is deliberately NOT "project some fixed cart axis onto the page
     plane and measure the angle between its boresight and current

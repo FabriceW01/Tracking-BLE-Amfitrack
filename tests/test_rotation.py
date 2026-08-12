@@ -242,6 +242,51 @@ def test_yaw_about_normal_rejects_a_zero_norm_quat():
         raise AssertionError(f"expected ValueError for {bad_quat=} {bad_bore=}")
 
 
+# ======================================================= quaternion double cover
+def test_yaw_about_normal_double_cover_shifts_the_READOUT_by_exactly_360():
+    # Pins the one property the swing-twist rewrite gave up, so it is a
+    # known, measured trade rather than a surprise later: q and -q are the
+    # SAME physical orientation, and the old matrix-based method was immune
+    # by construction (R(q) == R(-q)), but reading the quaternion's
+    # components directly is not. The shift is exactly 360 deg at EVERY
+    # angle -- not just near a full turn -- which is what makes it
+    # recognisable on hardware if it ever happens (a 360 deg jump with the
+    # cart standing still). See yaw_about_normal's docstring for the
+    # one-line fix, and for why it is deliberately NOT applied pre-emptively.
+    for deg in (0.0, 30.0, 90.0, 135.0, 180.0, 225.0, 315.0):
+        q = np.array(_quat_about_z(deg))
+        plus = math.degrees(yaw_about_normal(q, IDENTITY_QUAT, E_COL, E_ROW))
+        minus = math.degrees(yaw_about_normal(-q, IDENTITY_QUAT, E_COL, E_ROW))
+        assert abs(abs(plus - minus) - 360.0) < 1e-6, (deg, plus, minus)
+
+
+def test_yaw_about_normal_double_cover_cannot_affect_the_PRINT_correction():
+    # The counter-check that makes the trade above acceptable: everything
+    # downstream (tracking.PageMapper.project, coverage.CoverageEngine)
+    # consumes only sin/cos of this yaw, both exactly 360-deg periodic, so a
+    # sign flip is provably invisible to where the ink actually lands.
+    # Verified across a full sweep rather than at a couple of angles.
+    for deg in np.arange(0.0, 360.0, 7.0):
+        q = np.array(_quat_about_z(float(deg)))
+        a = yaw_about_normal(q, IDENTITY_QUAT, E_COL, E_ROW)
+        b = yaw_about_normal(-q, IDENTITY_QUAT, E_COL, E_ROW)
+        assert abs(math.cos(a) - math.cos(b)) < 1e-9, (deg, a, b)
+        assert abs(math.sin(a) - math.sin(b)) < 1e-9, (deg, a, b)
+
+
+def test_cart_rotation_angles_roll_pitch_are_double_cover_INVARIANT():
+    # Roll/pitch are read off the SWING quaternion (twist divided out), so
+    # unlike yaw they keep full double-cover invariance -- worth pinning,
+    # because it means the live tilt diagnostic stays trustworthy even in
+    # the scenario the yaw readout would not.
+    for deg in (0.0, 90.0, 180.0, 270.0):
+        q = np.array(_qmul(_quat_about_z(deg), _quat_about_axis((1.0, 1.0, 0.0), 5.0)))
+        roll_a, pitch_a, _ = cart_rotation_angles(q, IDENTITY_QUAT, E_COL, E_ROW)
+        roll_b, pitch_b, _ = cart_rotation_angles(-q, IDENTITY_QUAT, E_COL, E_ROW)
+        assert abs(roll_a - roll_b) < 1e-9, (deg, roll_a, roll_b)
+        assert abs(pitch_a - pitch_b) < 1e-9, (deg, pitch_a, pitch_b)
+
+
 # ============================================================== quat_to_matrix
 def test_quat_to_matrix_identity_is_the_identity_matrix():
     assert np.allclose(quat_to_matrix(IDENTITY_QUAT), np.eye(3))

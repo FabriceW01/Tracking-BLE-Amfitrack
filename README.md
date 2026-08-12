@@ -352,10 +352,51 @@ tests/test_rotation.py
   test_yaw_about_normal_normalises_non_unit_quat_and_boresight               (Norm 1.00002 wie beim echten Boresight)
   test_yaw_about_normal_rejects_a_zero_norm_quat
   test_cart_rotation_angles_roll_pitch_stay_small_when_yaw_exceeds_180
+  test_yaw_about_normal_double_cover_shifts_the_READOUT_by_exactly_360   (siehe Nachtrag unten)
+  test_yaw_about_normal_double_cover_cannot_affect_the_PRINT_correction
+  test_cart_rotation_angles_roll_pitch_are_double_cover_INVARIANT
 
 tests/test_calibration.py
   test_simple_frame_identity_boresight_would_be_wrong   (aktualisiert -- siehe unten)
 ```
+
+#### Nachtrag (Verifikation): was der Wertebereich ±360° kostet
+
+Die neue Methode liefert den Gierwinkel im Bereich **(−360°, +360°]** —
+absichtlich **nicht** auf ±180° geklemmt, weil eine Klemmung den von dir
+beobachteten Sprung nur von seiner jetzigen Stelle auf 180° zurückverlegen
+würde, statt ihn zu beseitigen.
+
+Der Preis dafür, gemessen und vorher nicht dokumentiert: Die Methode ist
+**nicht mehr invariant gegen die Quaternion-Doppelüberdeckung**. `q` und
+`−q` sind dieselbe physische Orientierung; die alte Matrix-Methode war
+dagegen konstruktionsbedingt immun (`R(q) == R(−q)`), die neue liest die
+Quaternion-Komponenten direkt. Mit deiner echten Kalibrierung gemessen:
+`−q` statt `q` verschiebt die Ausgabe um **exakt 360°**, und zwar bei
+**jedem** getesteten Winkel (0/30/75/90/135/179/180/225/270/315°) — nicht
+nur nahe einer vollen Umdrehung. Dasselbe gilt für ein vorzeichenverkehrtes
+`boresight_quat`.
+
+Bewusst akzeptiert, aus diesen Gründen:
+
+- **Der Druck kann davon nicht betroffen sein.** `PageMapper.project()` und
+  `CoverageEngine` verwenden nur `sin`/`cos` dieses Winkels, beide exakt
+  360°-periodisch — numerisch über einen vollen Sweep nachgemessen, nicht
+  nur behauptet: **0 von 52** abgetasteten Winkeln zeigten irgendeinen
+  `sin`/`cos`-Unterschied zwischen beiden Vorzeichen. Roll/Pitch sind
+  ebenfalls unbetroffen (sie werden am Swing-Quaternion abgelesen, nachdem
+  der Twist herausgerechnet wurde) — auch das ist jetzt festgenagelt.
+- **Dein beobachtetes Symptom passt nicht zu einem Vorzeichenwechsel.** Der
+  Sprung trat reproduzierbar bei realen 180° auf — der tatsächlichen
+  Singularität der alten Methode — nie zu zufälligen Zeitpunkten. Ein
+  Tracker, der das Vorzeichen springen lässt, hätte zufällige Sprünge
+  erzeugt.
+
+Falls du je einen **360°-Sprung im Stillstand** siehst: Das ist die
+Diagnose, und der Fix ist eine Zeile (`quat_rel` auf `qw >= 0`
+normalisieren, dokumentiert im Docstring von `yaw_about_normal`). Das stellt
+die Invarianz her und kostet genau den weiten Wertebereich — deshalb erst
+dann, nicht vorsorglich.
 
 ⚠️ **Zwei Bestandstests mussten inhaltlich angepasst werden**, weil sie
 nachweislich nur das Verhalten der ALTEN Methode gemessen hatten, nicht
@@ -439,12 +480,44 @@ eine Kalibrierung berechnet wird — dort läuft `calibrate_page()` als Teil
 des Web-UI-Serverprozesses, der einzige Ort in diesem Projekt, an dem eine
 Kalibrierung überhaupt berechnet wird.
 
+#### Nachtrag (Verifikation): RMS-Residuum wurde vom falschen Bezugspunkt gemessen
+
+Bei der Überprüfung der obigen Implementierung ist ein echter Fehler in
+`fit_axis_quality()` aufgefallen: Das RMS-Residuum wurde relativ zu
+`samples[0]` gemessen statt relativ zur **gefitteten Linie**. `fit_axis()`
+legt seinen PCA-Fit durch den **Schwerpunkt** der Samples — `samples[0]` ist
+dagegen einfach ein weiteres verrauschtes Sample und liegt gar nicht auf der
+Linie. (In `trace_length_mm()` ist derselbe Bezugspunkt harmlos, weil dort
+`max − min` gebildet wird und sich der Bezugspunkt herauskürzt; hier nicht.)
+
+Gemessene Auswirkungen — alle drei machten die Kennzahl als Schwellwert
+(`MAX_RMS_RESIDUAL_MM = 1 mm`) unbrauchbar:
+
+| Effekt | gemessen |
+|---|---|
+| systematische Überhöhung | **1,33×** (400 Durchläufe je Rauschpegel, σ 0,1–0,8 mm) → eine reale Streuung von 0,71 mm löste bereits die 1-mm-Warnung aus |
+| Abhängigkeit von der Sample-**Reihenfolge** | dieselben 60 Punkte, nur rotiert: **0,49 bis 1,04 mm** — der Wert lag mal unter, mal über seiner eigenen Schwelle |
+| ein einzelner Ausreißer an **erster** Stelle | **4,97 mm** statt real 0,81 mm — ein 6-facher Fehlalarm auf einer sauberen Kante |
+
+Behoben durch Messung vom Schwerpunkt aus. Danach exakt Faktor **1,000**
+gegenüber dem echten Wert (dieselben 400 Durchläufe je Pegel), und die
+Reihenfolge-Abhängigkeit ist konstruktionsbedingt weg.
+
+Der mitgelieferte Test hatte den Fehler nicht gefangen: Sein Toleranzband
+(0,7–1,6 mm um einen Erwartungswert von 1,13 mm) war weit genug, dass der um
+1,33× überhöhte Wert (1,47 mm) noch hineinpasste. Das Band ist jetzt eng
+(±0,1 mm), plus zwei neue Regressionstests für Reihenfolge und Ausreißer.
+Mutationsprobe bestätigt: Setzt man den Bezugspunkt auf `samples[0]` zurück,
+schlägt der Reihenfolge-Test fehl (0,49 vs. 1,04).
+
 **Neue Tests:**
 
 ```
 tests/test_calibration.py
   test_fit_axis_quality_reports_length_count_and_near_zero_rms_when_clean
   test_fit_axis_quality_rms_residual_reflects_injected_noise
+  test_fit_axis_quality_rms_residual_is_independent_of_sample_ORDER
+  test_fit_axis_quality_rms_residual_is_not_dominated_by_one_outlier
   test_fit_axis_quality_does_not_change_with_more_noise_free_samples
   test_calibrate_page_populates_quality_metrics
   test_calibrate_page_warns_on_short_trace
@@ -986,6 +1059,40 @@ Stopped calibration check.
 
 **Neue Tests:**
 
+#### Nachtrag (Verifikation): kein Freispruch ohne Messung
+
+Das Verdikt hing ausschließlich am Gierwinkel-Span. Ein Lauf, der **gar
+nichts** gesammelt hat — Tracker liefert keine Pose, oder Strg+C kommt
+sofort — meldete damit:
+
+```
+  samples: 0
+  verdict: OK: yaw span 0.00 deg ... consistent with a good calibration.
+```
+
+Also ein Freispruch für genau die Frage, wegen der man das Werkzeug startet.
+Dasselbe galt für ein 2-cm-Wackeln: Der Gierwinkel bleibt dabei nahe null,
+weil sich der Wagen kaum bewegt hat, nicht weil die Kalibrierung gut ist.
+`_calibration_check_summary` berechnete `u_travel_mm`/`v_travel_mm` bereits
+und nannte sie im eigenen Docstring den „headline sanity check" — das
+Verdikt hat sie nur nie ausgewertet.
+
+Jetzt wird vor den Gierwinkel-Schwellen geprüft, ob überhaupt genug gemessen
+wurde: mindestens **20 Samples** und **50 mm** Weg (Diagonale der u/v-
+Bounding-Box). Darunter lautet das Verdikt `INCONCLUSIVE` mit dem
+ausdrücklichen Zusatz, dass das **kein Bestehen** ist. Die Schwellen sind
+bewusst dieselben Konstanten wie `MIN_TRACE_LENGTH_MM`/`MIN_SAMPLE_COUNT`
+aus `calibration.py` (importiert, nicht kopiert) — es ist dieselbe Frage,
+mit derselben Messreihe belegt.
+
+Mutationsproben bestätigt: Entfernt man die Sample-Bedingung, die Weg-
+Bedingung, oder lässt man den Guard alles verschlucken, schlägt jeweils ein
+Test fehl. Die beiden oben abgedruckten Beispielläufe (579 bzw. 553 Samples
+über ~200/280 mm) liegen weit über beiden Schwellen — ihre Verdikte sind
+unverändert.
+
+**Neue Tests:**
+
 ```
 tests/test_page_mapper.py
   test_calibration_check_ndjson_event_shape
@@ -993,6 +1100,10 @@ tests/test_page_mapper.py
   test_calibration_check_pure_translation_gives_near_zero_yaw_span
   test_calibration_check_injected_yaw_ramp_gives_large_span_and_high_correlation
   test_calibration_check_summary_pure_function_matches_the_live_run
+  test_calibration_check_zero_samples_is_INCONCLUSIVE_not_a_pass
+  test_calibration_check_short_wiggle_is_INCONCLUSIVE_not_a_pass
+  test_calibration_check_too_few_samples_is_INCONCLUSIVE_even_over_a_long_sweep
+  test_calibration_check_a_real_sweep_still_reaches_a_real_verdict
 
 tests/test_patterns_and_mapping.py
   test_cli_calibration_check_is_a_debug_mode

@@ -853,6 +853,61 @@ def test_calibration_check_summary_pure_function_matches_the_live_run():
     assert summary["yaw_v_correlation"] is None                 # v has zero variance
 
 
+def test_calibration_check_zero_samples_is_INCONCLUSIVE_not_a_pass():
+    # REGRESSION: the verdict keyed on yaw span alone, so a run that
+    # collected NOTHING (tracker delivered no pose, or Ctrl+C landed
+    # immediately) reported "OK: yaw span 0.00 deg ... consistent with a
+    # good calibration" -- a false all-clear on the exact question the
+    # operator ran the check to answer. A health check must never call a
+    # measurement it did not take a pass.
+    summary = diagnostics._calibration_check_summary([], [], [], [], [])
+    assert summary["sample_count"] == 0
+    assert summary["verdict"].startswith("INCONCLUSIVE"), summary["verdict"]
+    assert "not a pass" in summary["verdict"], summary["verdict"]
+
+
+def test_calibration_check_short_wiggle_is_INCONCLUSIVE_not_a_pass():
+    # Same root cause as above with real samples: a 20mm wiggle holds yaw
+    # near zero simply because the cart barely moved, which says nothing
+    # about whether yaw drifts across a whole page. Under
+    # CALIBRATION_CHECK_MIN_TRAVEL_MM -> INCONCLUSIVE, not OK.
+    n = 60
+    u = [0.33 * i for i in range(n)]                  # ~20mm of travel
+    v = [0.0] * n
+    yaw = [0.01 * (i % 3) for i in range(n)]          # tiny, harmless jitter
+    summary = diagnostics._calibration_check_summary(u, v, yaw, [0.0] * n, [0.0] * n)
+    assert summary["u_travel_mm"] < diagnostics.CALIBRATION_CHECK_MIN_TRAVEL_MM
+    assert summary["yaw_span_deg"] < diagnostics.CALIBRATION_CHECK_YAW_SPAN_FINE_DEG
+    assert summary["verdict"].startswith("INCONCLUSIVE"), summary["verdict"]
+
+
+def test_calibration_check_too_few_samples_is_INCONCLUSIVE_even_over_a_long_sweep():
+    # The other half of the guard: plenty of travel, but so few samples that
+    # the span is one or two readings' worth of noise rather than a measured
+    # trend. Pinned separately from the travel case so removing either
+    # condition alone fails a test.
+    u = [0.0, 60.0, 120.0, 180.0]                     # 180mm of travel, only 4 samples
+    summary = diagnostics._calibration_check_summary(
+        u, [0.0] * 4, [0.0] * 4, [0.0] * 4, [0.0] * 4)
+    assert summary["u_travel_mm"] > diagnostics.CALIBRATION_CHECK_MIN_TRAVEL_MM
+    assert summary["sample_count"] < diagnostics.CALIBRATION_CHECK_MIN_SAMPLES
+    assert summary["verdict"].startswith("INCONCLUSIVE"), summary["verdict"]
+
+
+def test_calibration_check_a_real_sweep_still_reaches_a_real_verdict():
+    # Counter-check that the INCONCLUSIVE guard above is not simply
+    # swallowing every run: a sweep that clears BOTH thresholds must still
+    # get a genuine OK/BORDERLINE/BAD verdict, never INCONCLUSIVE.
+    n = 120
+    u = [1.75 * i for i in range(n)]                   # ~208mm, A4-width sweep
+    v = [0.0] * n
+    for yaw_span, expected in ((0.5, "OK"), (3.0, "BORDERLINE"), (9.0, "BAD")):
+        yaw = [yaw_span * i / (n - 1) for i in range(n)]
+        summary = diagnostics._calibration_check_summary(
+            u, v, yaw, [0.0] * n, [0.0] * n)
+        assert summary["verdict"].startswith(expected), (yaw_span, summary["verdict"])
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

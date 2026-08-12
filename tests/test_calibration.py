@@ -101,8 +101,56 @@ def test_fit_axis_quality_rms_residual_reflects_injected_noise():
     samples[:, 2] = rng.normal(0.0, 0.8, 100)
     _, fitted_dir = fit_axis(samples)
     q = fit_axis_quality(samples, fitted_dir)
-    # RMS of two independent N(0, 0.8) components combined -> sqrt(2)*0.8 ~= 1.13
-    assert 0.7 < q.rms_residual_mm < 1.6, q.rms_residual_mm
+    # RMS of two independent N(0, 0.8) components combined -> sqrt(2)*0.8 ~= 1.13.
+    # Tight band deliberately: the original +-0.45mm band here was wide
+    # enough to pass with the first version of fit_axis_quality, which
+    # measured residuals from samples[0] instead of the fitted line and so
+    # over-reported by a measured 1.33x (1.47 here, still inside that band).
+    # A metric that feeds a threshold has to be pinned tightly enough to
+    # catch a systematic scale error, not just "roughly the right size".
+    assert abs(q.rms_residual_mm - math.sqrt(2.0) * 0.8) < 0.1, q.rms_residual_mm
+
+
+def test_fit_axis_quality_rms_residual_is_independent_of_sample_ORDER():
+    # REGRESSION: measuring residuals from samples[0] made this metric
+    # depend on which sample happened to arrive first. On one fixed 60-point
+    # trace, merely rotating the sample order moved the reported RMS between
+    # 0.49 and 1.04mm -- straddling MAX_RMS_RESIDUAL_MM (1.0), so the same
+    # physical trace passed or failed the quality check purely on ordering.
+    # Measuring from the centroid (the point fit_axis's PCA line actually
+    # passes through) is order-invariant by construction; this pins that.
+    rng = np.random.default_rng(7)
+    n = 60
+    samples = np.zeros((n, 3))
+    samples[:, 0] = np.linspace(0.0, 200.0, n)
+    samples[:, 1] = rng.normal(0.0, 0.4, n)
+    samples[:, 2] = rng.normal(0.0, 0.4, n)
+    _, direction = fit_axis(samples)
+
+    values = [fit_axis_quality(np.roll(samples, -k, axis=0), direction).rms_residual_mm
+              for k in range(n)]
+    assert max(values) - min(values) < 1e-9, (min(values), max(values))
+
+
+def test_fit_axis_quality_rms_residual_is_not_dominated_by_one_outlier():
+    # REGRESSION, same root cause as the ordering test above: with residuals
+    # measured from samples[0], a single outlier landing FIRST reported
+    # 4.97mm RMS on a trace whose true scatter was 0.81mm -- a 6x false
+    # alarm that would have told the operator to re-trace a perfectly good
+    # edge. From the centroid, one outlier among 60 samples can only move
+    # the RMS a little.
+    rng = np.random.default_rng(7)
+    n = 60
+    samples = np.zeros((n, 3))
+    samples[:, 0] = np.linspace(0.0, 200.0, n)
+    samples[:, 1] = rng.normal(0.0, 0.4, n)
+    samples[:, 2] = rng.normal(0.0, 0.4, n)
+    clean_rms = fit_axis_quality(samples, fit_axis(samples)[1]).rms_residual_mm
+
+    samples[0, 1] += 5.0                      # one gross outlier, placed FIRST
+    _, direction = fit_axis(samples)
+    outlier_rms = fit_axis_quality(samples, direction).rms_residual_mm
+    assert outlier_rms < 2.0 * clean_rms, (clean_rms, outlier_rms)
 
 
 def test_fit_axis_quality_does_not_change_with_more_noise_free_samples():
