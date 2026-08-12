@@ -188,8 +188,8 @@ Live-`--pos`-Verifikationsbefehl als auch den eigentlichen Druckbefehl an.
 ⚠️ **Wichtig:** Beim ersten echten Hardware-Bring-up ist der Modus ohne
 Fehlermeldung leer durchgelaufen (`active=0` die ganze Zeit, Exit-Code 0,
 nichts auf dem Papier) — der Grund war genau der folgende Punkt: Das
-gerenderte Zielbild ist mit 152 Düsenreihen nur ca. 15 mm
-hoch (`NOZZLE_PITCH_MM * 151`). Damit überhaupt eine Düse zündet, muss der
+gerenderte Zielbild ist mit 152 Düsenreihen nur ca. 15,1 mm
+hoch (`NOZZLE_PITCH_MM * 151`, = `NOZZLE_BAR_SPAN_MM`). Damit überhaupt eine Düse zündet, muss der
 Wagen in `v`-Richtung auf ca. ±15 mm um die abgefahrene Spaltenkante herum
 bleiben — außerhalb dieses schmalen Streifens ist für *jede* Düse `active=0`,
 und der Pass läuft klaglos (Exit-Code 0) durch, ohne dass etwas gedruckt wird.
@@ -241,8 +241,9 @@ konkrete Fehler:
   ist ein Vektor im Wagen-Koordinatensystem, dreht sich also mit dem Wagen
   mit. Als fester Seiten-Versatz behandelt (wie bisher), erzeugt das bei
   75,6° Yaw bis zu **76 mm** Positionsfehler.
-- Die 15 mm breite Düsenleiste selbst fächert bei Drehung über mehrere
-  Spalten auf: bei 75° sind das ca. **14,5 mm** (≈72 Spalten bei
+- Die 15,1 mm lange Spanne der Düsenleiste selbst (Düse 0 → Düse 151,
+  `NOZZLE_BAR_SPAN_MM`) fächert bei Drehung über mehrere
+  Spalten auf: bei 75° sind das ca. **14,6 mm** (≈73 Spalten bei
   0,2 mm/Spalte) statt einer einzigen Spalte für alle 152 Düsen.
 
 Voraussetzung für die Korrektur ist eine **Boresight-Aufnahme** — die
@@ -277,19 +278,276 @@ live `yaw` in Grad an. Wird der Wagen exakt in der Referenzpose gehalten
 liegen — weicht es deutlich ab, per `--boresight-deg` nachjustieren oder neu
 kalibrieren (Boresight neu aufnehmen).
 
+### Gierwinkel-Singularität behoben: Swing-Twist statt Rotationsvektor
+
+Die relative Rotation (aktuelle Pose gegen Boresight) wurde bisher als
+Rotationsmatrix gebaut und über deren Achsen-Winkel-„Rotationsvektor"
+(Log-Map von SO(3)) auf die Seitennormale projiziert. Mit der echten
+Kalibrierung des Betreibers (`e_col`/`e_row`/Boresight aus dessen
+`page_calibration.json`) und einer synthetischen, reinen Drehung um genau
+diese Seitennormale gemessen:
+
+```
+ wahr | alte Methode | swing-twist
+   0° |         0,0° |        0,0°
+  45° |        45,0° |       45,0°
+  90° |        90,0° |       90,0°
+ 135° |       135,0° |      135,0°
+ 180° |       934,2° |      180,0°   <-- numerischer Ausreißer an der Singularität
+ 225° |      -135,0° |      225,0°
+ 270° |       -90,0° |      270,0°
+```
+
+Bis 135° stimmt die alte Methode, genau bei 180° liefert sie Unsinn (die
+Division durch `sin(angle)` im Rotationsvektor geht dort gegen 0), danach
+ist sie um exakt 360° vorzeichenverkehrt — eine Rotations**matrix**, anders
+als ein Quaternion, „weiß" nicht mehr, in welche Richtung eine Drehung über
+180° hinausging. Auf echter Hardware zeigte sich genau diese Fehlerform
+schon **vor** der sauberen 180°-Grenze: ein Sprung von **-109° auf +109°**
+bei einer echten 180°-Drehung.
+
+`printhead/rotation.py` (`yaw_about_normal`) berechnet den Gierwinkel jetzt
+über eine **Swing-Twist-Zerlegung direkt auf dem Rotations-Quaternion**
+(`quat * conj(boresight_quat)`, über neue `_quat_multiply`/`_quat_conjugate`-
+Helfer — bewusst *nicht* über eine Matrix: die Rückrichtung
+Matrix→Quaternion hätte dieselbe Art Instabilität nahe 180° wieder
+eingeschleppt):
+
+```
+v, w = Vektor-/Skalarteil von quat_rel
+twist_rad = 2 * atan2(dot(v, n_hat), w)
+```
+
+Kein Ausdruck darin geht bei 180° gegen 0/0 — keine Singularität. Ein
+gewisser Umschlag ist für **jede** Ein-Zahl-Winkeldarstellung mathematisch
+unvermeidbar (dieselbe physische Orientierung ist ab einer vollen Umdrehung
+über zwei unterschiedlich vorzeichenbehaftete Quaternionen erreichbar),
+landet hier aber erst bei einer **vollen** Drehung (±360°) statt schon bei
+180° — weit jenseits des größten je auf dieser Anlage gemessenen
+Gierwinkels (75,6° über einen ganzen Durchlauf, s. o.) — und ist für die
+Druckkorrektur ohnehin folgenlos, weil dort nur `sin`/`cos` des Gierwinkels
+verwendet werden (`PageMapper.project`), beide 360°-periodisch.
+
+Die neue Methode ist zusätzlich nicht nur singularitätsfrei, sondern
+**exakt statt nur näherungsweise**, sobald Neigung (Roll/Pitch) mit dabei
+ist: Bei 75° Neigung um eine Diagonalachse plus 40° injiziertem Gierwinkel
+lieferte die alte Rotationsvektor-Methode 34,0° statt 40° — die neue exakt
+40,0°. `cart_rotation_angles` (Roll/Pitch, weiterhin rein diagnostisch,
+siehe oben) liest Roll/Pitch jetzt aus dem um den Twist bereinigten
+„Swing"-Quaternion statt direkt aus der vollen Relativ-Rotation — sonst
+kippt Roll/Pitch fälschlich um, sobald allein der Gierwinkel über 180°
+steigt (derselbe Skalarteil wird sonst von beidem gleichzeitig
+„verschmutzt").
+
+**Neue/aktualisierte Tests:**
+
+```
+tests/test_rotation.py
+  test_yaw_about_normal_combined_tilt_and_yaw_recovers_exactly_where_the_old_method_drifted
+    (ersetzt test_yaw_about_normal_combined_tilt_and_yaw_where_naive_projection_disagrees_with_itself:
+     die alte Methode selbst driftet bei Neigung -- der Vergleichswert musste
+     auf die swing-twist-Formel umgestellt werden, siehe Kommentar im Test)
+  test_yaw_about_normal_pure_rotation_recovers_exactly_through_a_full_sweep   (0/45/90/135/179/180/225/270/315°)
+  test_yaw_about_normal_MUTATION_check_old_method_sign_flips_past_180        (baut die entfernte alte Methode nach)
+  test_yaw_about_normal_normalises_non_unit_quat_and_boresight               (Norm 1.00002 wie beim echten Boresight)
+  test_yaw_about_normal_rejects_a_zero_norm_quat
+  test_cart_rotation_angles_roll_pitch_stay_small_when_yaw_exceeds_180
+  test_yaw_about_normal_double_cover_shifts_the_READOUT_by_exactly_360   (siehe Nachtrag unten)
+  test_yaw_about_normal_double_cover_cannot_affect_the_PRINT_correction
+  test_cart_rotation_angles_roll_pitch_are_double_cover_INVARIANT
+
+tests/test_calibration.py
+  test_simple_frame_identity_boresight_would_be_wrong   (aktualisiert -- siehe unten)
+```
+
+#### Nachtrag (Verifikation): was der Wertebereich ±360° kostet
+
+Die neue Methode liefert den Gierwinkel im Bereich **(−360°, +360°]** —
+absichtlich **nicht** auf ±180° geklemmt, weil eine Klemmung den von dir
+beobachteten Sprung nur von seiner jetzigen Stelle auf 180° zurückverlegen
+würde, statt ihn zu beseitigen.
+
+Der Preis dafür, gemessen und vorher nicht dokumentiert: Die Methode ist
+**nicht mehr invariant gegen die Quaternion-Doppelüberdeckung**. `q` und
+`−q` sind dieselbe physische Orientierung; die alte Matrix-Methode war
+dagegen konstruktionsbedingt immun (`R(q) == R(−q)`), die neue liest die
+Quaternion-Komponenten direkt. Mit deiner echten Kalibrierung gemessen:
+`−q` statt `q` verschiebt die Ausgabe um **exakt 360°**, und zwar bei
+**jedem** getesteten Winkel (0/30/75/90/135/179/180/225/270/315°) — nicht
+nur nahe einer vollen Umdrehung. Dasselbe gilt für ein vorzeichenverkehrtes
+`boresight_quat`.
+
+Bewusst akzeptiert, aus diesen Gründen:
+
+- **Der Druck kann davon nicht betroffen sein.** `PageMapper.project()` und
+  `CoverageEngine` verwenden nur `sin`/`cos` dieses Winkels, beide exakt
+  360°-periodisch — numerisch über einen vollen Sweep nachgemessen, nicht
+  nur behauptet: **0 von 52** abgetasteten Winkeln zeigten irgendeinen
+  `sin`/`cos`-Unterschied zwischen beiden Vorzeichen. Roll/Pitch sind
+  ebenfalls unbetroffen (sie werden am Swing-Quaternion abgelesen, nachdem
+  der Twist herausgerechnet wurde) — auch das ist jetzt festgenagelt.
+- **Dein beobachtetes Symptom passt nicht zu einem Vorzeichenwechsel.** Der
+  Sprung trat reproduzierbar bei realen 180° auf — der tatsächlichen
+  Singularität der alten Methode — nie zu zufälligen Zeitpunkten. Ein
+  Tracker, der das Vorzeichen springen lässt, hätte zufällige Sprünge
+  erzeugt.
+
+Falls du je einen **360°-Sprung im Stillstand** siehst: Das ist die
+Diagnose, und der Fix ist eine Zeile (`quat_rel` auf `qw >= 0`
+normalisieren, dokumentiert im Docstring von `yaw_about_normal`). Das stellt
+die Invarianz her und kostet genau den weiten Wertebereich — deshalb erst
+dann, nicht vorsorglich.
+
+⚠️ **Zwei Bestandstests mussten inhaltlich angepasst werden**, weil sie
+nachweislich nur das Verhalten der ALTEN Methode gemessen hatten, nicht
+etwas, das unabhängig von der Implementierung gelten muss:
+
+- Der kombinierte Neigung+Gier-Test in `test_rotation.py` verglich bisher
+  gegen eine frisch nachgerechnete Rotationsvektor-Formel — die driftet
+  aber selbst (34,0° statt 40°, s. o.). Umgestellt auf eine unabhängige
+  swing-twist-Nachrechnung; die alte Methode bleibt als Kontrastwert im
+  selben Test erhalten (`old_deg` muss weiterhin deutlich abweichen).
+- `test_simple_frame_identity_boresight_would_be_wrong` in
+  `test_calibration.py` maß bisher die **Differenz** zweier Gierwinkel-
+  Ablesungen bei einer flachen 90°-Drehung — diese Differenz ist mit
+  swing-twist jetzt exakt boresight-unabhängig richtig (ein allgemeiner,
+  im selben Test dokumentierter Effekt: eine zusätzliche, weltfeste
+  Zusatzdrehung addiert sich exakt zum Ausgangswert, egal welche Neigung
+  die Ausgangspose sonst hatte). Der Test selbst hatte das mit einem
+  Kommentar vorgesehen ("if this now holds, revisit the design note").
+  Er prüft jetzt stattdessen, was Identitäts-Boresight nach wie vor falsch
+  macht: die **absolute** Gierwinkel-Ablesung an der Referenzpose (statt 0°
+  kommen -91,4° heraus) und Roll/Pitch (statt ~0° kommen ~88,8° heraus, weil
+  die reale ~120°-Montageverdrehung des Sensors ungefiltert als „Neigung"
+  erscheint).
+
+### Kalibrierungsqualität: Fit-Metriken und Warnungen
+
+`calibrate_page()` prüfte bisher nur, ob die beiden abgefahrenen Kanten nahe
+genug an 90° zueinander liegen (`CalibrationAngleWarning`, Toleranz
+`MAX_ANGLE_ERROR_DEG = 15°`) — wie GUT der Linien-Fit einer einzelnen Kante
+für sich selbst ist (kurz? verrauscht? wenige Samples?), wurde nirgends
+gemessen. Jetzt liefert jede Kante zusätzlich drei Fit-Kennzahlen
+(`fit_axis_quality()`, ein neuer, eigenständiger Helfer — `fit_axis()`s
+bisherige 2-Werte-Rückgabe bleibt unverändert, jeder bestehende Aufrufer
+funktioniert unverändert weiter):
+
+- **Länge** (mm) entlang der gefitteten Richtung,
+- **RMS-Residuum** (mm) senkrecht zur gefitteten Linie,
+- **Sample-Anzahl**.
+
+Dazu die Neigung der gefitteten Seitennormale gegen die Tracker-z-Achse
+(`normal_tilt_deg`). Alle vier Werte landen auf `PageCalibration` (neue,
+**optionale** Felder — bestehende gespeicherte Kalibrierungen ohne diese
+Felder laden weiterhin klaglos, mit `None` statt erfundenen Werten) und
+werden mitgespeichert/-geladen.
+
+`calibrate_page()` warnt jetzt zusätzlich (`CalibrationQualityWarning`,
+eigene Warnklasse neben `CalibrationAngleWarning`, beide können unabhängig
+voneinander auftreten) auf einer Kante, die kürzer als **50 mm** ist, ein
+RMS-Residuum über **1 mm** hat, oder aus weniger als **20 Samples**
+besteht. Diese Schwellen stammen aus einer Messreihe (synthetische gerade
+Kante, Länge/Rauschen/Sample-Anzahl variiert → resultierender Fehler in der
+gefitteten Seitennormale):
+
+```
+ Kantenlänge  Rauschen  Samples | resultierender Seitennormalen-Fehler
+    210 mm    0.05mm      200   |   0.00° (max 0.01°)
+    100 mm    0.5 mm      100   |   0.12° (max 0.37°)
+     50 mm    1.0 mm       50   |   0.65° (max 1.40°)
+     30 mm    2.0 mm       30   |   3.16° (max 6.25°)
+     20 mm    3.0 mm       20   |   7.23° (max 18.63°)
+```
+
+und dem separat gemessenen Zusammenhang `Gierwinkel-Fehler ≈
+Neigungswinkel * sin(Seitennormalen-Fehler)` — der Grund, warum eine
+schlechte Seitennormale überhaupt etwas ausmacht, obwohl nirgends direkt
+Roll/Pitch korrigiert wird (siehe oben): Der Gierwinkel wird relativ zur
+gefitteten Normale gemessen, eine falsche Normale verwandelt also
+gewöhnliches Tracker-Rauschen in Neigung (Median 2,7°, Max 7,8° auf dieser
+Anlage) in **scheinbaren Gierwinkel-Fehler**.
+
+⚠️ **Wichtig:** Die Kalibrierung des Betreibers selbst ist GUT (0,63°
+Normalen-Neigung, 0,92° Orthogonalitätsfehler — weit im grünen Bereich).
+Diese Warnungen erklären also **nicht** das Gierwinkel-Problem, das mit der
+180°-Singularität oben behoben wurde — sie fangen künftig schlechte
+Kalibrierungen im Allgemeinen ab.
+
+Sichtbar im **Calibration**-Tab der Web-UI direkt neben dem bisherigen
+Winkelfehler (Kantenlänge/Samples/RMS pro Kante, Normalen-Neigung; „n/a" bei
+einer geladenen Datei ohne diese Metriken), und als Konsolenzeile, sobald
+eine Kalibrierung berechnet wird — dort läuft `calibrate_page()` als Teil
+des Web-UI-Serverprozesses, der einzige Ort in diesem Projekt, an dem eine
+Kalibrierung überhaupt berechnet wird.
+
+#### Nachtrag (Verifikation): RMS-Residuum wurde vom falschen Bezugspunkt gemessen
+
+Bei der Überprüfung der obigen Implementierung ist ein echter Fehler in
+`fit_axis_quality()` aufgefallen: Das RMS-Residuum wurde relativ zu
+`samples[0]` gemessen statt relativ zur **gefitteten Linie**. `fit_axis()`
+legt seinen PCA-Fit durch den **Schwerpunkt** der Samples — `samples[0]` ist
+dagegen einfach ein weiteres verrauschtes Sample und liegt gar nicht auf der
+Linie. (In `trace_length_mm()` ist derselbe Bezugspunkt harmlos, weil dort
+`max − min` gebildet wird und sich der Bezugspunkt herauskürzt; hier nicht.)
+
+Gemessene Auswirkungen — alle drei machten die Kennzahl als Schwellwert
+(`MAX_RMS_RESIDUAL_MM = 1 mm`) unbrauchbar:
+
+| Effekt | gemessen |
+|---|---|
+| systematische Überhöhung | **1,33×** (400 Durchläufe je Rauschpegel, σ 0,1–0,8 mm) → eine reale Streuung von 0,71 mm löste bereits die 1-mm-Warnung aus |
+| Abhängigkeit von der Sample-**Reihenfolge** | dieselben 60 Punkte, nur rotiert: **0,49 bis 1,04 mm** — der Wert lag mal unter, mal über seiner eigenen Schwelle |
+| ein einzelner Ausreißer an **erster** Stelle | **4,97 mm** statt real 0,81 mm — ein 6-facher Fehlalarm auf einer sauberen Kante |
+
+Behoben durch Messung vom Schwerpunkt aus. Danach exakt Faktor **1,000**
+gegenüber dem echten Wert (dieselben 400 Durchläufe je Pegel), und die
+Reihenfolge-Abhängigkeit ist konstruktionsbedingt weg.
+
+Der mitgelieferte Test hatte den Fehler nicht gefangen: Sein Toleranzband
+(0,7–1,6 mm um einen Erwartungswert von 1,13 mm) war weit genug, dass der um
+1,33× überhöhte Wert (1,47 mm) noch hineinpasste. Das Band ist jetzt eng
+(±0,1 mm), plus zwei neue Regressionstests für Reihenfolge und Ausreißer.
+Mutationsprobe bestätigt: Setzt man den Bezugspunkt auf `samples[0]` zurück,
+schlägt der Reihenfolge-Test fehl (0,49 vs. 1,04).
+
+**Neue Tests:**
+
+```
+tests/test_calibration.py
+  test_fit_axis_quality_reports_length_count_and_near_zero_rms_when_clean
+  test_fit_axis_quality_rms_residual_reflects_injected_noise
+  test_fit_axis_quality_rms_residual_is_independent_of_sample_ORDER
+  test_fit_axis_quality_rms_residual_is_not_dominated_by_one_outlier
+  test_fit_axis_quality_does_not_change_with_more_noise_free_samples
+  test_calibrate_page_populates_quality_metrics
+  test_calibrate_page_warns_on_short_trace
+  test_calibrate_page_warns_on_noisy_trace
+  test_calibrate_page_warns_on_few_samples
+  test_calibrate_page_normal_tilt_reflects_a_tilted_page
+  test_save_and_load_roundtrip_includes_quality_metrics
+  test_quality_metrics_default_to_none_when_built_directly
+  test_to_dict_omits_absent_quality_fields
+  test_from_dict_loads_a_pre_feature_json_with_no_quality_fields
+
+tests/test_ui_calibration.py
+  test_compute_calibration_returns_quality_metrics
+  test_compute_calibration_flags_low_quality_separately_from_angle
+  test_load_calibration_reports_none_quality_for_a_pre_feature_file
+```
+
 **Größeres, richtig proportioniertes Testmuster in `--mode page`:** Genau weil
-`--mode page` nicht auf die ~15 mm der 152 Düsen begrenzt ist, lohnt sich für
+`--mode page` nicht auf die 15,2 mm der 152 Düsen begrenzt ist, lohnt sich für
 den Bring-up ein deutlich größeres `--calibrate`/`--pattern`-Bild als die
 sonst übliche `IMAGE_HEIGHT`-Zeilenzahl:
 
 | Option | Bedeutung |
 |---|---|
-| `--pattern-height-mm MM` | Physische Gesamthöhe von `--calibrate`/`--pattern` in mm (`rows = height_mm / NOZZLE_PITCH_MM`). Nur mit `--mode page` gültig — im Zeilen-/Zeit-Modus packt `frames_from_ink()` feste Frames mit genau `IMAGE_HEIGHT` Zeilen, eine andere Höhe wird dort mit einem klaren Fehler abgelehnt. Ohne diese Option bleibt das Muster bei `IMAGE_HEIGHT` Zeilen (~15 mm) gedeckelt. |
+| `--pattern-height-mm MM` | Physische Gesamthöhe von `--calibrate`/`--pattern` in mm (`rows = height_mm / NOZZLE_PITCH_MM`). Nur mit `--mode page` gültig — im Zeilen-/Zeit-Modus packt `frames_from_ink()` feste Frames mit genau `IMAGE_HEIGHT` Zeilen, eine andere Höhe wird dort mit einem klaren Fehler abgelehnt. Ohne diese Option bleibt das Muster bei `IMAGE_HEIGHT` Zeilen (15,2 mm, = `NOZZLE_BAR_WIDTH_MM`) gedeckelt. |
 | `--pattern-square-height-mm MM` | Zeilenperiode in mm für checkerboard/h-stripes, überschreibt `--pattern-square-rows` (`square_rows = v / NOZZLE_PITCH_MM`). |
 
-⚠️ **Seitenverhältnis-Falle:** Eine Bildzeile ist nur **~0.0993 mm** hoch
-(`NOZZLE_PITCH_MM`). `--pattern-square-rows 20` (der Default) ist damit nur
-knapp **2 mm** hoch, während `--pattern-square-mm 10` (der Default) **10 mm**
+⚠️ **Seitenverhältnis-Falle:** Eine Bildzeile ist nur **0,1 mm** hoch
+(`NOZZLE_PITCH_MM`, exakt seit der Neuvermessung). `--pattern-square-rows 20` (der Default) ist damit
+genau **2 mm** hoch, während `--pattern-square-mm 10` (der Default) **10 mm**
 breit ist — ein 5:1-Streifen statt eines Quadrats. Für tatsächlich quadratische
 Kacheln `--pattern-square-height-mm` statt `--pattern-square-rows` verwenden.
 
@@ -379,7 +637,7 @@ es wird erneut über Papier gedruckt, auf dem längst Tinte ist.
 
 | Option | Bedeutung |
 |---|---|
-| `--spray-radius-mm MM` | Physischer Radius um ein fertiges Pixel, der eine Teildosis abbekommt. **In Millimetern, nicht in Pixeln** — eine Zelle ist ~0.0993 mm hoch, aber `--mm-per-column` (Default 0.2 mm) breit, ein runder Tropfen ist im Raster also ~2:1 elliptisch. Default `0` = aus. |
+| `--spray-radius-mm MM` | Physischer Radius um ein fertiges Pixel, der eine Teildosis abbekommt. **In Millimetern, nicht in Pixeln** — eine Zelle ist 0,1 mm hoch, aber `--mm-per-column` (Default 0.2 mm) breit, ein runder Tropfen ist im Raster also ~2:1 elliptisch. Default `0` = aus. |
 | `--spray-strength F` | Dosis, die ein **direkt angrenzendes** Pixel abbekommt (0.0–1.0), linear abfallend bis 0 am Radius. Ein Pixel gilt ab Gesamtdosis 1.0 als gedruckt: bei `1.0` markiert ein einzelner Tropfen die Nachbarzelle sofort mit, bei `0.5` sind zwei Tropfen nötig. Default `0` = aus. |
 
 Beide müssen `> 0` sein, damit das Modell greift; sonst verhält sich die Engine
@@ -439,6 +697,50 @@ Warning Characteristic", im Firmware-Repo `Printhead_Original_V2`, Branch
 `claude/speed-warning-led`). Ohne diese Firmware schlägt das BLE-Write
 fehl — das wird abgefangen und geloggt, bricht den Druckvorgang aber nicht
 ab (siehe oben).
+
+### Düsengruppierung: `--nozzle-group`
+
+Standardmäßig wird jede der 152 Düsen einzeln angesteuert (`--nozzle-group 1`,
+heutiges Verhalten, Default). Mit `--nozzle-group 2` werden je zwei
+benachbarte Düsen zu einer gemeinsam adressierbaren Einheit zusammengefasst,
+die immer nur gemeinsam feuert oder gar nicht. **Gilt nur in `--mode page`**
+(`CoverageEngine`) — Line-/Time-Modus packt feste Frames über einen anderen
+Pfad (`rendering.frames_from_ink`), den diese Option nicht berührt;
+`--nozzle-group 2` außerhalb von `--mode page` wird deshalb beim Parsen
+abgelehnt.
+
+Der physische Düsenabstand (`NOZZLE_PITCH_MM`, 0,1 mm) ändert sich dadurch
+**nicht** — nur die kleinste noch einzeln ansprechbare vertikale Einheit wird
+doppelt so groß: aus 0,1 mm pro Düse werden bei `--nozzle-group 2`
+0,2 mm pro adressierbarer Einheit.
+
+**Feuerregel (OR):** Eine Gruppe feuert, sobald **mindestens eine** ihrer
+beiden Düsen ihr Pixel noch braucht (angefordert und noch nicht gedruckt) —
+so geht nie ein gewolltes Pixel verloren, weil die Gruppe es nicht anfeuert.
+Der Preis: Liegt eine Gruppe genau auf der Grenze zwischen einer Tinte- und
+einer Nicht-Tinte-Zeile, wird beim Fertigwerden auch die Nicht-Tinte-Zeile
+mitgedruckt (Kantenverbreiterung um bis zu eine Zeile) — die Gruppe kann
+nicht nur zur Hälfte feuern.
+
+⚠️ Diese Option ist **kein Fix** für wiederholtes Überdrucken (siehe
+Tintenausbreitung oben, `--spray-radius-mm`/`--spray-strength`) und senkt
+auch nicht spürbar die CPU-Last — gemessen kostet `CoverageEngine.step()`
+~46,9 µs pro Aufruf (2,3 % eines Kerns bei 500 Hz), unabhängig von
+`--nozzle-group`, weil weiterhin alle 152 Düsen pro Sample durchlaufen
+werden, nur gruppiert. Sie existiert ausschließlich, weil eine gröbere
+vertikale Adressierung gewünscht war.
+
+**Nicht zu verwechseln mit `--nozzle-block-size`/`--nozzle-order`**
+(Düsen-Mapping, siehe unten): Das korrigiert eine **Vertauschung** in der
+Verdrahtung — eine Zeilen-*Permutation* — ändert aber nichts daran, dass
+jede Düse einzeln feuert, und ist nur außerhalb von `--mode page` erlaubt
+(die Blockpermutation ist nach Bildzeile indiziert, aber die Zuordnung
+Düse↔Zeile verschiebt sich in `--mode page` mit jeder vertikalen Bewegung —
+siehe den entsprechenden Fehlertext unten). `--nozzle-group` vertauscht
+nichts, sondern bindet benachbarte Düsen fest zusammen, und ist nur
+*innerhalb* von `--mode page` erlaubt. Die beiden Optionen lösen
+unterschiedliche Probleme und schließen sich schon durch den jeweils
+erforderlichen Modus gegenseitig aus.
 
 ---
 
@@ -585,6 +887,7 @@ python main.py --calibrate --pattern-length-mm 200 --mm-per-column 0.2 --preview
 | `v-stripes` | Volle Spaltenbänder – prüft Spalten-/Trackingtiming; ungleiche Streifenbreite = ungleichmäßiger Vorschub |
 | `diagonal` | Wiederkehrende Diagonale – eine vertauschte Düsenzeile zeigt sich sofort als Knick (siehe Düsen-Mapping unten) |
 | `solid` | Vollfläche – prüft Ink-Deckung/Banding |
+| `drill_pattern` | Rastert eine externe Bilddatei (z. B. ein Bohr-/Fadenkreuz-Justiermuster) auf die gewünschte physische Größe, statt ein Muster zu berechnen – siehe `--pattern-image` unten |
 
 ```bash
 python main.py --pattern checkerboard --pattern-square-mm 10 --pattern-square-rows 20
@@ -596,6 +899,35 @@ python main.py --pattern diagonal --mode line --preview diag.png
 | `--pattern-length-mm` | Physische Länge des Musters in mm (Default 200) |
 | `--pattern-square-mm` | Kachel-/Streifenbreite in mm (checkerboard, v-stripes, diagonal-Periode) |
 | `--pattern-square-rows` | Kachel-/Streifenhöhe in Zeilen (checkerboard, h-stripes) — Achtung Seitenverhältnis, siehe `--pattern-square-height-mm` im `--mode page`-Abschnitt oben |
+| `--pattern-image PATH` | Bilddatei für `--pattern drill_pattern` (jedes von PIL lesbare Format: PNG, JPG, BMP, …) |
+
+⚠️ **`drill_pattern` liefert kein Bild mit.** Anders als die übrigen Presets
+berechnet `drill_pattern` nichts selbst, sondern liest eine Bilddatei ein.
+Diese Datei ist **nicht** Teil dieses Repos — sie muss vom Anlagenbesitzer
+selbst bereitgestellt werden, entweder am Default-Pfad
+`assets/drill_pattern.png` (relativ zum `printhead/`-Paket, unabhängig vom
+aktuellen Arbeitsverzeichnis) oder über `--pattern-image PATH` an einer
+beliebigen anderen Stelle. Fehlt die Datei an beiden Stellen, bricht der
+Befehl mit einer klaren Fehlermeldung ab (kein Traceback), die den exakt
+gesuchten Pfad nennt:
+
+```bash
+$ python main.py --pattern drill_pattern --dry-run --mode line
+printhead: error: --pattern drill_pattern needs an image, but none was found
+at '/pfad/zum/repo/assets/drill_pattern.png'. Place an image there (any
+PIL-readable format: PNG, JPG, BMP, ...), or point at a different one with
+--pattern-image PATH.
+
+$ python main.py --pattern drill_pattern --pattern-image mein_muster.png \
+    --dry-run --mode line --preview drill.png
+```
+
+Das Bild wird unabhängig für Breite (`length_mm / mm_per_column` Spalten) und
+Höhe (`rows`, standardmäßig `IMAGE_HEIGHT`) skaliert — **nicht** seitenverhältnis-
+erhaltend. Das sieht auf den ersten Blick wie ein Bug aus, ist aber richtig: eine
+Druck-Zelle ist `mm_per_column` breit, aber `NOZZLE_PITCH_MM` hoch, also zwei
+unterschiedliche physische Maße — nur die unabhängige Skalierung auf die
+angeforderte Spalten-/Zeilenzahl ergibt auf dem Papier die korrekten Proportionen.
 
 ## Düsen-Mapping
 
@@ -633,6 +965,7 @@ statt eines Tracebacks.
 | Flag | Wirkung |
 |---|---|
 | `--pos` | Gibt die **Live-Position** vom Amfitrack aus: `x/y/z` (mm) + Verfahr-Wert entlang `--advance-axis` + Spaltenindex. Zugleich Kalibrierhilfe für Achse und `--mm-per-column`. Ctrl+C beendet. |
+| `--calibration-check` | Kalibrierungs-Gesundheitscheck: Wagen flach über die Seite schieben, **ohne zu drehen** — misst, wie stark der Gierwinkel trotzdem driftet. Braucht `--page-calibration PATH` oder `--page-frame simple`. Ctrl+C beendet und druckt eine Zusammenfassung. Details unten. |
 | `--list-nodes` | Verbindet zum USB-Dongle und listet alle Nodes (`name`/`uuid`/`tx_id`), markiert die als „Sensor" erkannten. |
 | `--scan-ble` | Scannt BLE und listet Geräte (`address` + `name`) – zum Finden der PrintheadBLE-Adresse (nutzbar mit `--address`). |
 | `--nozzle-test` | Feuert per BLE ein Testmuster (alle 152 Düsen kurz an → Einzeldüse über alle Zeilen → Blank), um die Patrone zu prüfen. Berücksichtigt `--nozzle-block-size`/`--nozzle-order`, falls gesetzt. |
@@ -649,6 +982,136 @@ python main.py --scan-ble
 
 # Düsen der Patrone testen:
 python main.py --nozzle-test
+```
+
+### `--calibration-check`: Gierwinkel-Drift bei reiner Verschiebung messen
+
+Das gemeldete Symptom war ein driftender Gierwinkel, obwohl der Wagen nur
+verschoben, nie gedreht wurde. `--calibration-check` macht genau das messbar:
+Live-Stream wie `--pos` (identische `position`-NDJSON-Events — die Web-UI
+kann sie unverändert weiterverwenden, ohne eigene Behandlung dieses neuen
+Diagnosemodus), dazu am Ende (Ctrl+C) eine Zusammenfassung:
+
+- verfahrene Strecke in `u`/`v` (mm) — Plausibilitätscheck, ob überhaupt
+  genug bewegt wurde,
+- Gierwinkel min/max/**Spanne** (°) — die Kopfzahl: ohne Drehung sollte das
+  nahe 0 bleiben,
+- Roll-/Pitch-Spanne (°) — die Größe, die über eine unsaubere Seitennormale
+  in den Gierwinkel durchsickert (siehe „Kalibrierungsqualität" oben),
+- **Korrelation** des Gierwinkels mit `u` bzw. `v` getrennt — trennt
+  gewöhnliches Rauschen von **systematischer** Drift mit der Position: auf
+  echten Daten dieser Anlage korrelierte die gemessene Neigung mit **+0,69**
+  gegen `v`, bei nachweislich flachem Wagen.
+
+Verdikt-Schwellen: Spanne bis **~2°** = unauffällig, bis **~4°** (nahe an
+den 2-3°, die der Betreiber an seiner aktuellen Kalibrierung schon
+akzeptiert) = grenzwertig, darüber = echtes Problem — entweder eine
+schlechte Kalibrierungs-Seitennormale oder eine Feldverzerrung des
+Trackers. Unterscheidung: dieselbe Stelle mit einer frisch, sorgfältig neu
+abgefahrenen Kalibrierung wiederholen (verschwindet die Drift → war es die
+Kalibrierung); bleibt sie trotz einer nachweislich guten Kalibrierung
+bestehen, denselben Sweep an einer **anderen** Position/Höhe über der
+Basisstation wiederholen — wandert die Drift mit der absoluten
+Trackerposition statt mit der Kalibrierung, ist es Feldverzerrung, die
+kein Neu-Kalibrieren beheben kann.
+
+```bash
+python main.py --calibration-check --page-calibration page_calibration.json
+python main.py --calibration-check --page-frame simple --simulate   # ohne Hardware
+```
+
+**Beispielausgabe eines simulierten Laufs** (Boustrophedon-Sweep über eine
+A4-große Fläche, Wagen dabei durchgehend flach — aber mit künstlich
+injiziertem Gierwinkel proportional zu `v`, stellvertretend für eine
+Seitennormale, deren Fehler positionsabhängige Neigung in scheinbaren
+Gierwinkel verwandelt):
+
+```
+Calibration health check: slide the cart FLAT over the page, WITHOUT rotating it. Ctrl+C to stop and print the summary.
+page u=  199.20  v=  210.42 mm  |  yaw= +5.60  roll= +0.00  pitch= +0.00 deg
+
+---- calibration health check summary ----
+  samples: 579
+  travelled: u=199.2mm  v=280.3mm
+  yaw: min=+0.00  max=+5.60  span=5.60 deg
+  roll span: 0.00 deg   pitch span: 0.00 deg
+  yaw correlation: vs u = -0.25  vs v = +1.00
+  verdict: BAD: yaw span 5.60 deg is well beyond what a flat, non-rotating sweep should show. Likely either (a) a bad calibration page-normal (retrace the edges -- see calibration.py's CalibrationQualityWarning for whether the trace itself was short/noisy/sparse), or (b) tracker field distortion (a real physical effect, independent of calibration). To tell them apart: re-run this check at the SAME physical spot with a freshly, carefully re-traced calibration -- if the drift disappears, it was the calibration; if it persists even with a known-good one, repeat the same sweep at a DIFFERENT position/height over the tracker base station -- a drift pattern that moves with absolute tracker position rather than with the calibration is field distortion, not something re-tracing can fix.
+Stopped calibration check.
+```
+
+Und zum Vergleich derselbe Sweep ganz ohne injizierten Fehler (Wagen bleibt
+die ganze Zeit exakt in derselben Orientierung — die Korrelation ist dann
+`None`/„n/a", nicht 0: bei einer Gierwinkel-Reihe ohne jede Streuung ist ein
+Korrelationskoeffizient mathematisch undefiniert, siehe
+`_calibration_check_summary`s Docstring):
+
+```
+---- calibration health check summary ----
+  samples: 553
+  travelled: u=193.1mm  v=280.0mm
+  yaw: min=+0.00  max=+0.00  span=0.00 deg
+  roll span: 0.00 deg   pitch span: 0.00 deg
+  yaw correlation: n/a (not enough motion/variation collected)
+  verdict: OK: yaw span 0.00 deg is at or under the ~2 deg 'fine' mark for a flat, non-rotating sweep -- consistent with a good calibration.
+Stopped calibration check.
+```
+
+**Neue Tests:**
+
+#### Nachtrag (Verifikation): kein Freispruch ohne Messung
+
+Das Verdikt hing ausschließlich am Gierwinkel-Span. Ein Lauf, der **gar
+nichts** gesammelt hat — Tracker liefert keine Pose, oder Strg+C kommt
+sofort — meldete damit:
+
+```
+  samples: 0
+  verdict: OK: yaw span 0.00 deg ... consistent with a good calibration.
+```
+
+Also ein Freispruch für genau die Frage, wegen der man das Werkzeug startet.
+Dasselbe galt für ein 2-cm-Wackeln: Der Gierwinkel bleibt dabei nahe null,
+weil sich der Wagen kaum bewegt hat, nicht weil die Kalibrierung gut ist.
+`_calibration_check_summary` berechnete `u_travel_mm`/`v_travel_mm` bereits
+und nannte sie im eigenen Docstring den „headline sanity check" — das
+Verdikt hat sie nur nie ausgewertet.
+
+Jetzt wird vor den Gierwinkel-Schwellen geprüft, ob überhaupt genug gemessen
+wurde: mindestens **20 Samples** und **50 mm** Weg (Diagonale der u/v-
+Bounding-Box). Darunter lautet das Verdikt `INCONCLUSIVE` mit dem
+ausdrücklichen Zusatz, dass das **kein Bestehen** ist. Die Schwellen sind
+bewusst dieselben Konstanten wie `MIN_TRACE_LENGTH_MM`/`MIN_SAMPLE_COUNT`
+aus `calibration.py` (importiert, nicht kopiert) — es ist dieselbe Frage,
+mit derselben Messreihe belegt.
+
+Mutationsproben bestätigt: Entfernt man die Sample-Bedingung, die Weg-
+Bedingung, oder lässt man den Guard alles verschlucken, schlägt jeweils ein
+Test fehl. Die beiden oben abgedruckten Beispielläufe (579 bzw. 553 Samples
+über ~200/280 mm) liegen weit über beiden Schwellen — ihre Verdikte sind
+unverändert.
+
+**Neue Tests:**
+
+```
+tests/test_page_mapper.py
+  test_calibration_check_ndjson_event_shape
+  test_calibration_check_reports_an_error_without_a_page_frame
+  test_calibration_check_pure_translation_gives_near_zero_yaw_span
+  test_calibration_check_injected_yaw_ramp_gives_large_span_and_high_correlation
+  test_calibration_check_summary_pure_function_matches_the_live_run
+  test_calibration_check_zero_samples_is_INCONCLUSIVE_not_a_pass
+  test_calibration_check_short_wiggle_is_INCONCLUSIVE_not_a_pass
+  test_calibration_check_too_few_samples_is_INCONCLUSIVE_even_over_a_long_sweep
+  test_calibration_check_a_real_sweep_still_reaches_a_real_verdict
+
+tests/test_patterns_and_mapping.py
+  test_cli_calibration_check_is_a_debug_mode
+  test_cli_calibration_check_requires_a_page_frame
+  test_cli_calibration_check_accepts_page_calibration
+  test_cli_calibration_check_accepts_simple_frame
+  test_cli_calibration_check_conflicts_with_pos
+  test_cli_calibration_check_pos_json_flag_reused
 ```
 
 ## Echtzeit / Timing debuggen

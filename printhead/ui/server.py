@@ -32,7 +32,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from ..calibration import CalibrationAngleWarning, PageCalibration, calibrate_page
+from ..calibration import (
+    CalibrationAngleWarning, CalibrationQualityWarning, PageCalibration, calibrate_page,
+)
 from .runner import CommandProcess
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -76,7 +78,23 @@ def compute_calibration(col_samples, row_samples,
     the Calibration tab's "Capture boresight" button), is threaded straight
     into ``calibrate_page()`` and stored on the resulting calibration.
     ``has_boresight`` in the return value mirrors that back so the UI can
-    confirm what actually got saved, not just what it thinks it sent."""
+    confirm what actually got saved, not just what it thinks it sent.
+
+    ``quality`` in the return value carries ``calibrate_page()``'s
+    fit-quality metrics (trace lengths, RMS residuals, sample counts, page-
+    normal tilt -- see ``PageCalibration``'s docstring), for the Calibration
+    tab to show next to ``angle_error_deg``. ``quality_warning`` mirrors
+    ``warning`` but for ``CalibrationQualityWarning`` specifically (a short/
+    noisy/sparse trace) -- kept as a separate field rather than merged into
+    ``warning``, since the two flag independent problems and either, both,
+    or neither may fire for a given trace.
+
+    This also prints a one-line summary (and any warning) to THIS
+    PROCESS's own stdout -- the terminal the web UI server was launched
+    from -- mirroring what a CLI computing a calibration directly would
+    print, since this project has no other calibration-compute code path
+    (page calibration is only ever computed here, see the README's
+    "Kalibrierung" section)."""
     try:
         col = np.asarray(col_samples, dtype=float)
         row = np.asarray(row_samples, dtype=float)
@@ -85,9 +103,11 @@ def compute_calibration(col_samples, row_samples,
         return {"ok": False, "error": f"invalid samples: {exc}"}
 
     warning_msg = None
+    quality_warning_msg = None
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", CalibrationAngleWarning)
+            warnings.simplefilter("always", CalibrationQualityWarning)
             cal = calibrate_page(col, row, sheet_width_mm=sheet_width_mm,
                                  sheet_height_mm=sheet_height_mm,
                                  boresight_quat=bore)
@@ -96,10 +116,34 @@ def compute_calibration(col_samples, row_samples,
     for w in caught:
         if issubclass(w.category, CalibrationAngleWarning):
             warning_msg = str(w.message)
+        elif issubclass(w.category, CalibrationQualityWarning):
+            quality_warning_msg = str(w.message)
+
+    quality = {
+        "col_trace_length_mm": cal.col_trace_length_mm,
+        "row_trace_length_mm": cal.row_trace_length_mm,
+        "col_rms_residual_mm": cal.col_rms_residual_mm,
+        "row_rms_residual_mm": cal.row_rms_residual_mm,
+        "col_sample_count": cal.col_sample_count,
+        "row_sample_count": cal.row_sample_count,
+        "normal_tilt_deg": cal.normal_tilt_deg,
+    }
+    print(f"[calibration] angle error {cal.angle_error_deg:+.2f} deg | "
+          f"normal tilt {cal.normal_tilt_deg:.2f} deg | "
+          f"col edge: {cal.col_trace_length_mm:.0f}mm, {cal.col_sample_count} samples, "
+          f"{cal.col_rms_residual_mm:.2f}mm RMS | "
+          f"row edge: {cal.row_trace_length_mm:.0f}mm, {cal.row_sample_count} samples, "
+          f"{cal.row_rms_residual_mm:.2f}mm RMS", flush=True)
+    if warning_msg:
+        print(f"[calibration] WARNING: {warning_msg}", flush=True)
+    if quality_warning_msg:
+        print(f"[calibration] WARNING: {quality_warning_msg}", flush=True)
 
     return {"ok": True, "angle_error_deg": cal.angle_error_deg,
             "scale_col": cal.scale_col, "scale_row": cal.scale_row,
-            "warning": warning_msg, "has_boresight": cal.boresight_quat is not None,
+            "warning": warning_msg, "quality_warning": quality_warning_msg,
+            "quality": quality,
+            "has_boresight": cal.boresight_quat is not None,
             "calibration": cal.to_dict()}
 
 
@@ -118,13 +162,28 @@ def save_calibration(calibration: dict, path: str) -> dict:
 def load_calibration(path: str) -> dict:
     """Business logic behind ``POST /api/calibration/load``: read back a
     previously saved calibration's summary, e.g. to confirm one before
-    printing with it."""
+    printing with it.
+
+    ``quality`` mirrors ``compute_calibration``'s field, but every entry may
+    be ``None`` here: a calibration saved before the fit-quality feature
+    existed (the operator has one) has no measured quality to report --
+    see ``PageCalibration``'s docstring."""
     try:
         cal = PageCalibration.load(path)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+    quality = {
+        "col_trace_length_mm": cal.col_trace_length_mm,
+        "row_trace_length_mm": cal.row_trace_length_mm,
+        "col_rms_residual_mm": cal.col_rms_residual_mm,
+        "row_rms_residual_mm": cal.row_rms_residual_mm,
+        "col_sample_count": cal.col_sample_count,
+        "row_sample_count": cal.row_sample_count,
+        "normal_tilt_deg": cal.normal_tilt_deg,
+    }
     return {"ok": True, "angle_error_deg": cal.angle_error_deg,
             "scale_col": cal.scale_col, "scale_row": cal.scale_row,
+            "quality": quality,
             "calibration": cal.to_dict()}
 
 

@@ -69,6 +69,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--pattern", choices=sorted(patterns.PATTERNS),
                    help="Print a test pattern instead of text; runs through the "
                         "same tracking/time pipeline as text")
+    g.add_argument("--pattern-image", type=str, default=None,
+                   help="Image file for --pattern drill_pattern (any "
+                        "PIL-readable format: PNG, JPG, BMP, ...), rasterised "
+                        "to the requested --pattern-length-mm/--pattern-height-mm "
+                        "size. No image ships with this repo -- without this "
+                        "flag drill_pattern looks for one at "
+                        "assets/drill_pattern.png next to the printhead/ "
+                        "package (see README); if it's not there, place one "
+                        "or pass this flag instead. Ignored by every other "
+                        "--pattern")
     g.add_argument("--pattern-length-mm", type=float, default=200.0,
                    help="Physical length of --calibrate/--pattern (default 200)")
     g.add_argument("--pattern-square-mm", type=float, default=10.0,
@@ -82,11 +92,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "Page mode only: line/time mode packs fixed frames via "
                         "frames_from_ink(), which requires exactly IMAGE_HEIGHT "
                         "rows, so this is rejected outside --mode page. Without "
-                        "it the pattern is capped at IMAGE_HEIGHT rows (~15mm).")
+                        "it the pattern is capped at IMAGE_HEIGHT rows (15.2mm).")
     g.add_argument("--pattern-square-height-mm", type=float, default=None,
                    help="Row period in mm for checkerboard/h-stripes; overrides "
                         "--pattern-square-rows (square_rows = max(1, round(v / "
-                        "NOZZLE_PITCH_MM))). A raw row is only ~0.1mm, so this "
+                        "NOZZLE_PITCH_MM))). A raw row is exactly 0.1mm, so this "
                         "is usually what you want for actually-square tiles.")
     g.add_argument("--calib-major-mm", type=float, default=10.0,
                    help="Distance between full-height ruler ticks (default 10 = 1cm)")
@@ -133,7 +143,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "around a completed pixel that also receives a "
                         "partial dose, since a real drop wets more than its "
                         "own grid cell. In MILLIMETRES, not pixels -- a cell "
-                        "is ~0.0993mm tall but --mm-per-column (0.2 default) "
+                        "is 0.1mm tall but --mm-per-column (0.2 default) "
                         "wide, so the same pixel count would mean two "
                         "different physical distances per axis. Default 0 "
                         "(off, exactly the pre-spray behaviour); pair with "
@@ -151,6 +161,23 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(off). Too high under-prints (real gaps left "
                         "unfilled), so raise it gradually and check the "
                         "printed sheet, not just --record")
+    g.add_argument("--nozzle-group", type=int, choices=(1, 2), default=1,
+                   help="Page mode only: tie N adjacent nozzles into one "
+                        "addressable unit that always fires (and doses) "
+                        "together or not at all -- for coarser VERTICAL "
+                        "addressing. N=2 halves the smallest addressable "
+                        "vertical step from NOZZLE_PITCH_MM (0.1mm) to "
+                        "0.2mm; the physical nozzle pitch itself does "
+                        "not change. A group fires if ANY member's pixel "
+                        "still wants ink (OR rule), so a group straddling "
+                        "an ink/no-ink boundary also inks the no-ink side. "
+                        "Default 1 = today's behaviour, every nozzle "
+                        "addressed individually. NOT the same feature as "
+                        "--nozzle-block-size/--nozzle-order above: those "
+                        "permute which image ROW an individually-addressed "
+                        "nozzle receives, for a rig wired out of order -- "
+                        "this option does not reorder anything, it only "
+                        "ties adjacent nozzles' firing together")
     g.add_argument("--progress-json", action="store_true",
                    help="Page mode: emit one JSON progress event per sample "
                         "(current u/v/row/col + newly-covered cells) instead "
@@ -260,9 +287,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     mx.add_argument("--pos", action="store_true",
                     help="Live-print the Amfitrack position (x/y/z + advance + "
                          "column); works with --simulate. Ctrl+C to stop")
+    mx.add_argument("--calibration-check", action="store_true",
+                    help="Calibration health check: streams live page u/v/yaw/"
+                         "roll/pitch like --pos, then (Ctrl+C) prints a summary "
+                         "of yaw drift while the cart only TRANSLATES -- slide "
+                         "it flat over the page WITHOUT rotating it. Reports "
+                         "travelled u/v, yaw min/max/span (the headline "
+                         "number -- should stay near 0 with no rotation), "
+                         "roll/pitch span, and yaw's correlation against u/v "
+                         "(separates noise from systematic drift with "
+                         "position). Needs --page-calibration PATH or "
+                         "--page-frame simple: there is no page u/v to check "
+                         "drift against otherwise")
     g.add_argument("--pos-json", action="store_true",
-                   help="With --pos: emit one JSON object per sample (newline "
-                        "terminated) instead of the live line (used by the web UI)")
+                   help="With --pos or --calibration-check: emit one JSON "
+                        "object per sample (newline terminated) instead of "
+                        "the live line (used by the web UI)")
     g.add_argument("--page-frame", choices=("calibrated", "simple"),
                    default="calibrated",
                    help="Which 2D frame --mode page prints into. calibrated "
@@ -366,6 +406,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--page-frame simple and --page-calibration are mutually "
                  "exclusive: simple takes the tracker's own x/y axes as the "
                  "page frame and ignores any traced calibration")
+    if args.calibration_check and args.page_frame != "simple" and not args.page_calibration:
+        # Unlike --pos (which tolerates no page frame at all -- it just
+        # omits the page_u/page_v fields), --calibration-check has nothing
+        # to measure drift IN without one: yaw is only ever reported
+        # relative to a page normal, see rotation.yaw_about_normal.
+        ap.error("--calibration-check needs a page frame to measure drift "
+                 "against: pass --page-calibration PATH or --page-frame simple")
     if args.spray_radius_mm is not None and args.spray_radius_mm < 0.0:
         ap.error("--spray-radius-mm cannot be negative (0 disables the "
                  "ink-spread model)")
@@ -389,12 +436,20 @@ def parse_args(argv=None) -> argparse.Namespace:
                  "mode packs fixed frames via frames_from_ink(), which requires "
                  "exactly IMAGE_HEIGHT rows, so the pattern height can't be "
                  "changed there")
+    if (not _debug_mode(args) and args.track and args.mode != "page"
+            and args.nozzle_group != 1):
+        ap.error("--nozzle-group 2 is only valid with --mode page: line/time "
+                 "mode packs fixed frames via rendering.frames_from_ink() "
+                 "instead of going through CoverageEngine, so nozzle grouping "
+                 "has no effect there (this is unrelated to "
+                 "--nozzle-block-size/--nozzle-order, which IS supported "
+                 "outside page mode -- see that option's help text)")
     return args
 
 
 def _debug_mode(args: argparse.Namespace) -> bool:
-    return bool(args.pos or args.list_nodes or args.scan_ble or args.nozzle_test
-                or args.ble_benchmark)
+    return bool(args.pos or args.calibration_check or args.list_nodes or args.scan_ble
+                or args.nozzle_test or args.ble_benchmark)
 
 
 def _content_mode_count(args: argparse.Namespace) -> int:
@@ -434,7 +489,7 @@ def build_ink(args: argparse.Namespace, mm_per_column: float):
     height_mm = rows * NOZZLE_PITCH_MM
 
     # --pattern-square-height-mm is just a mm-based alternative unit for
-    # --pattern-square-rows -- a raw row is only ~0.1mm, so mm is usually what
+    # --pattern-square-rows -- a raw row is exactly 0.1mm, so mm is usually what
     # you actually want for a square tile.
     square_rows = args.pattern_square_rows
     if args.pattern_square_height_mm is not None:
@@ -450,7 +505,7 @@ def build_ink(args: argparse.Namespace, mm_per_column: float):
         ink = patterns.PATTERNS[args.pattern](
             args.pattern_length_mm, mm_per_column,
             square_mm=args.pattern_square_mm, square_rows=square_rows,
-            rows=rows)
+            rows=rows, pattern_image=args.pattern_image)
         return ink, f"[pattern {args.pattern} {args.pattern_length_mm:.0f}mm x {height_mm:.0f}mm]"
     render = RenderSettings(
         text=args.text, font=args.font, render_size=args.render_size,
@@ -507,6 +562,10 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         kwargs["spray_radius_mm"] = args.spray_radius_mm
     if args.spray_strength is not None:
         kwargs["spray_strength"] = args.spray_strength
+    # --nozzle-group has a real default of 1 (not None like the args above),
+    # so it always reaches the controller -- there is no "unset" state to
+    # distinguish from the default here.
+    kwargs["nozzle_group"] = args.nozzle_group
     if args.ble_write_ceiling is not None:
         kwargs["ble_write_ceiling"] = args.ble_write_ceiling
     if args.speed_warning_mm_s is not None:
@@ -544,6 +603,24 @@ def _run_debug(args: argparse.Namespace) -> None:
         asyncio.run(diagnostics.monitor_position(
             build_tracking(args), args.simulate, ndjson=args.pos_json,
             page_calibration_path=args.page_calibration, **pos_kwargs))
+    elif args.calibration_check:
+        # Same kwargs as --pos above (offsets/boresight don't change the
+        # yaw-drift statistics -- a constant u/v shift and a fixed yaw
+        # offset don't affect a SPAN or a CORRELATION -- but forwarding them
+        # anyway keeps this diagnostic's page_u/page_v consistent with what
+        # a real pass would report, same reasoning as --pos).
+        check_kwargs = {}
+        if args.sensor_offset_row_mm is not None:
+            check_kwargs["sensor_offset_row_mm"] = args.sensor_offset_row_mm
+        if args.sensor_offset_col_mm is not None:
+            check_kwargs["sensor_offset_col_mm"] = args.sensor_offset_col_mm
+        if args.boresight_deg is not None:
+            check_kwargs["boresight_deg"] = args.boresight_deg
+        if args.simple_boresight:
+            check_kwargs["simple_boresight"] = args.simple_boresight
+        asyncio.run(diagnostics.calibration_check(
+            build_tracking(args), args.simulate, ndjson=args.pos_json,
+            page_calibration_path=args.page_calibration, **check_kwargs))
     elif args.list_nodes:
         diagnostics.list_nodes(build_tracking(args))
     elif args.scan_ble:

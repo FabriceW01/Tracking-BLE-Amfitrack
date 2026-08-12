@@ -21,9 +21,20 @@ Two CLI flags use these:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+from PIL import Image
 
 from .geometry import IMAGE_HEIGHT
+
+# Default location drill_pattern looks for its source image: next to the
+# printhead/ PACKAGE, not wherever the process happens to be running from
+# (Path(__file__).resolve() anchors to this file's own on-disk location, so
+# ``cd /somewhere/else && python /path/to/main.py`` still finds it). No image
+# ships in this repo -- the hardware owner supplies their own here, or points
+# --pattern-image at a different file (see README).
+DEFAULT_DRILL_PATTERN_PATH = Path(__file__).resolve().parent.parent / "assets" / "drill_pattern.png"
 
 
 def _columns(length_mm: float, mm_per_column: float) -> int:
@@ -114,10 +125,52 @@ def solid_pattern(length_mm: float, mm_per_column: float,
     return np.ones((rows, width), dtype=bool)
 
 
+def drill_pattern(length_mm: float, mm_per_column: float,
+                  rows: int = IMAGE_HEIGHT, pattern_image: "str | None" = None,
+                  **_) -> np.ndarray:
+    """Rasterise an external image (e.g. a drill/crosshair alignment target)
+    to the requested physical size, instead of drawing a procedural pattern.
+
+    ``pattern_image`` (CLI: ``--pattern-image PATH``) overrides
+    :data:`DEFAULT_DRILL_PATTERN_PATH`. No image ships with this repo -- the
+    hardware owner supplies their own, either at the default path or via
+    ``--pattern-image`` (see README). Missing-file is therefore the COMMON
+    case here, not a rare edge case, so it gets a clear, actionable error
+    (SystemExit, not a raw traceback/stack dump) naming the exact path that
+    was checked.
+    """
+    path = Path(pattern_image) if pattern_image else DEFAULT_DRILL_PATTERN_PATH
+    if not path.is_file():
+        raise SystemExit(
+            f"printhead: error: --pattern drill_pattern needs an image, but "
+            f"none was found at '{path.resolve()}'. Place an image there "
+            f"(any PIL-readable format: PNG, JPG, BMP, ...), or point at a "
+            f"different one with --pattern-image PATH.")
+    img = Image.open(path).convert("L")
+
+    width = _columns(length_mm, mm_per_column)
+    # Deliberately resized to (width, rows) INDEPENDENTLY rather than
+    # preserving the source image's own aspect ratio -- this looks like a
+    # bug (the image visibly stretches/squashes on screen) but is not one:
+    # a printed CELL is mm_per_column wide but NOZZLE_PITCH_MM tall, two
+    # *different* physical sizes, so matching the pixel counts to the
+    # requested (width, rows) -- not to the source W:H ratio -- is exactly
+    # what makes the PRINTED result physically correct/square on paper.
+    img = img.resize((width, rows), Image.LANCZOS)
+    arr = np.asarray(img)
+    # Fixed mid-grey cut-off, same default as --threshold (see
+    # config.RenderSettings.threshold): the source is expected to already
+    # be close to black/white, and LANCZOS resampling only blurs the
+    # transition at edges, so a plain 50% split reproduces it faithfully
+    # without needing a tunable parameter here too.
+    return arr < 128
+
+
 PATTERNS = {
     "checkerboard": checkerboard_pattern,
     "h-stripes": h_stripes_pattern,
     "v-stripes": v_stripes_pattern,
     "diagonal": diagonal_pattern,
     "solid": solid_pattern,
+    "drill_pattern": drill_pattern,
 }

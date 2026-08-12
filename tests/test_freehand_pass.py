@@ -31,7 +31,7 @@ from printhead.controller import (                                    # noqa: E4
 )
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
 from printhead.geometry import (                                      # noqa: E402
-    NOZZLE_BAR_WIDTH_MM,
+    NOZZLE_BAR_SPAN_MM,
     NOZZLE_PITCH_MM,
     NUM_NOZZLES,
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
@@ -99,11 +99,11 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
     # nonzero *effective* offset here would shift v_mm by tens of mm and push
     # every sample out of the small target images used below.
     #
-    # NOTE: PageMapper's row axis always subtracts NOZZLE_BAR_WIDTH_MM/2 from
+    # NOTE: PageMapper's row axis always subtracts NOZZLE_BAR_SPAN_MM/2 from
     # whatever sensor_offset_row_mm is given (that is the bar-CENTER-to-
     # nozzle-0 conversion, not "no correction"), so the value that actually
-    # cancels to a zero net shift is NOZZLE_BAR_WIDTH_MM/2.0, NOT 0.0 --
-    # passing literal 0.0 would itself introduce a -NOZZLE_BAR_WIDTH_MM/2 mm
+    # cancels to a zero net shift is NOZZLE_BAR_SPAN_MM/2.0, NOT 0.0 --
+    # passing literal 0.0 would itself introduce a -NOZZLE_BAR_SPAN_MM/2 mm
     # shift. See tests/test_page_mapper.py for this pinned in detail.
     return PrintController(render, ble, trk, ink=ink,
                            page_calibration=_identity_calibration(),
@@ -111,7 +111,7 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
                            profile_csv=profile_csv, record=record,
                            progress_json=progress_json,
                            speed_warning_mm_s=speed_warning_mm_s,
-                           sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                           sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                            sensor_offset_col_mm=0.0)
 
 
@@ -157,8 +157,8 @@ def test_freehand_pass_covers_the_page_and_stops_before_timeout():
 def test_simple_frame_pass_zeroes_at_the_nozzle_bar_and_prints():
     # REGRESSION: --page-frame simple's origin must land under the nozzle
     # bar, not the sensor. Zeroing at the sensor leaves the bar
-    # abs(SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_WIDTH_MM/2) ~=
-    # 69.86mm off along v (magnitude only -- the sign/direction depends on
+    # abs(SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_SPAN_MM/2) ~=
+    # 69.91mm off along v (magnitude only -- the sign/direction depends on
     # the constant's current, hardware-measured sign), every sample reads
     # out of bounds, and the pass completes "successfully" having printed
     # NOTHING -- which is exactly what the first simulated
@@ -343,12 +343,12 @@ def test_freehand_pass_actually_covers_every_ink_pixel():
     # directly to check *what* "covered" means at the pixel level, not just
     # that the pass terminated.
     ink = np.ones((30, 5), dtype=bool)
-    # Neutralised sensor offset (NOZZLE_BAR_WIDTH_MM/2.0, not 0.0 -- see the
+    # Neutralised sensor offset (NOZZLE_BAR_SPAN_MM/2.0, not 0.0 -- see the
     # NOTE in _controller() above): this test drives CoverageEngine/PageMapper
     # directly against a controlled identity calibration and a small (30-row)
     # target image, unrelated to the sensor-to-nozzle-bar offset feature.
     mapper = PageMapper(_identity_calibration(),
-                        sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                        sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     coverage = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
 
@@ -591,7 +591,7 @@ def test_freehand_pass_out_of_page_reports_zero_coverage_and_diagnosis():
     # consistent, and matches the exact v_min/v_max == 500.0 the pass-level
     # test above expects).
     mapper = PageMapper(_identity_calibration(),
-                        sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                        sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     coverage = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
     u, v, _z = mapper.project(np.array([2.0, 500.0, 0.0]))
@@ -770,7 +770,7 @@ def _run_freehand_pass_collect_covered_cells(quats):
     ctrl = PrintController(render, ble, trk, ink=ink,
                            page_calibration=_identity_calibration_with_boresight(),
                            dose_hold_s=0.01, progress_json=True,
-                           sensor_offset_row_mm=NOZZLE_BAR_WIDTH_MM / 2.0,
+                           sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                            sensor_offset_col_mm=0.0)
     positions = _sweep_positions(n_cols=5, samples_per_col=12)
     tracker = ScriptedTracker(positions, quats=quats)

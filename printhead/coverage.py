@@ -23,8 +23,9 @@ and revisits without ever accumulating dose across pixels.
 Cart yaw about the page normal is corrected here on a per-nozzle basis: with
 the bar rotated by ``yaw_rad``, nozzle ``p`` is no longer at the same column
 as nozzle 0 (see ``step()``'s ``yaw_rad`` parameter). Measured from a real
-pass (``pass5.csv``), yaw spans 75.6 deg, which spreads the 15mm bar across
-~14.5mm (~72 columns at 0.2 mm/col) -- ignoring that put nozzles that were
+pass (``pass5.csv``), yaw spans 75.6 deg, which spreads the 15.1mm nozzle-0-
+to-nozzle-151 span (``NOZZLE_BAR_SPAN_MM``, see geometry.py) across
+~14.6mm (~73 columns at 0.2 mm/col) -- ignoring that put nozzles that were
 nowhere near a wanted pixel into the fired pattern, and vice versa. Only yaw
 is corrected: tilt (pitch/roll) is small by comparison in the same data
 (median 2.7 deg, max 7.8 deg) and is a deliberate, measured non-goal, not an
@@ -32,6 +33,18 @@ oversight -- see ``rotation.yaw_about_normal``'s docstring for the yaw
 extraction itself and ``tracking.PageMapper`` for the matching lever-arm
 correction (the sensor->nozzle-bar offset is a cart-frame vector, not a
 page-frame constant, for the same reason).
+
+Nozzles can optionally be tied together into fixed-size groups (``__init__``'s
+``nozzle_group``, CLI ``--nozzle-group``): with ``nozzle_group = N``, nozzles
+``N*k .. N*k+N-1`` form group ``k`` and always fire together or not at all --
+see ``step()`` for the exact per-group OR/dwell/deposit rule. This is a
+coarser-vertical-addressing option requested by the hardware owner, nothing
+more: it is NOT a fix for the repeated-overprint behaviour ``spray_radius_mm``
+/ ``spray_strength`` above address, and firing nozzles in pairs does not
+meaningfully change ``step()``'s own CPU cost (measured ~46.9us/call = 2.3%
+of a core at 500Hz) -- the per-nozzle loop below still runs all 152 nozzles
+either way, just grouped. Only ``N in (1, 2)`` is supported; ``N = 1``
+reduces to exactly the ungrouped behaviour described above.
 """
 
 from __future__ import annotations
@@ -155,16 +168,26 @@ class CoverageEngine:
     def __init__(self, ink: np.ndarray, mm_per_column: float,
                  dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
                  spray_radius_mm: float = 0.0,
-                 spray_strength: float = 0.0):
+                 spray_strength: float = 0.0,
+                 nozzle_group: int = 1):
         ink = np.asarray(ink, dtype=bool)
         if ink.ndim != 2:
             raise ValueError(f"ink must be a 2-D (H, W) array, got shape {ink.shape}")
+        if nozzle_group < 1:
+            raise ValueError(f"nozzle_group must be >= 1, got {nozzle_group}")
         self.ink = ink
         self.printed = np.zeros_like(ink, dtype=bool)
         self.mm_per_column = mm_per_column
         self.dose_hold_s = dose_hold_s
         self.spray_radius_mm = spray_radius_mm
         self.spray_strength = spray_strength
+        # Ties nozzles nozzle_group*k .. nozzle_group*k+nozzle_group-1 into
+        # group k, which always fires together or not at all -- see step()
+        # for the exact rule. 1 (default) = today's behaviour, every nozzle
+        # addressed individually; only 1 and 2 are supported by the CLI, but
+        # nothing below assumes NUM_NOZZLES divides evenly by this, so an
+        # untested N is at worst a short trailing group, never a crash.
+        self.nozzle_group = nozzle_group
 
         # Fractional dose per pixel, 0.0 .. 1.0 (1.0 == printed). Without
         # spray this only ever holds 0.0/1.0 and `printed` is simply its
@@ -174,10 +197,15 @@ class CoverageEngine:
         self.dose = np.zeros(ink.shape, dtype=np.float32)
         self._spray_kernel = self._build_spray_kernel()
 
-        # Per-nozzle dwell state: which pixel each nozzle is currently over
-        # (None if not over a wanted, unprinted pixel) and when it arrived.
-        self._nozzle_pixel: List[_Pixel] = [None] * NUM_NOZZLES
-        self._nozzle_since: List[Optional[float]] = [None] * NUM_NOZZLES
+        # Per-GROUP dwell state: which pixel each group is currently over
+        # (None if the group is not wanted -- see step()) and when it
+        # arrived, keyed on the group's FIRST member's (row, col). At
+        # nozzle_group=1 a group is exactly one nozzle, so this is the same
+        # per-nozzle state the engine has always kept (bit-identical
+        # behaviour -- see step()'s docstring).
+        self._num_groups = -(-NUM_NOZZLES // nozzle_group)   # ceil division
+        self._group_pixel: List[_Pixel] = [None] * self._num_groups
+        self._group_since: List[Optional[float]] = [None] * self._num_groups
         self._last_pattern: Optional[bytes] = None
 
         # Whether the most recent step() had ANY nozzle in bounds of the
@@ -218,7 +246,7 @@ class CoverageEngine:
 
         The radius is given in MILLIMETRES, not pixels, and converted per
         axis, because the grid is strongly anisotropic: a cell is
-        ``NOZZLE_PITCH_MM`` (~0.0993mm) tall but ``mm_per_column`` (0.2mm by
+        ``NOZZLE_PITCH_MM`` (0.1mm) tall but ``mm_per_column`` (0.2mm by
         default) wide, so a physically round drop is about 2:1 elliptical in
         pixel space. A pixel-count radius would silently mean two different
         physical distances on the two axes.
@@ -333,6 +361,39 @@ class CoverageEngine:
         Also updates ``self.last_in_bounds`` as a side effect (see its
         docstring) -- kept as an attribute rather than a third return value
         so this signature stays untouched for existing callers/tests.
+
+        ``self.nozzle_group`` (default 1, i.e. off) ties nozzles into
+        fixed-size groups that fire and dose as one unit, for coarser
+        vertical addressing -- unrelated to (and not to be confused with)
+        ``NozzleMapSettings``/``--nozzle-block-size``+``--nozzle-order``,
+        which permutes which image ROW an individually-addressed nozzle
+        receives, for a rig wired out of order; grouping changes nothing
+        about row order, it only ties adjacent nozzles' firing together.
+        With ``nozzle_group = N``, nozzles ``N*k .. N*k+N-1`` form group
+        ``k``. Each member's own ``(row, col)`` and ``wanted`` are computed
+        exactly as in the ungrouped case above (under yaw, members can
+        legitimately land in different columns -- that is expected, not a
+        bug, and is exercised under yaw the same way the ungrouped path is).
+        Per group:
+
+          * the group is wanted if ANY member is wanted (OR) -- so a group
+            never skips a pixel that still needs ink; the cost is that a
+            group straddling an ink/no-ink boundary also inks the no-ink
+            side (it cannot fire only half of itself).
+          * if wanted, every member's ``active[p]`` is set True -- the
+            defining behaviour: they always fire together.
+          * dwell is tracked ONCE per group (not per nozzle), keyed on the
+            group's FIRST member's ``(row, col)``; the key resets whenever
+            that pixel changes or the group stops being wanted, same as the
+            per-nozzle key does in the ungrouped case.
+          * on completion, ``_deposit`` is called for EVERY in-bounds member
+            (not just the first) -- every member physically received ink, so
+            every member's pixel must be marked printed.
+
+        At ``nozzle_group = 1`` every group has exactly one member, so all of
+        the above collapses to precisely the ungrouped per-nozzle rule --
+        this is what makes ``N = 1`` bit-identical to the engine's original
+        behaviour rather than a special case of it.
         """
         # yaw_rad == 0.0 gets its own exact-integer path: col/row for every
         # nozzle must be BIT-IDENTICAL to the pre-rotation formula (a single
@@ -355,35 +416,59 @@ class CoverageEngine:
 
         active = np.zeros(NUM_NOZZLES, dtype=bool)
         in_bounds_any = False
-        for p in range(NUM_NOZZLES):
-            if zero_yaw:
-                col = col_fixed
-                row = base_row + p
-            else:
-                offset_along_bar = p * NOZZLE_PITCH_MM
-                u_p = u_mm - offset_along_bar * sin_yaw
-                v_p = v_mm + offset_along_bar * cos_yaw
-                col = int(round(u_p / self.mm_per_column))
-                row = int(round(v_p / NOZZLE_PITCH_MM))
+        group_size = self.nozzle_group
+        for k in range(self._num_groups):
+            lo = k * group_size
+            hi = min(lo + group_size, NUM_NOZZLES)
 
-            in_bounds = 0 <= row < self.height and 0 <= col < self.width
-            if in_bounds:
-                in_bounds_any = True
-            wanted = in_bounds and bool(self.ink[row, col]) and not self.printed[row, col]
+            # Step 1+2: every member's own (row, col)/wanted, exactly as the
+            # ungrouped formula above; group_wanted is the OR across members
+            # (see step()'s docstring for the group_size=1 collapse and the
+            # OR-rule's boundary-fattening tradeoff).
+            members = []                      # (p, row, col, in_bounds)
+            group_wanted = False
+            for p in range(lo, hi):
+                if zero_yaw:
+                    col = col_fixed
+                    row = base_row + p
+                else:
+                    offset_along_bar = p * NOZZLE_PITCH_MM
+                    u_p = u_mm - offset_along_bar * sin_yaw
+                    v_p = v_mm + offset_along_bar * cos_yaw
+                    col = int(round(u_p / self.mm_per_column))
+                    row = int(round(v_p / NOZZLE_PITCH_MM))
 
-            if not wanted:
-                self._nozzle_pixel[p] = None
-                self._nozzle_since[p] = None
+                in_bounds = 0 <= row < self.height and 0 <= col < self.width
+                if in_bounds:
+                    in_bounds_any = True
+                wanted = in_bounds and bool(self.ink[row, col]) and not self.printed[row, col]
+                members.append((p, row, col, in_bounds))
+                group_wanted = group_wanted or wanted
+
+            if not group_wanted:
+                self._group_pixel[k] = None
+                self._group_since[k] = None
                 continue
 
-            pixel = (row, col)
-            if self._nozzle_pixel[p] != pixel:
-                self._nozzle_pixel[p] = pixel
-                self._nozzle_since[p] = t
+            # Step 4: dwell tracked once per group, keyed on the FIRST
+            # member's (row, col) -- at group_size=1 this is that one
+            # nozzle's own (row, col), same key the ungrouped code used.
+            first_row, first_col = members[0][1], members[0][2]
+            pixel = (first_row, first_col)
+            if self._group_pixel[k] != pixel:
+                self._group_pixel[k] = pixel
+                self._group_since[k] = t
 
-            active[p] = True
-            if t - self._nozzle_since[p] >= self.dose_hold_s:
-                self._deposit(row, col)
+            # Step 3: the whole group fires together.
+            for p, _row, _col, _in_bounds in members:
+                active[p] = True
+
+            # Step 5: on completion, every in-bounds member actually
+            # received ink and must be marked printed -- not just the first.
+            if t - self._group_since[k] >= self.dose_hold_s:
+                for _p, row, col, in_bounds in members:
+                    if in_bounds:
+                        self._deposit(row, col)
 
         self.last_in_bounds = in_bounds_any
         pattern = pack_nozzle_bits(active)

@@ -30,7 +30,7 @@ from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSett
 from .coverage import DEFAULT_DOSE_HOLD_S, CoverageEngine, bar_offset_uv
 from .geometry import (
     BLANK_FRAME,
-    NOZZLE_BAR_WIDTH_MM,
+    NOZZLE_BAR_SPAN_MM,
     NOZZLE_MODE_LINE,
     NOZZLE_MODE_PAGE,
     NOZZLE_PITCH_MM,
@@ -141,6 +141,7 @@ class PrintController:
                  dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
                  spray_radius_mm: float = 0.0,
                  spray_strength: float = 0.0,
+                 nozzle_group: int = 1,
                  ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S,
                  speed_warning_mm_s: float = DEFAULT_SPEED_WARNING_MM_S,
                  progress_json: bool = False,
@@ -160,6 +161,11 @@ class PrintController:
         self.dose_hold_s = dose_hold_s
         self.spray_radius_mm = spray_radius_mm
         self.spray_strength = spray_strength
+        # Page mode only (see CoverageEngine.step()'s docstring for the
+        # exact per-group rule) -- coarser vertical addressing, requested by
+        # the hardware owner; not threaded through anywhere on the line/time
+        # path, which never constructs a CoverageEngine at all.
+        self.nozzle_group = nozzle_group
         self.ble_write_ceiling = ble_write_ceiling
         self.speed_warning_mm_s = speed_warning_mm_s
         self.progress_json = progress_json
@@ -526,7 +532,8 @@ class PrintController:
         coverage = CoverageEngine(self._ink, t.mm_per_column,
                                   dose_hold_s=self.dose_hold_s,
                                   spray_radius_mm=self.spray_radius_mm,
-                                  spray_strength=self.spray_strength)
+                                  spray_strength=self.spray_strength,
+                                  nozzle_group=self.nozzle_group)
         pos_filter = PositionFilter(t.smooth_ms / 1000.0)
         sender = PatternSender(ble)
         loop = asyncio.get_event_loop()
@@ -708,13 +715,15 @@ class PrintController:
                             (int(round(sv / NOZZLE_PITCH_MM)),
                              int(round(su / t.mm_per_column))))
                         # Nozzle-bar CENTRE: nozzle 0's (u_mm, v_mm) shifted
-                        # by half the bar width along the CURRENT (yaw-
+                        # by half the nozzle-0-to-last-nozzle SPAN (NOT the
+                        # outer bar WIDTH -- see geometry.py's
+                        # NOZZLE_BAR_SPAN_MM comment) along the CURRENT (yaw-
                         # rotated) bar direction -- bar_offset_uv is the same
                         # formula CoverageEngine.step() places every
                         # individual nozzle with (see its docstring), just
                         # evaluated once per sample for the bar's midpoint
                         # rather than per nozzle.
-                        ndu, ndv = bar_offset_uv(NOZZLE_BAR_WIDTH_MM / 2.0, yaw_rad)
+                        ndu, ndv = bar_offset_uv(NOZZLE_BAR_SPAN_MM / 2.0, yaw_rad)
                         nozzle_path.append(
                             (int(round((v_mm + ndv) / NOZZLE_PITCH_MM)),
                              int(round((u_mm + ndu) / t.mm_per_column))))
@@ -761,7 +770,7 @@ class PrintController:
                         if last_warn_t is None or now - last_warn_t >= 2.0:
                             last_warn_t = now
                             req_u = self.width * t.mm_per_column
-                            req_v = (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM
+                            req_v = NOZZLE_BAR_SPAN_MM
                             print(f"[warn] cart not over the target page yet: "
                                   f"u={u_mm:7.2f} v={v_mm:7.2f} mm (need u in "
                                   f"[0, {req_u:.1f}] mm, v within "
@@ -852,7 +861,7 @@ class PrintController:
                       flush=True)
             elif in_bounds_samples == 0 and samples > 0:
                 req_u = self.width * t.mm_per_column
-                req_v = (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM
+                req_v = NOZZLE_BAR_SPAN_MM
                 print("Finished pass; sent blank frame.")
                 print(f"Covered 0/{total} ink pixels -- the cart never overlapped "
                       f"the target page during this pass.")

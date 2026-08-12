@@ -12,6 +12,7 @@ Run with:  python tests/test_ui_calibration.py
 """
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -47,6 +48,7 @@ def test_compute_calibration_returns_a_clean_summary():
     result = compute_calibration(col, row)
     assert result["ok"] is True
     assert result["warning"] is None
+    assert result["quality_warning"] is None
     assert abs(result["scale_col"] - 1.0) < 1e-6
     assert abs(result["scale_row"] - 1.0) < 1e-6
     assert {"origin", "e_col", "e_row"} <= result["calibration"].keys()
@@ -58,6 +60,31 @@ def test_compute_calibration_flags_a_skewed_trace():
     assert result["ok"] is True                    # still computed, just warned
     assert result["warning"] is not None
     assert "deg" in result["warning"]
+
+
+def test_compute_calibration_returns_quality_metrics():
+    col, row = _page_traces()
+    result = compute_calibration(col, row)
+    assert result["ok"] is True
+    q = result["quality"]
+    assert abs(q["col_trace_length_mm"] - 210.0) < 1.0
+    assert abs(q["row_trace_length_mm"] - 297.0) < 1.0
+    assert q["col_sample_count"] == 30
+    assert q["row_sample_count"] == 30
+    assert q["col_rms_residual_mm"] < 0.1
+    assert q["normal_tilt_deg"] < 0.1
+
+
+def test_compute_calibration_flags_low_quality_separately_from_angle():
+    # A short, sparse trace with no angle problem at all -- quality_warning
+    # must fire independently of (and be distinguishable from) `warning`.
+    col = _noisy_line((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 30.0, n=8, noise_mm=0.02)
+    row = _noisy_line((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), 30.0, n=8, noise_mm=0.02, seed=1)
+    result = compute_calibration(col, row)
+    assert result["ok"] is True
+    assert result["warning"] is None                       # edges are perpendicular
+    assert result["quality_warning"] is not None
+    assert "column" in result["quality_warning"] or "row" in result["quality_warning"]
 
 
 def test_compute_calibration_applies_sheet_size_scale():
@@ -111,6 +138,25 @@ def test_save_and_load_calibration_round_trip():
     assert loaded["ok"] is True
     assert abs(loaded["angle_error_deg"] - computed["angle_error_deg"]) < 1e-9
     assert np.allclose(loaded["calibration"]["origin"], computed["calibration"]["origin"])
+    assert abs(loaded["quality"]["col_trace_length_mm"]
+              - computed["quality"]["col_trace_length_mm"]) < 1e-6
+
+
+def test_load_calibration_reports_none_quality_for_a_pre_feature_file():
+    # A calibration JSON saved before the fit-quality feature existed (the
+    # operator has one) -- load_calibration must not crash, and its quality
+    # fields must come back None rather than fabricated.
+    old_style = {"origin": [0.0, 0.0, 0.0], "e_col": [1.0, 0.0, 0.0],
+                "e_row": [0.0, 1.0, 0.0], "scale_col": 1.0, "scale_row": 1.0,
+                "angle_error_deg": 0.0}
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "old_cal.json")
+        with open(path, "w") as f:
+            json.dump(old_style, f)
+        loaded = load_calibration(path)
+    assert loaded["ok"] is True
+    assert loaded["quality"]["col_trace_length_mm"] is None
+    assert loaded["quality"]["normal_tilt_deg"] is None
 
 
 def test_load_calibration_returns_an_error_for_a_missing_file():

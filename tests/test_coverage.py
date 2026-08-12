@@ -19,8 +19,9 @@ from printhead.coverage import (                                       # noqa: E
     CoverageEngine, DEFAULT_DOSE_HOLD_S, bar_offset_uv,
 )
 from printhead.geometry import (                                       # noqa: E402
-    NOZZLE_BAR_WIDTH_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
+    NOZZLE_BAR_SPAN_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
 )
+from printhead.rendering import pack_nozzle_bits                       # noqa: E402
 from printhead.tracking import PageMapper                              # noqa: E402
 
 DOSE_HOLD_S = 0.1
@@ -135,7 +136,7 @@ def test_spray_kernel_gives_the_nearest_neighbour_exactly_the_strength():
 
 
 def test_spray_radius_is_physical_so_the_kernel_is_anisotropic():
-    # A cell is NOZZLE_PITCH_MM (~0.0993mm) tall but mm_per_column (0.2mm)
+    # A cell is NOZZLE_PITCH_MM (0.1mm) tall but mm_per_column (0.2mm)
     # wide, so a round drop must reach further in ROWS than in COLUMNS. A
     # pixel-count radius would silently mean two different real distances.
     kernel = _spray_engine(0.2, 1.0, mm_per_column=0.2)._spray_kernel
@@ -144,12 +145,29 @@ def test_spray_radius_is_physical_so_the_kernel_is_anisotropic():
     assert max_dr > max_dc, (max_dr, max_dc)
     assert abs(max_dr - round(0.2 / NOZZLE_PITCH_MM)) <= 1
 
-    # Square-ish cells (0.1mm/col ~= the 0.0993mm row pitch) must instead
-    # give a near-symmetric kernel -- proving it tracks physical mm, not
-    # an axis-specific fudge.
-    square = _spray_engine(0.2, 1.0, mm_per_column=0.1)._spray_kernel
-    assert abs(max(abs(dr) for dr, _, _ in square)
-               - max(abs(dc) for _, dc, _ in square)) <= 1
+    # mm_per_column == NOZZLE_PITCH_MM exactly (0.1mm, unlike the old
+    # ~0.0993mm pitch this pins to a round number) means the cells are
+    # exactly square, so the kernel must be EXACTLY symmetric, not just
+    # close -- both axes run the identical radius/mm_per_column formula
+    # against the identical mm value.
+    square = _spray_engine(0.2, 1.0, mm_per_column=NOZZLE_PITCH_MM)._spray_kernel
+    square_max_dr = max(abs(dr) for dr, _, _ in square)
+    square_max_dc = max(abs(dc) for _, dc, _ in square)
+    assert square_max_dr == square_max_dc, (square_max_dr, square_max_dc)
+
+    # The exact-match case above can't by itself rule out a bug that just
+    # happens to look square whenever the two axes share one pixel-count
+    # radius (e.g. converting both from raw pixel counts instead of real
+    # mm) -- so also check a mm_per_column NARROWER than the row pitch
+    # (finer columns than rows) and confirm the anisotropy actually
+    # FLIPS DIRECTION (more columns than rows touched), the opposite of
+    # the mm_per_column=0.2 case above. Only a genuine per-axis physical
+    # conversion produces that flip; a pixel-count-based implementation
+    # would not.
+    narrow = _spray_engine(0.2, 1.0, mm_per_column=0.05)._spray_kernel
+    narrow_max_dr = max(abs(dr) for dr, _, _ in narrow)
+    narrow_max_dc = max(abs(dc) for _, dc, _ in narrow)
+    assert narrow_max_dc > narrow_max_dr, (narrow_max_dr, narrow_max_dc)
 
 
 def test_spray_at_full_strength_marks_the_adjacent_pixel_printed():
@@ -424,10 +442,10 @@ def test_step_nonzero_yaw_spreads_nozzles_across_columns_by_the_expected_amount(
     assert touched_cols.size > 1, "a nonzero yaw must spread ink across more than one column"
     spread_cols = int(touched_cols.max() - touched_cols.min())
 
-    # bar_length == (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM == NOZZLE_BAR_WIDTH_MM
+    # bar_length == (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM == NOZZLE_BAR_SPAN_MM
     # exactly (see geometry.py) -- the u-extent across the whole bar is
     # bar_length * sin(yaw_rad), converted to columns.
-    expected_spread_cols = NOZZLE_BAR_WIDTH_MM * math.sin(yaw) / mm_per_column
+    expected_spread_cols = NOZZLE_BAR_SPAN_MM * math.sin(yaw) / mm_per_column
     assert abs(spread_cols - expected_spread_cols) <= 1.0, (spread_cols, expected_spread_cols)
 
 
@@ -447,8 +465,8 @@ def test_step_90deg_yaw_swings_the_bar_to_lower_columns_not_higher():
     #
     # yaw = +90 deg makes this exact and hand-checkable: sin(90deg) == 1.0,
     # cos(90deg) == 0.0 (both exact in IEEE 754), so nozzle NUM_NOZZLES-1
-    # (the far end of the bar, offset_along_bar == NOZZLE_BAR_WIDTH_MM
-    # exactly -- see geometry.py) lands at u = u_mm - NOZZLE_BAR_WIDTH_MM,
+    # (the far end of the bar, offset_along_bar == NOZZLE_BAR_SPAN_MM
+    # exactly -- see geometry.py) lands at u = u_mm - NOZZLE_BAR_SPAN_MM,
     # v == v_mm unchanged -- the whole bar stays on nozzle 0's row and
     # spreads purely in u.
     mm_per_column = 0.5
@@ -463,7 +481,7 @@ def test_step_90deg_yaw_swings_the_bar_to_lower_columns_not_higher():
     col0 = int(round(u_mm / mm_per_column))
     assert eng.printed[row0, col0], "nozzle 0 must stay at its un-rotated (row, col)"
 
-    expected_last_col = col0 - int(round(NOZZLE_BAR_WIDTH_MM / mm_per_column))
+    expected_last_col = col0 - int(round(NOZZLE_BAR_SPAN_MM / mm_per_column))
     touched_cols = np.nonzero(eng.printed[row0])[0]
     actual_last_col = int(touched_cols.min())        # bar swept toward LOWER columns
 
@@ -491,7 +509,7 @@ def test_bar_offset_uv_matches_the_bar_centre_of_steps_own_spread():
     # written, NOT calling this function -- see bar_offset_uv's docstring)
     # per-nozzle placement: NUM_NOZZLES is even, so no single nozzle sits
     # exactly at the geometric bar centre (offset_along_bar_mm =
-    # NOZZLE_BAR_WIDTH_MM / 2, halfway between nozzles 75 and 76) -- but that
+    # NOZZLE_BAR_SPAN_MM / 2, halfway between nozzles 75 and 76) -- but that
     # centre must fall at the midpoint of the column range step() actually
     # spreads across. Same 90 deg exact-arithmetic setup (sin=1, cos=0
     # exactly in IEEE 754) as the "swings to lower columns" test above, so
@@ -508,13 +526,13 @@ def test_bar_offset_uv_matches_the_bar_centre_of_steps_own_spread():
     touched_cols = np.nonzero(eng.printed[row0])[0]
     observed_centre_col = (touched_cols.min() + touched_cols.max()) / 2.0
 
-    du, dv = bar_offset_uv(NOZZLE_BAR_WIDTH_MM / 2.0, yaw)
+    du, dv = bar_offset_uv(NOZZLE_BAR_SPAN_MM / 2.0, yaw)
     predicted_centre_col = (u_mm + du) / mm_per_column
     assert abs(predicted_centre_col - observed_centre_col) <= 1.0, (
         predicted_centre_col, observed_centre_col)
     # math.pi/2 isn't bit-exact (math.pi is a finite approximation of pi),
     # so cos(yaw) is ~6e-17, not exactly 0.0 -- negligible against
-    # NOZZLE_PITCH_MM (~0.099mm) and rounds away in row0 above, but not
+    # NOZZLE_PITCH_MM (0.1mm) and rounds away in row0 above, but not
     # literally zero; assert "negligible", not "==".
     assert abs(dv) < 1e-9, "bar centre must stay on nozzle 0's row at 90 deg yaw"
 
@@ -535,7 +553,7 @@ def test_step_and_page_mapper_rotate_a_body_fixed_row_vector_the_same_direction(
     cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
                           e_row=np.array([0.0, 1.0, 0.0]),
                           boresight_quat=np.array([0.0, 0.0, 0.0, 1.0]))
-    mapper = PageMapper(cal, sensor_offset_row_mm=offset_mm + NOZZLE_BAR_WIDTH_MM / 2.0,
+    mapper = PageMapper(cal, sensor_offset_row_mm=offset_mm + NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     half = yaw / 2.0
     quat = (0.0, 0.0, math.sin(half), math.cos(half))
@@ -564,6 +582,171 @@ def test_step_and_page_mapper_rotate_a_body_fixed_row_vector_the_same_direction(
         "PageMapper and CoverageEngine disagree about which way a "
         "body-fixed row-axis vector on the cart rotates -- exactly the "
         "inconsistency the original sign error introduced")
+
+
+# ========================================================= nozzle grouping
+def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
+    # G=1 must reduce to EXACTLY today's per-nozzle behaviour -- the most
+    # important correctness property of this feature. Drive two engines (one
+    # built with nozzle_group=1 explicit, one with the parameter omitted
+    # entirely, i.e. whatever the class default is) through the SAME
+    # scripted multi-sample run and require every returned pattern, and both
+    # final printed masks, to match exactly.
+    height = NUM_NOZZLES + 40
+    ink = np.zeros((height, 40), dtype=bool)
+    ink[::3, ::2] = True   # deterministic scattered target (not all-true/all-false)
+
+    # Same v-step/sample-count shape as
+    # test_spray_can_only_ever_add_coverage_never_remove_it above, which is
+    # known to actually accumulate coverage at this dose_hold_s -- a much
+    # faster v sweep (or too few samples) leaves each (row, col) key too
+    # short-lived to ever complete a dose, making the comparison vacuous.
+    samples = [(u, 2.0 + 0.02 * i, 0.001 * i)
+               for i, u in enumerate(np.linspace(0.0, 6.0, 400))]
+
+    def run(**kwargs):
+        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018, **kwargs)
+        seen = [eng.step(u_mm=u, v_mm=v, t=t)[0] for u, v, t in samples]
+        return seen, eng.printed.copy()
+
+    patterns_default, printed_default = run()
+    patterns_g1, printed_g1 = run(nozzle_group=1)
+
+    assert printed_default.any(), "test is vacuous if nothing got printed"
+    assert patterns_default == patterns_g1, (
+        "nozzle_group=1 must return byte-identical patterns to the "
+        "no-argument default, sample for sample")
+    assert np.array_equal(printed_default, printed_g1), (
+        "nozzle_group=1 must leave an identical printed mask to the "
+        "no-argument default")
+
+    # The check above only proves the default IS 1 -- both runs go through
+    # the same grouped code path, so on its own it cannot catch the grouping
+    # rewrite changing behaviour. Compare against an INDEPENDENT
+    # reimplementation of the original per-nozzle rule (the code this
+    # replaced) to actually pin the equivalence.
+    def reference(yaw_rad):
+        """The pre-grouping per-nozzle rule, written out standalone."""
+        printed = np.zeros_like(ink, dtype=bool)
+        nozzle_pixel = [None] * NUM_NOZZLES
+        nozzle_since = [None] * NUM_NOZZLES
+        out = []
+        for u_mm, v_mm, t in samples:
+            active = np.zeros(NUM_NOZZLES, dtype=bool)
+            zero_yaw = yaw_rad == 0.0
+            if zero_yaw:
+                col_fixed = int(round(u_mm / 0.2))
+                base_row = int(round(v_mm / NOZZLE_PITCH_MM))
+            for p in range(NUM_NOZZLES):
+                if zero_yaw:
+                    col, row = col_fixed, base_row + p
+                else:
+                    d = p * NOZZLE_PITCH_MM
+                    col = int(round((u_mm - d * math.sin(yaw_rad)) / 0.2))
+                    row = int(round((v_mm + d * math.cos(yaw_rad)) / NOZZLE_PITCH_MM))
+                in_bounds = 0 <= row < ink.shape[0] and 0 <= col < ink.shape[1]
+                wanted = in_bounds and bool(ink[row, col]) and not printed[row, col]
+                if not wanted:
+                    nozzle_pixel[p] = None
+                    nozzle_since[p] = None
+                    continue
+                if nozzle_pixel[p] != (row, col):
+                    nozzle_pixel[p] = (row, col)
+                    nozzle_since[p] = t
+                active[p] = True
+                if t - nozzle_since[p] >= 0.0018:
+                    printed[row, col] = True
+            out.append(pack_nozzle_bits(active))
+        return out, printed
+
+    for yaw in (0.0, math.radians(30.0)):
+        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018,
+                             nozzle_group=1)
+        got = [eng.step(u_mm=u, v_mm=v, t=t, yaw_rad=yaw)[0] for u, v, t in samples]
+        ref_patterns, ref_printed = reference(yaw)
+        assert got == ref_patterns, (
+            f"nozzle_group=1 diverged from the original per-nozzle rule at "
+            f"yaw={yaw}")
+        assert np.array_equal(eng.printed, ref_printed), (
+            f"nozzle_group=1 printed mask diverged from the original rule at "
+            f"yaw={yaw}")
+
+
+def test_nozzle_group_2_fires_both_members_when_only_one_row_is_wanted():
+    # Single ink row -> only nozzle 0 (row 0) individually "wants" ink;
+    # nozzle 1 (row 1, same group) does not. The OR rule must still fire both.
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
+    ink[0, 0] = True
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    active = _unpack(pattern)
+    assert active[0] and active[1], "both nozzles of the group must fire together"
+    assert not active[2:].any(), "only group 0 (rows 0/1) should be firing"
+
+
+def test_nozzle_group_2_marks_both_rows_printed_on_dose_completion():
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
+    ink[0, 0] = True                        # row 1 is not itself wanted ink
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)   # dwell completes
+
+    assert eng.printed[0, 0], "the actually-wanted row must be printed"
+    assert eng.printed[1, 0], (
+        "row 1 physically received ink too (tied to row 0's nozzle), so it "
+        "must also be marked printed even though it wasn't itself wanted")
+
+
+def test_nozzle_group_2_neither_member_fires_when_neither_is_wanted():
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)   # nothing wanted anywhere
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    active = _unpack(pattern)
+    assert not active[0] and not active[1]
+    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)
+    assert not eng.printed.any()
+
+
+def test_nozzle_group_2_under_yaw_fires_both_members_without_crashing():
+    # Under yaw, group members can legitimately land in different columns
+    # (see step()'s docstring) -- that must not crash the grouping logic,
+    # and the group must still fire together.
+    mm_per_column = 0.5
+    ink = np.ones((300, 200), dtype=bool)
+    yaw = math.radians(45.0)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=DOSE_HOLD_S,
+                         nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=yaw)
+    active = _unpack(pattern)
+    assert active[0] and active[1], "both members of group 0 must fire together under yaw"
+
+
+def test_nozzle_group_2_MUTATION_check_firing_only_the_first_member_breaks_the_both_fire_test():
+    # Inlines a broken alternative implementation: a step() that computes
+    # the group-wanted OR correctly but only sets active[] for the group's
+    # FIRST member, not every member -- reproduced directly here (not by
+    # editing coverage.py), so this regression stays covered by the test
+    # suite even if nobody re-derives it by hand.
+    ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
+    ink[0, 0] = True                # only nozzle 0 (group 0's first member) wants ink
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
+    real_active = _unpack(pattern)[:2].copy()
+
+    mutated_active = real_active.copy()
+    mutated_active[1] = 0           # the mutation: group's second nozzle never fires
+
+    assert real_active[1] == 1, "the real engine must fire BOTH members of the group"
+    assert not np.array_equal(real_active, mutated_active), (
+        "the mutated (first-member-only) firing pattern must disagree with "
+        "the real engine's -- if this ever matches, the 'both fire' test "
+        "above has stopped actually exercising nozzle_group's OR/fire-"
+        "together rule")
 
 
 # =============================================== mutation check (see PR body)
