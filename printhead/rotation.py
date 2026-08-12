@@ -20,6 +20,31 @@ quaternion/rotation-matrix algebra used at PRINT time (every sample, via
 during the one-off page-edge-tracing calibration step that ``calibration.py``
 is about -- and it is independently testable (see ``tests/test_rotation.py``)
 without dragging in ``PageCalibration``/``fit_axis``/Gram-Schmidt at all.
+
+``yaw_about_normal`` used to compute this by converting the relative
+rotation to a matrix and reading off its axis-angle "rotation vector" (see
+the removed ``_rotation_vector`` helper, kept only in git history). That
+method is exact for a *pure* rotation about the page normal only up to
+about 135 degrees: driving the operator's own real calibration
+(``e_col``/``e_row``/boresight from their ``page_calibration.json``) with a
+synthetic pure rotation about that calibration's own page normal measured
+0/45/90/135 degrees back exactly, **934.2** degrees (garbage) at 180 --
+the antisymmetric-part-over-``sin(angle)`` division the old
+``_rotation_vector`` used blows up as ``angle -> pi`` -- and -135/-90
+(sign-flipped, not just wrong) at 225/270: a 3x3 rotation matrix, unlike a
+quaternion, has no memory of "which way around" a rotation past 180 degrees
+went, so its axis-angle log-map is inherently confined to a signed
+magnitude in ``[0, 180]``. On real hardware the operator sees exactly this
+shape of failure well before the clean 180 boundary too -- a jump from -109
+to +109 degrees around a real 180-degree turn -- because the *matrix*
+reconstruction is already losing precision as the rotation angle
+approaches the singularity, not only exactly at it.
+
+``yaw_about_normal`` and ``cart_rotation_angles`` now use a swing-twist
+decomposition of the relative rotation *quaternion* instead (see their
+docstrings): quaternions double-cover ``SO(3)`` and never lose the "which
+way around" information a plain rotation matrix does, so there is no
+analogous blow-up or early sign-flip anywhere a real cart yaw lives.
 """
 
 from __future__ import annotations
@@ -52,26 +77,65 @@ def quat_to_matrix(quat) -> np.ndarray:
     ])
 
 
-def _rotation_vector(R: np.ndarray) -> np.ndarray:
+def _quat_multiply(a, b) -> "tuple[float, float, float, float]":
     """
-    Rotation matrix -> its axis-angle "rotation vector" (axis * angle,
-    radians, right-hand rule). Zero for the identity rotation (axis is
-    undefined there, so the zero vector is the only sane answer).
+    Hamilton product ``a * b`` of two quaternions in this project's
+    ``(qx, qy, qz, qw)`` component order: the rotation ``b`` applied FIRST,
+    then ``a`` applied on top of it -- i.e. this is the quaternion
+    equivalent of the matrix product ``R(a) @ R(b)``
+    (``quat_to_matrix(_quat_multiply(a, b)) == quat_to_matrix(a) @
+    quat_to_matrix(b)`` for unit quaternions).
 
-    Standard closed-form log-map of SO(3), valid for angle in [0, pi). The
-    antisymmetric part this divides by vanishes again as angle -> pi (an
-    exact 180-degree rotation) -- not specially handled here: the measured
-    cart yaw/tilt this module exists for tops out at 75.6 deg (see the
-    module docstring), nowhere near that edge case, so adding a second
-    branch for it would be untested complexity with no real caller.
+    ``yaw_about_normal``/``cart_rotation_angles`` need this to build the
+    relative rotation ``quat * conj(boresight_quat)`` directly as a
+    quaternion. A tempting shortcut would be to keep computing the relative
+    rotation as a MATRIX (``quat_to_matrix(quat) @
+    quat_to_matrix(boresight_quat).T``, the old code) and convert that back
+    to a quaternion -- but that round trip has its own well-known
+    near-180-degree instability (picking between four standard formulas by
+    whichever diagonal entry of the matrix is largest, each with its own
+    division that gets ill-conditioned near its own singular case), which is
+    exactly the kind of bug this module exists to eliminate. Composing the
+    two input quaternions directly, as done here, never goes through a
+    matrix at all, so that instability has no way back in.
     """
-    cos_angle = float(np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0))
-    angle = math.acos(cos_angle)
-    if angle < 1e-9:
-        return np.zeros(3)
-    sin_angle = math.sin(angle)
-    axis = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]]) / (2.0 * sin_angle)
-    return axis * angle
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
+def _quat_conjugate(q) -> "tuple[float, float, float, float]":
+    """Conjugate of ``(qx, qy, qz, qw)`` -- for a unit quaternion, exactly
+    its inverse rotation (the quaternion equivalent of ``R.T`` for a
+    rotation matrix)."""
+    x, y, z, w = q
+    return (-x, -y, -z, w)
+
+
+def _normalize_quat(quat) -> "tuple[float, float, float, float]":
+    """
+    Unit-normalise a quaternion ``(qx, qy, qz, qw)`` defensively, as a plain
+    ``(x, y, z, w)`` tuple ready for ``_quat_multiply``/``_quat_conjugate``.
+
+    A raw sensor quaternion, or a calibration's saved ``boresight_quat``, is
+    not guaranteed to be exactly unit-norm -- the operator's own real
+    boresight measures 1.00002 -- and the swing-twist formula below silently
+    gives a slightly wrong angle if fed one that isn't (mirrors
+    ``quat_to_matrix``'s own defensive normalisation, kept as a separate
+    small helper here rather than reused because that function returns a
+    matrix, not the ``(x, y, z, w)`` tuple this quaternion algebra needs).
+    """
+    q = np.asarray(quat, dtype=float)
+    norm = float(np.linalg.norm(q))
+    if norm < 1e-12:
+        raise ValueError("_normalize_quat: zero-norm quaternion")
+    x, y, z, w = q / norm
+    return (float(x), float(y), float(z), float(w))
 
 
 def yaw_about_normal(quat, boresight_quat, e_col, e_row) -> float:
@@ -82,11 +146,61 @@ def yaw_about_normal(quat, boresight_quat, e_col, e_row) -> float:
     boresight_quat`` / ``calibration.calibrate_page``'s ``boresight_quat``
     parameter).
 
-    Method: build ``R_rel = R(quat) @ R(boresight_quat)^T`` -- the rotation
-    that takes the cart from its boresight orientation to its current one,
-    expressed in world/page coordinates -- convert that to its axis-angle
-    rotation vector (see ``_rotation_vector``), and return the component of
-    that vector along the page normal ``n = normalise(e_col x e_row)``.
+    Method: SWING-TWIST decomposition of the relative rotation, computed
+    directly as a quaternion (``quat_rel = quat * conj(boresight_quat)``,
+    via ``_quat_multiply``/``_quat_conjugate`` -- deliberately never routed
+    through a rotation MATRIX, see ``_quat_multiply``'s docstring for why).
+    With ``v, w`` the vector/scalar parts of ``quat_rel`` and ``n_hat`` the
+    unit page normal, the "twist" of ``quat_rel`` about ``n_hat`` (the
+    rotation about ``n_hat`` alone, with any other rotation --  "swing" --
+    factored out) is::
+
+        twist_rad = 2 * atan2(dot(v, n_hat), w)
+
+    This replaces the module's old method, which built the same relative
+    rotation as a MATRIX and read off the axis-angle component along
+    ``n_hat`` from its "rotation vector" (axis * angle) log-map -- see the
+    module docstring for the measured 934.2-degree blow-up at 180 degrees
+    and the -135/-90-degree sign flips past it that method produced, and
+    the real ~109-degree early jump the operator saw on hardware. The
+    swing-twist formula above has no equivalent singularity anywhere: it
+    never divides by anything that vanishes as the twist approaches 180
+    degrees (unlike the old rotation-vector's division by ``sin(angle)`` as
+    ``angle -> pi``), because it reads the twist off the quaternion's own
+    components directly rather than reconstructing an axis from a nearly-
+    degenerate matrix.
+
+    It is also, unlike the old method, EXACT regardless of how much swing
+    (tilt about an axis other than ``n_hat``) rides along with the twist --
+    not just an approximation that happens to be good when swing is small.
+    Algebraically: for ``quat_rel = Twist(n_hat, theta) * Swing`` (twist
+    composed as the outer/second-applied factor, i.e. the twist is a
+    subsequent WORLD/page-frame rotation about ``n_hat`` on top of whatever
+    swing already existed -- exactly the physical situation here, since
+    page yaw is a page-frame quantity applied on top of whatever incidental
+    cart tilt exists), ``dot(v, n_hat) = w_swing * sin(theta/2)`` and
+    ``w = w_swing * cos(theta/2)`` (the swing's own scalar part ``w_swing``
+    cancels out of the ratio ``atan2`` computes), so the formula recovers
+    ``theta`` exactly no matter how large ``Swing`` is. ``tests/
+    test_rotation.py`` pins this directly: a case with a large FIXED tilt
+    superimposed on an injected yaw recovers that yaw exactly, where the old
+    rotation-vector method visibly drifts.
+
+    Range: this recovers the injected twist angle continuously and exactly
+    for any relative rotation up to just under a full turn either way (see
+    ``tests/test_rotation.py``'s 0/45/.../315-degree cases) -- there is no
+    narrower clamp imposed. Some wrap is mathematically unavoidable for ANY
+    single real number standing in for a quantity that can keep turning
+    past a full circle (the same physical orientation is then reachable by
+    two differently-signed quaternions, and ``atan2`` has to pick one), but
+    that boundary sits at a FULL TURN here, not at 180 degrees -- an order
+    of magnitude past the largest yaw ever measured on this rig (75.6
+    degrees over a full freehand pass, see the module docstring) -- so nothing
+    a real print encounters gets anywhere near it. And wherever it does
+    fall, it is harmless for the print correction either way: ``tracking.
+    PageMapper.project`` only ever consumes ``sin``/``cos`` of the returned
+    yaw, both exactly 360-degree periodic, so it cannot matter which of the
+    two equally-valid quaternion signs a boundary case happens to land on.
 
     This is deliberately NOT "project some fixed cart axis onto the page
     plane and measure the angle between its boresight and current
@@ -95,7 +209,7 @@ def yaw_about_normal(quat, boresight_quat, e_col, e_row) -> float:
     same data) depending on which body axis was probed, because projecting
     a tilted axis onto a plane distorts angles whenever any pitch/roll is
     present alongside the yaw -- exactly the case here (see the module
-    docstring: tilt is small but non-zero, median 2.7 deg). The axis-angle
+    docstring: tilt is small but non-zero, median 2.7 deg). The swing-twist
     decomposition instead operates on the rotation itself, not on any
     arbitrarily chosen probe vector, so it gives one answer regardless of
     how much tilt rides along with the yaw. Do not reach for the naive
@@ -117,15 +231,18 @@ def yaw_about_normal(quat, boresight_quat, e_col, e_row) -> float:
                          "(degenerate page frame)")
     n = n / n_norm
 
-    r_rel = quat_to_matrix(quat) @ quat_to_matrix(boresight_quat).T
-    return float(np.dot(_rotation_vector(r_rel), n))
+    q = _normalize_quat(quat)
+    q_bore = _normalize_quat(boresight_quat)
+    qx, qy, qz, qw = _quat_multiply(q, _quat_conjugate(q_bore))
+    v = np.array([qx, qy, qz])
+    return 2.0 * math.atan2(float(np.dot(v, n)), qw)
 
 
 def cart_rotation_angles(quat, boresight_quat, e_col, e_row) -> "tuple[float, float, float]":
     """
     Full aircraft-style (roll, pitch, yaw) breakdown of the cart's rotation
-    relative to the boresight pose, in radians -- the same rotation-vector
-    decomposition ``yaw_about_normal`` uses, just read out along all three
+    relative to the boresight pose, in radians -- the same swing-twist
+    decomposition ``yaw_about_normal`` uses, read out along all three
     page-frame axes instead of one.
 
     DIAGNOSTIC ONLY. Only the yaw component feeds an actual print-time
@@ -146,27 +263,42 @@ def cart_rotation_angles(quat, boresight_quat, e_col, e_row) -> "tuple[float, fl
     need -- it is kept in lock-step with ``yaw_about_normal`` specifically so
     that door stays open cheaply.
 
-    Method (identical to ``yaw_about_normal``): build
-    ``R_rel = R(quat) @ R(boresight_quat)^T``, convert it to its axis-angle
-    rotation vector (``_rotation_vector``), then read off its component along
-    each of three axes:
+    Method -- one coherent swing-twist decomposition, not three independent
+    single-axis reads:
 
-      * ``roll``  -- component along ``e_col`` (the column/travel axis, the
-        direction the cart rolls along a row): cart tipping side-to-side
+      1. ``yaw`` is computed by calling ``yaw_about_normal`` directly with
+         the same arguments (not re-derived independently), so the two can
+         never disagree -- pinned by ``tests/test_rotation.py``'s exact
+         (``==``) cross-check.
+      2. The TWIST quaternion for that ``yaw`` (a pure rotation about
+         ``n_hat``) is removed from the relative rotation
+         (``quat_rel * conj(twist)``), leaving the SWING quaternion: by
+         construction, a rotation with zero component along ``n_hat``, i.e.
+         entirely within the ``e_col``/``e_row`` plane.
+      3. ``roll``/``pitch`` are the swing quaternion's own twist-about-axis
+         reads along ``e_col``/``e_row`` (the same ``2 * atan2(...)``
+         formula ``yaw_about_normal`` uses, just applied to the swing
+         quaternion's ``v``/``w`` and a different axis).
+
+    Reading roll/pitch off the SWING quaternion specifically (rather than
+    applying the same per-axis formula directly to the full, un-factored
+    ``quat_rel``, the way an earlier draft of this function did) matters
+    once yaw is large: ``quat_rel``'s own scalar part ``w`` reflects the
+    FULL relative rotation angle (yaw *and* tilt combined), so reading roll/
+    pitch directly off it can pick up a spurious 180-degree flip once yaw
+    alone pushes past 180 and flips the sign of ``w`` -- even though the
+    ACTUAL tilt is small. Removing the twist first fixes ``w`` back near
+    +1 for the (typically small) swing that is left, so roll/pitch stay
+    well-behaved regardless of how large yaw gets -- yaw and tilt no longer
+    cross-talk through a shared, twist-polluted ``w``.
+
+      * ``roll``  -- swing's twist-about-``e_col`` (the column/travel axis,
+        the direction the cart rolls along a row): cart tipping side-to-side
         while moving along a row, like an aircraft rolling about its
         fuselage axis.
-      * ``pitch`` -- component along ``e_row`` (the row axis, along the
+      * ``pitch`` -- swing's twist-about-``e_row`` (the row axis, along the
         nozzle bar): cart nodding forward/backward, like an aircraft
         pitching about its wing axis.
-      * ``yaw``   -- component along ``n = normalise(e_col x e_row)`` (the
-        page normal): identical value and sign convention to
-        ``yaw_about_normal`` called with the same arguments -- callers that
-        need both the full breakdown and the trusted print-time yaw can
-        cross-check the two agree (see ``tests/test_rotation.py``), but
-        ``tracking.PageMapper.last_yaw_rad`` is still set from
-        ``yaw_about_normal`` directly, not from this function's yaw
-        component, keeping that one untouched, hardware-verified code path
-        as the single source of truth.
 
     ``e_col``/``e_row`` are defensively re-normalised by their own norm
     before use as projection axes (mirrors ``yaw_about_normal``'s defensive
@@ -190,10 +322,18 @@ def cart_rotation_angles(quat, boresight_quat, e_col, e_row) -> "tuple[float, fl
     e_col_unit = e_col / col_norm
     e_row_unit = e_row / row_norm
 
-    r_rel = quat_to_matrix(quat) @ quat_to_matrix(boresight_quat).T
-    rot_vec = _rotation_vector(r_rel)
+    yaw = yaw_about_normal(quat, boresight_quat, e_col, e_row)
 
-    roll = float(np.dot(rot_vec, e_col_unit))
-    pitch = float(np.dot(rot_vec, e_row_unit))
-    yaw = float(np.dot(rot_vec, n))
+    q = _normalize_quat(quat)
+    q_bore = _normalize_quat(boresight_quat)
+    quat_rel = _quat_multiply(q, _quat_conjugate(q_bore))
+
+    half_yaw = 0.5 * yaw
+    s, c = math.sin(half_yaw), math.cos(half_yaw)
+    twist = (n[0] * s, n[1] * s, n[2] * s, c)
+    sx, sy, sz, sw = _quat_multiply(quat_rel, _quat_conjugate(twist))
+    v_swing = np.array([sx, sy, sz])
+
+    roll = 2.0 * math.atan2(float(np.dot(v_swing, e_col_unit)), sw)
+    pitch = 2.0 * math.atan2(float(np.dot(v_swing, e_row_unit)), sw)
     return roll, pitch, yaw

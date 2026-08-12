@@ -19,7 +19,7 @@ from printhead.calibration import (                                  # noqa: E40
     CalibrationAngleWarning, PageCalibration, calibrate_page, fit_axis,
     trace_length_mm,
 )
-from printhead.rotation import yaw_about_normal                       # noqa: E402
+from printhead.rotation import cart_rotation_angles, yaw_about_normal  # noqa: E402
 
 
 def _noisy_line(origin, direction, length_mm, n=40, noise_mm=0.05, seed=0):
@@ -309,19 +309,51 @@ def test_simple_frame_yaw_is_the_turn_from_the_captured_reference():
 
 def test_simple_frame_identity_boresight_would_be_wrong():
     # Pins WHY the identity shortcut was abandoned, so it cannot quietly come
-    # back: against the real mounting pose it gets a flat 90 deg turn wrong
-    # by tens of degrees.
+    # back -- against the real mounting pose it still gets things wrong,
+    # just not the SAME thing it used to (see the note below, added when
+    # rotation.py moved to a swing-twist decomposition).
     q_mount = np.array([0.479, 0.510, -0.511, 0.499])
     q_mount = q_mount / np.linalg.norm(q_mount)
     cal = PageCalibration.simple_frame()
     identity = np.array([0.0, 0.0, 0.0, 1.0])
-    at_0 = yaw_about_normal(q_mount, identity, cal.e_col, cal.e_row)
+
+    # NOTE (post swing-twist): this test used to compare the DIFFERENCE
+    # between two flat-turn readings (turn by 0 deg, then by 90) and show
+    # identity boresight got that difference wrong by tens of degrees, with
+    # the old rotation-vector method. Swing-twist changed that specific
+    # symptom: composing an ADDITIONAL world-frame twist about n onto ANY
+    # starting orientation adds exactly that twist to the readout (see
+    # rotation.yaw_about_normal's own docstring for the algebra), so the
+    # DIFFERENCE between two such readings is now invariant to whichever
+    # boresight is used, INCLUDING identity -- a genuine, if narrow,
+    # positive side effect of the fix (see tests/test_rotation.py's
+    # combined-tilt-and-yaw test for the general form of this property).
     at_90 = yaw_about_normal(_quat_mul(_quat_about("z", 90.0), q_mount),
                              identity, cal.e_col, cal.e_row)
-    reported_turn = abs(math.degrees(at_90 - at_0))
-    assert abs(reported_turn - 90.0) > 15.0, (
-        f"identity boresight unexpectedly accurate ({reported_turn:.1f} deg "
-        f"for a 90 deg turn) -- if this now holds, revisit the design note")
+    at_0 = yaw_about_normal(q_mount, identity, cal.e_col, cal.e_row)
+    assert abs(abs(math.degrees(at_90 - at_0)) - 90.0) < 1e-6, (
+        "if this no longer holds, the swing-twist invariance described "
+        "above changed -- revisit this comment")
+
+    # What identity boresight still gets wrong: the ABSOLUTE yaw at the
+    # reference pose itself. A correctly-boresighted flat cart reads 0 deg
+    # yaw at the pose it was boresighted from (see
+    # test_simple_frame_yaw_is_the_turn_from_the_captured_reference); with
+    # identity boresight, that same physically-flat pose reads far from 0
+    # -- exactly the practical problem simple_frame's docstring describes
+    # (a pass assumes ~0 tilt/yaw at its captured reference).
+    assert abs(math.degrees(at_0)) > 15.0, (
+        f"identity boresight unexpectedly reports the reference pose as "
+        f"near-zero yaw ({math.degrees(at_0):.1f} deg) -- if this now "
+        f"holds, revisit this comment too")
+
+    # And roll/pitch (the live tilt diagnostic) are wrong even more
+    # dramatically: with no boresight to subtract the ~120 deg real mounting
+    # tilt, that whole tilt shows up as "roll"/"pitch" on every sample,
+    # rather than the near-zero reading a genuinely flat cart should give.
+    roll, pitch, _ = cart_rotation_angles(q_mount, identity, cal.e_col, cal.e_row)
+    assert abs(math.degrees(roll)) > 45.0 or abs(math.degrees(pitch)) > 45.0, (
+        (math.degrees(roll), math.degrees(pitch)))
 
 
 def test_simple_frame_accepts_a_pinned_boresight():
