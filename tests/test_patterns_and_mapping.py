@@ -493,6 +493,56 @@ def test_cli_simple_boresight_requires_simple_frame():
         pass
 
 
+def test_cli_calibration_check_is_a_debug_mode():
+    # Must join --pos/--list-nodes/etc as a debug run: no content source
+    # ('text'/--calibrate/--pattern) required, and _content_mode_count's
+    # check must be skipped for it exactly like the other debug flags.
+    args = cli.parse_args(["--calibration-check", "--simulate", "--page-frame", "simple"])
+    assert cli._debug_mode(args) is True
+
+
+def test_cli_calibration_check_requires_a_page_frame():
+    # Unlike --pos (which tolerates no page frame at all), --calibration-check
+    # has nothing to measure yaw drift IN without one -- see parse_args.
+    try:
+        cli.parse_args(["--calibration-check", "--simulate"])
+        assert False, "expected SystemExit: --calibration-check needs a page frame"
+    except SystemExit:
+        pass
+
+
+def test_cli_calibration_check_accepts_page_calibration():
+    args = cli.parse_args(["--calibration-check", "--simulate",
+                           "--page-calibration", "cal.json"])
+    assert args.calibration_check is True
+    assert args.page_calibration == "cal.json"
+
+
+def test_cli_calibration_check_accepts_simple_frame():
+    args = cli.parse_args(["--calibration-check", "--simulate", "--page-frame", "simple"])
+    assert args.calibration_check is True
+    assert args.page_frame == "simple"
+
+
+def test_cli_calibration_check_conflicts_with_pos():
+    # Both are debug diagnostics in the same mutually-exclusive group --
+    # only one runs at a time.
+    try:
+        cli.parse_args(["--calibration-check", "--pos", "--simulate",
+                        "--page-frame", "simple"])
+        assert False, "expected SystemExit: --calibration-check and --pos together"
+    except SystemExit:
+        pass
+
+
+def test_cli_calibration_check_pos_json_flag_reused():
+    # --pos-json's NDJSON convention is shared, not a separate flag -- see
+    # its help text ("With --pos or --calibration-check: ...").
+    args = cli.parse_args(["--calibration-check", "--simulate", "--page-frame", "simple",
+                           "--pos-json"])
+    assert args.pos_json is True
+
+
 def test_cli_rejects_nozzle_block_remap_in_page_mode():
     # Page mode's nozzle-to-row alignment slides with vertical travel (see
     # nozzle_map.py's docstring), so the block permutation -- indexed by fixed

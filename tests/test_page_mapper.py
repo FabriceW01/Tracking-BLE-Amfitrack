@@ -683,6 +683,176 @@ def test_pos_stream_accepts_a_pinned_simple_boresight():
     assert "page_u" in events[0] and "yaw_deg" in events[0], events[0]
 
 
+# ==================================================== --calibration-check
+class _ScriptedPoseTracker:
+    """Returns a predetermined sequence of ``(pos, quat)`` pairs, holding the
+    last one once exhausted -- mirrors tests/test_freehand_pass.py's
+    ``ScriptedTracker`` (reimplemented here, not imported, so this file
+    stays independently runnable -- the same convention that file's own
+    docstring states for itself)."""
+
+    def __init__(self, positions, quats):
+        self._positions = [np.asarray(p, dtype=float) for p in positions]
+        self._quats = [np.asarray(q, dtype=float) for q in quats]
+
+        self._i = 0
+
+    def open(self):
+        pass
+
+    def close(self):
+        pass
+
+    def read_position(self):
+        return self.read_pose()[0]
+
+    def read_pose(self):
+        i = min(self._i, len(self._positions) - 1)
+        self._i += 1
+        return self._positions[i], self._quats[i]
+
+
+def _calibration_check_cal_path(tmp_dir):
+    """A trivial axis-aligned calibration WITH a captured (identity)
+    boresight -- calibration_check needs a boresight for yaw/roll/pitch to
+    be anything other than the 0.0 no-boresight default (see
+    PageMapper.project)."""
+    cal = PageCalibration(origin=np.zeros(3), e_col=np.array([1.0, 0.0, 0.0]),
+                          e_row=np.array([0.0, 1.0, 0.0]),
+                          boresight_quat=np.array(IDENTITY_QUAT))
+    path = os.path.join(tmp_dir, "check_cal.json")
+    cal.save(path)
+    return path
+
+
+async def _run_calibration_check_briefly(tracker, hz=300.0, duration_s=0.15, **kwargs):
+    """Same cancel-after-a-short-while harness as _run_monitor_briefly, for
+    diagnostics.calibration_check instead -- always NDJSON (ndjson=True),
+    always a scripted tracker (never real hardware/--simulate)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        task = asyncio.ensure_future(diagnostics.calibration_check(
+            TrackingSettings(), simulate=True, hz=hz, ndjson=True,
+            tracker=tracker, **kwargs))
+        await asyncio.sleep(duration_s)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    return buf.getvalue()
+
+
+def test_calibration_check_ndjson_event_shape():
+    with tempfile.TemporaryDirectory() as tmp:
+        cal_path = _calibration_check_cal_path(tmp)
+        n = 60
+        positions = [(i * 2.0, 0.0, 0.0) for i in range(n)]
+        quats = [IDENTITY_QUAT for _ in range(n)]
+        tracker = _ScriptedPoseTracker(positions, quats)
+        output = asyncio.run(_run_calibration_check_briefly(
+            tracker, page_calibration_path=cal_path))
+
+    events = _events(output)
+    kinds = [e.get("event") for e in events]
+    assert "connected" in kinds, events
+    assert "position" in kinds, events
+    assert "calibration_check_summary" in kinds, events
+    assert "stopped" in kinds, events
+
+    pos_event = next(e for e in events if e["event"] == "position")
+    for key in ("x", "y", "z", "page_u", "page_v", "page_z",
+               "yaw_deg", "roll_deg", "pitch_deg"):
+        assert key in pos_event, (key, pos_event)
+
+    summary_event = next(e for e in events if e["event"] == "calibration_check_summary")
+    for key in ("sample_count", "u_travel_mm", "v_travel_mm", "yaw_min_deg",
+               "yaw_max_deg", "yaw_span_deg", "roll_span_deg", "pitch_span_deg",
+               "yaw_u_correlation", "yaw_v_correlation", "verdict"):
+        assert key in summary_event, (key, summary_event)
+
+
+def test_calibration_check_reports_an_error_without_a_page_frame():
+    # No --page-calibration and not --page-frame simple: there is nothing to
+    # check drift IN, and this diagnostic (unlike --pos) must say so rather
+    # than silently reporting bare x/y/z.
+    output = asyncio.run(_run_calibration_check_briefly(
+        _ScriptedPoseTracker([(0.0, 0.0, 0.0)], [IDENTITY_QUAT])))
+    events = _events(output)
+    assert any(e.get("event") == "error" for e in events), output
+    assert not any(e.get("event") == "position" for e in events)
+
+
+def test_calibration_check_pure_translation_gives_near_zero_yaw_span():
+    # The cart slides in a straight line (u only) with the orientation
+    # quaternion held perfectly constant throughout -- i.e. NEVER rotates --
+    # so relative to the boresight, yaw must be exactly 0.0 on every single
+    # sample: the headline "no rotation -> yaw stays put" case.
+    with tempfile.TemporaryDirectory() as tmp:
+        cal_path = _calibration_check_cal_path(tmp)
+        n = 80
+        positions = [(i * 2.5, 0.0, 0.0) for i in range(n)]     # pure translation along u
+        quats = [IDENTITY_QUAT for _ in range(n)]                 # never rotates
+        tracker = _ScriptedPoseTracker(positions, quats)
+        output = asyncio.run(_run_calibration_check_briefly(
+            tracker, page_calibration_path=cal_path))
+
+    summary = next(e for e in _events(output) if e["event"] == "calibration_check_summary")
+    assert summary["sample_count"] > 10, summary
+    assert summary["u_travel_mm"] > 50.0, summary          # actually moved a meaningful distance
+    assert summary["yaw_span_deg"] < 1e-6, summary
+    # Yaw has ~0 variance (it is exactly 0.0 throughout) -> correlation is
+    # mathematically undefined, not 0 -- see _calibration_check_summary's
+    # docstring for why that distinction matters.
+    assert summary["yaw_u_correlation"] is None, summary
+    assert "OK" in summary["verdict"], summary["verdict"]
+
+
+def test_calibration_check_injected_yaw_ramp_gives_large_span_and_high_correlation():
+    # Same straight-line translation as above, but this time the scripted
+    # orientation ALSO ramps a yaw proportional to sample index (and hence
+    # to u, since u increases one-to-one with index too) -- standing in for
+    # a page-normal error that leaks position-dependent tilt into yaw (see
+    # rotation.py / calibration.py's threshold comment, and the module
+    # docstring's real-rig example: measured tilt correlated +0.69 with v
+    # while the cart was provably flat). Must show up as a large span AND a
+    # strong positive correlation with u -- not just "some" nonzero number.
+    with tempfile.TemporaryDirectory() as tmp:
+        cal_path = _calibration_check_cal_path(tmp)
+        n = 80
+        positions = [(i * 2.5, 0.0, 0.0) for i in range(n)]
+        quats = [_quat_about_z(i * 0.3) for i in range(n)]         # yaw ramps with u
+        tracker = _ScriptedPoseTracker(positions, quats)
+        output = asyncio.run(_run_calibration_check_briefly(
+            tracker, page_calibration_path=cal_path))
+
+    summary = next(e for e in _events(output) if e["event"] == "calibration_check_summary")
+    assert summary["yaw_span_deg"] > 5.0, summary
+    assert summary["yaw_u_correlation"] is not None, summary
+    assert summary["yaw_u_correlation"] > 0.9, summary          # strongly correlated, not noise
+    assert "BAD" in summary["verdict"], summary["verdict"]
+
+
+def test_calibration_check_summary_pure_function_matches_the_live_run():
+    # Cross-check: diagnostics._calibration_check_summary (the pure,
+    # directly-testable statistics function) must produce EXACTLY the same
+    # numbers the live async loop above reports through NDJSON, computed
+    # independently here from hand-built sample lists rather than trusting
+    # the live run's own output.
+    u = [float(i) for i in range(50)]
+    v = [0.0] * 50
+    yaw = [0.1 * i for i in range(50)]
+    roll = [0.0] * 50
+    pitch = [0.0] * 50
+    summary = diagnostics._calibration_check_summary(u, v, yaw, roll, pitch)
+    assert summary["sample_count"] == 50
+    assert abs(summary["u_travel_mm"] - 49.0) < 1e-9
+    assert abs(summary["v_travel_mm"] - 0.0) < 1e-9
+    assert abs(summary["yaw_span_deg"] - 4.9) < 1e-9
+    assert summary["yaw_u_correlation"] > 0.999                 # perfectly linear in u
+    assert summary["yaw_v_correlation"] is None                 # v has zero variance
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

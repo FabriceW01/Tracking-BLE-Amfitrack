@@ -209,6 +209,293 @@ async def monitor_position(tracking: TrackingSettings, simulate: bool,
 
 
 # ============================================================================
+# --calibration-check : measure yaw drift while only TRANSLATING
+# ============================================================================
+# Verdict thresholds (degrees of yaw SPAN -- max minus min -- over the whole
+# sweep). With the cart genuinely flat and only sliding, not rotating, yaw
+# should barely move at all -- any span at all is either measurement noise,
+# or tilt (roll/pitch, see rotation.cart_rotation_angles) leaking into yaw
+# through a page normal that is not quite right. The operator's own current
+# (already decent, see calibration.py's threshold comment: 0.63 deg normal
+# tilt) calibration measures 2-3 deg of span on a normal A4-sized sweep and
+# considers that acceptable day to day -- so this stays quiet up to
+# CALIBRATION_CHECK_YAW_SPAN_FINE_DEG, treats up to
+# CALIBRATION_CHECK_YAW_SPAN_WARN_DEG (roughly what the operator already
+# tolerates) as borderline, and only calls anything BEYOND that a real
+# problem.
+CALIBRATION_CHECK_YAW_SPAN_FINE_DEG = 2.0
+CALIBRATION_CHECK_YAW_SPAN_WARN_DEG = 4.0
+
+
+def _calibration_check_summary(u_samples, v_samples, yaw_deg_samples,
+                               roll_deg_samples, pitch_deg_samples) -> dict:
+    """
+    Pure computation from a completed (or in-progress) ``calibration_check``
+    run's collected per-sample page ``u``/``v`` (mm) and ``yaw``/``roll``/
+    ``pitch`` (degrees) readings -- factored out of the async streaming loop
+    below exactly so it is directly unit-testable against a scripted sample
+    sequence, without needing a tracker or an event loop at all (mirrors
+    ``ui.server.compute_calibration`` being factored out of its ``@app.post``
+    handler for the same "testable as a plain function" reason).
+
+    Returns a dict of:
+
+      * ``sample_count`` -- how many samples went into this summary.
+      * ``u_travel_mm``/``v_travel_mm`` -- how far the cart's page position
+        actually spanned (max - min) along each page axis during the sweep.
+        The headline "did the operator actually slide it far enough to mean
+        anything" sanity check -- a large yaw span over a two-inch wiggle
+        proves much less than the same span over a full A4 sheet.
+      * ``yaw_min_deg``/``yaw_max_deg``/``yaw_span_deg`` -- ``yaw_span_deg``
+        (max - min) is the HEADLINE number: with the cart provably flat and
+        only translating, this should stay near 0.
+      * ``roll_span_deg``/``pitch_span_deg`` -- same span idea for tilt, the
+        quantity that leaks INTO yaw through an imperfect page normal (see
+        ``rotation.cart_rotation_angles``'s and ``calibration.py``'s own
+        docstrings) -- reported so a large yaw span can be cross-checked
+        against whether tilt was actually present to leak from.
+      * ``yaw_u_correlation``/``yaw_v_correlation`` -- Pearson correlation
+        coefficient of yaw against page position along each axis, or
+        ``None`` if there are fewer than 2 samples or either series has ~0
+        variance (a correlation coefficient is undefined there, not 0).
+        This is what separates ordinary sample-to-sample NOISE (yaw jitters
+        around with no relationship to where the cart is) from SYSTEMATIC
+        drift with position (yaw trends consistently as the cart moves one
+        way) -- on real data from this rig, measured tilt correlated +0.69
+        with v while the cart was provably flat, i.e. not noise.
+      * ``verdict`` -- a human-readable one-paragraph verdict against the
+        thresholds above, including which follow-up experiment distinguishes
+        a bad calibration frame from tracker field distortion (see below).
+    """
+    u = np.asarray(u_samples, dtype=float)
+    v = np.asarray(v_samples, dtype=float)
+    yaw = np.asarray(yaw_deg_samples, dtype=float)
+    roll = np.asarray(roll_deg_samples, dtype=float)
+    pitch = np.asarray(pitch_deg_samples, dtype=float)
+
+    def _span(a: np.ndarray) -> float:
+        return float(a.max() - a.min()) if a.size else 0.0
+
+    def _correlation(a: np.ndarray, b: np.ndarray) -> Optional[float]:
+        if a.size < 2 or float(np.std(a)) < 1e-9 or float(np.std(b)) < 1e-9:
+            return None
+        return float(np.corrcoef(a, b)[0, 1])
+
+    yaw_span_deg = _span(yaw)
+    summary = {
+        "sample_count": int(u.size),
+        "u_travel_mm": _span(u),
+        "v_travel_mm": _span(v),
+        "yaw_min_deg": float(yaw.min()) if yaw.size else 0.0,
+        "yaw_max_deg": float(yaw.max()) if yaw.size else 0.0,
+        "yaw_span_deg": yaw_span_deg,
+        "roll_span_deg": _span(roll),
+        "pitch_span_deg": _span(pitch),
+        "yaw_u_correlation": _correlation(yaw, u),
+        "yaw_v_correlation": _correlation(yaw, v),
+    }
+
+    if yaw_span_deg <= CALIBRATION_CHECK_YAW_SPAN_FINE_DEG:
+        verdict = (
+            f"OK: yaw span {yaw_span_deg:.2f} deg is at or under the "
+            f"~{CALIBRATION_CHECK_YAW_SPAN_FINE_DEG:.0f} deg 'fine' mark for "
+            f"a flat, non-rotating sweep -- consistent with a good calibration.")
+    elif yaw_span_deg <= CALIBRATION_CHECK_YAW_SPAN_WARN_DEG:
+        verdict = (
+            f"BORDERLINE: yaw span {yaw_span_deg:.2f} deg is above the "
+            f"~{CALIBRATION_CHECK_YAW_SPAN_FINE_DEG:.0f} deg 'fine' mark, but "
+            f"close to the 2-3 deg this rig's own calibration currently shows "
+            f"and the operator already finds acceptable -- worth a look, not "
+            f"necessarily broken.")
+    else:
+        verdict = (
+            f"BAD: yaw span {yaw_span_deg:.2f} deg is well beyond what a "
+            f"flat, non-rotating sweep should show. Likely either (a) a bad "
+            f"calibration page-normal (retrace the edges -- see calibration."
+            f"py's CalibrationQualityWarning for whether the trace itself was "
+            f"short/noisy/sparse), or (b) tracker field distortion (a real "
+            f"physical effect, independent of calibration). To tell them "
+            f"apart: re-run this check at the SAME physical spot with a "
+            f"freshly, carefully re-traced calibration -- if the drift "
+            f"disappears, it was the calibration; if it persists even with a "
+            f"known-good one, repeat the same sweep at a DIFFERENT position/"
+            f"height over the tracker base station -- a drift pattern that "
+            f"moves with absolute tracker position rather than with the "
+            f"calibration is field distortion, not something re-tracing can "
+            f"fix.")
+    summary["verdict"] = verdict
+    return summary
+
+
+async def calibration_check(tracking: TrackingSettings, simulate: bool,
+                            hz: float = 15.0, ndjson: bool = False,
+                            page_calibration_path: Optional[str] = None,
+                            sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
+                            sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
+                            boresight_deg: float = 0.0,
+                            simple_boresight: Optional[np.ndarray] = None,
+                            tracker=None) -> None:
+    """
+    Calibration health check: measures the operator's exact reported
+    symptom -- yaw drifting while the cart only TRANSLATES.
+
+    Streams live pose like ``--pos``/``monitor_position`` does (same
+    ``ndjson`` NDJSON convention -- one ``{"event": "position", ...}``
+    object per line, so this reuses the web UI's existing live position
+    handling verbatim rather than needing a second one), while the operator
+    slides the cart flat over the page WITHOUT rotating it. On Ctrl+C, it
+    stops streaming and prints a summary of what was collected (see
+    ``_calibration_check_summary``, which does the actual statistics and is
+    unit-tested directly against a scripted sample sequence).
+
+    Needs a real page frame to measure drift against -- ``page_calibration_path``
+    or ``tracking.page_frame == "simple"`` -- unlike ``monitor_position``,
+    which tolerates neither and just omits the page fields. There is nothing
+    to check without one.
+
+    ``tracker``, if given, is used instead of building one via
+    ``tracking.make_tracker``/``simulate`` -- lets tests inject a scripted
+    pose sequence (mirrors ``tests/test_freehand_pass.py``'s
+    ``ScriptedTracker`` / ``tests/test_position_pass.py``'s pattern) with a
+    real quaternion series, which ``SimulatedTracker`` itself never fakes
+    (see its own docstring) and so cannot exercise the yaw-drift statistics
+    this function exists to compute. Defaults to ``None``, i.e. the normal
+    hardware/``--simulate`` path ``monitor_position`` also uses.
+
+    The other arguments (``sensor_offset_row_mm``/``sensor_offset_col_mm``/
+    ``boresight_deg``/``simple_boresight``) are forwarded into the
+    :class:`~printhead.tracking.PageMapper` exactly like ``monitor_position``
+    -- the page-frame construction below deliberately mirrors that
+    function's rather than sharing a helper with it, so this addition
+    cannot change ``monitor_position``'s own already-tested behaviour.
+    """
+    if tracker is None:
+        tracker = make_tracker(tracking, simulate)
+    try:
+        tracker.open()
+    except Exception as exc:
+        if ndjson:
+            print(json.dumps({"event": "error", "message": str(exc)}), flush=True)
+        else:
+            print(f"Cannot open Amfitrack tracker: {exc}")
+        return
+
+    if tracking.page_frame == "simple":
+        page_mapper = PageMapper(
+            PageCalibration.simple_frame(boresight_quat=simple_boresight),
+            sensor_offset_row_mm=sensor_offset_row_mm,
+            sensor_offset_col_mm=sensor_offset_col_mm,
+            boresight_offset_rad=math.radians(boresight_deg))
+    elif page_calibration_path is not None:
+        try:
+            page_mapper = PageMapper(PageCalibration.load(page_calibration_path),
+                                     sensor_offset_row_mm=sensor_offset_row_mm,
+                                     sensor_offset_col_mm=sensor_offset_col_mm,
+                                     boresight_offset_rad=math.radians(boresight_deg))
+        except Exception as exc:
+            if ndjson:
+                print(json.dumps({"event": "error",
+                                  "message": f"Cannot load page calibration: {exc}"}),
+                      flush=True)
+            else:
+                print(f"Cannot load page calibration '{page_calibration_path}': {exc}")
+            tracker.close()
+            return
+    else:
+        message = ("--calibration-check needs a page frame to measure drift "
+                   "against: pass --page-calibration PATH or --page-frame simple")
+        if ndjson:
+            print(json.dumps({"event": "error", "message": message}), flush=True)
+        else:
+            print(message)
+        tracker.close()
+        return
+
+    pos_filter = PositionFilter(tracking.smooth_ms / 1000.0)
+    u_samples: list = []
+    v_samples: list = []
+    yaw_samples: list = []
+    roll_samples: list = []
+    pitch_samples: list = []
+
+    if ndjson:
+        print(json.dumps({"event": "connected"}), flush=True)
+    else:
+        print("Calibration health check: slide the cart FLAT over the page, "
+             "WITHOUT rotating it. Ctrl+C to stop and print the summary.")
+    try:
+        while True:
+            pos, quat = tracker.read_pose()
+            if pos is not None:
+                pos = pos_filter.update(pos, time.monotonic())
+                # Simple frame with no pinned --simple-boresight: adopt the
+                # first orientation sample as the yaw reference, exactly
+                # mirroring monitor_position's identical block above --
+                # without this, PageMapper.project() has no boresight_quat
+                # at all and last_yaw_rad/last_roll_rad/last_pitch_rad stay
+                # at their 0.0 default forever, making this diagnostic
+                # report a perfect (and meaningless) yaw span of 0 no matter
+                # how the cart actually moves.
+                if (tracking.page_frame == "simple" and quat is not None
+                        and page_mapper.calibration.boresight_quat is None):
+                    page_mapper.capture_boresight(quat)
+                u, v, z = page_mapper.project(pos, quat)
+                yaw_deg = math.degrees(page_mapper.last_yaw_rad)
+                roll_deg = math.degrees(page_mapper.last_roll_rad)
+                pitch_deg = math.degrees(page_mapper.last_pitch_rad)
+                u_samples.append(u)
+                v_samples.append(v)
+                yaw_samples.append(yaw_deg)
+                roll_samples.append(roll_deg)
+                pitch_samples.append(pitch_deg)
+                if ndjson:
+                    event = {
+                        "event": "position",
+                        "x": round(float(pos[0]), 3), "y": round(float(pos[1]), 3),
+                        "z": round(float(pos[2]), 3),
+                        "page_u": round(u, 3), "page_v": round(v, 3), "page_z": round(z, 3),
+                        "yaw_deg": round(yaw_deg, 3), "roll_deg": round(roll_deg, 3),
+                        "pitch_deg": round(pitch_deg, 3)}
+                    print(json.dumps(event), flush=True)
+                else:
+                    print(f"page u={u:8.2f}  v={v:8.2f} mm  |  "
+                         f"yaw={yaw_deg:+6.2f}  roll={roll_deg:+6.2f}  "
+                         f"pitch={pitch_deg:+6.2f} deg", end="\r", flush=True)
+            await asyncio.sleep(1.0 / hz)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        if not ndjson:
+            print()                   # leave the live line intact
+        tracker.close()
+        summary = _calibration_check_summary(
+            u_samples, v_samples, yaw_samples, roll_samples, pitch_samples)
+        if ndjson:
+            print(json.dumps({"event": "calibration_check_summary", **summary}), flush=True)
+        else:
+            corr_u = summary["yaw_u_correlation"]
+            corr_v = summary["yaw_v_correlation"]
+            corr_line = (f"  yaw correlation: vs u = {corr_u:+.2f}  vs v = {corr_v:+.2f}"
+                        if corr_u is not None and corr_v is not None
+                        else "  yaw correlation: n/a (not enough motion/variation collected)")
+            print("---- calibration health check summary ----")
+            print(f"  samples: {summary['sample_count']}")
+            print(f"  travelled: u={summary['u_travel_mm']:.1f}mm  "
+                  f"v={summary['v_travel_mm']:.1f}mm")
+            print(f"  yaw: min={summary['yaw_min_deg']:+.2f}  "
+                  f"max={summary['yaw_max_deg']:+.2f}  "
+                  f"span={summary['yaw_span_deg']:.2f} deg")
+            print(f"  roll span: {summary['roll_span_deg']:.2f} deg   "
+                  f"pitch span: {summary['pitch_span_deg']:.2f} deg")
+            print(corr_line)
+            print(f"  verdict: {summary['verdict']}")
+        if ndjson:
+            print(json.dumps({"event": "stopped"}), flush=True)
+        else:
+            print("Stopped calibration check.")
+
+
+# ============================================================================
 # --list-nodes : enumerate Amfitrack USB nodes
 # ============================================================================
 def list_nodes(tracking: TrackingSettings) -> None:

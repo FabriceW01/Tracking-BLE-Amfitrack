@@ -287,9 +287,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     mx.add_argument("--pos", action="store_true",
                     help="Live-print the Amfitrack position (x/y/z + advance + "
                          "column); works with --simulate. Ctrl+C to stop")
+    mx.add_argument("--calibration-check", action="store_true",
+                    help="Calibration health check: streams live page u/v/yaw/"
+                         "roll/pitch like --pos, then (Ctrl+C) prints a summary "
+                         "of yaw drift while the cart only TRANSLATES -- slide "
+                         "it flat over the page WITHOUT rotating it. Reports "
+                         "travelled u/v, yaw min/max/span (the headline "
+                         "number -- should stay near 0 with no rotation), "
+                         "roll/pitch span, and yaw's correlation against u/v "
+                         "(separates noise from systematic drift with "
+                         "position). Needs --page-calibration PATH or "
+                         "--page-frame simple: there is no page u/v to check "
+                         "drift against otherwise")
     g.add_argument("--pos-json", action="store_true",
-                   help="With --pos: emit one JSON object per sample (newline "
-                        "terminated) instead of the live line (used by the web UI)")
+                   help="With --pos or --calibration-check: emit one JSON "
+                        "object per sample (newline terminated) instead of "
+                        "the live line (used by the web UI)")
     g.add_argument("--page-frame", choices=("calibrated", "simple"),
                    default="calibrated",
                    help="Which 2D frame --mode page prints into. calibrated "
@@ -393,6 +406,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         ap.error("--page-frame simple and --page-calibration are mutually "
                  "exclusive: simple takes the tracker's own x/y axes as the "
                  "page frame and ignores any traced calibration")
+    if args.calibration_check and args.page_frame != "simple" and not args.page_calibration:
+        # Unlike --pos (which tolerates no page frame at all -- it just
+        # omits the page_u/page_v fields), --calibration-check has nothing
+        # to measure drift IN without one: yaw is only ever reported
+        # relative to a page normal, see rotation.yaw_about_normal.
+        ap.error("--calibration-check needs a page frame to measure drift "
+                 "against: pass --page-calibration PATH or --page-frame simple")
     if args.spray_radius_mm is not None and args.spray_radius_mm < 0.0:
         ap.error("--spray-radius-mm cannot be negative (0 disables the "
                  "ink-spread model)")
@@ -428,8 +448,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def _debug_mode(args: argparse.Namespace) -> bool:
-    return bool(args.pos or args.list_nodes or args.scan_ble or args.nozzle_test
-                or args.ble_benchmark)
+    return bool(args.pos or args.calibration_check or args.list_nodes or args.scan_ble
+                or args.nozzle_test or args.ble_benchmark)
 
 
 def _content_mode_count(args: argparse.Namespace) -> int:
@@ -583,6 +603,24 @@ def _run_debug(args: argparse.Namespace) -> None:
         asyncio.run(diagnostics.monitor_position(
             build_tracking(args), args.simulate, ndjson=args.pos_json,
             page_calibration_path=args.page_calibration, **pos_kwargs))
+    elif args.calibration_check:
+        # Same kwargs as --pos above (offsets/boresight don't change the
+        # yaw-drift statistics -- a constant u/v shift and a fixed yaw
+        # offset don't affect a SPAN or a CORRELATION -- but forwarding them
+        # anyway keeps this diagnostic's page_u/page_v consistent with what
+        # a real pass would report, same reasoning as --pos).
+        check_kwargs = {}
+        if args.sensor_offset_row_mm is not None:
+            check_kwargs["sensor_offset_row_mm"] = args.sensor_offset_row_mm
+        if args.sensor_offset_col_mm is not None:
+            check_kwargs["sensor_offset_col_mm"] = args.sensor_offset_col_mm
+        if args.boresight_deg is not None:
+            check_kwargs["boresight_deg"] = args.boresight_deg
+        if args.simple_boresight:
+            check_kwargs["simple_boresight"] = args.simple_boresight
+        asyncio.run(diagnostics.calibration_check(
+            build_tracking(args), args.simulate, ndjson=args.pos_json,
+            page_calibration_path=args.page_calibration, **check_kwargs))
     elif args.list_nodes:
         diagnostics.list_nodes(build_tracking(args))
     elif args.scan_ble:
