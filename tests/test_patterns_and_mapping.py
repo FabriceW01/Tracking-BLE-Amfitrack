@@ -288,6 +288,65 @@ def test_cli_accepts_calibrate_and_pattern():
     assert args.pattern == "solid"
 
 
+def test_cli_mm_per_column_reaches_build_tracking():
+    # REGRESSION: build_tracking() used to construct TrackingSettings
+    # without passing mm_per_column at all, so it silently fell back to the
+    # dataclass's own default (0.2) regardless of --mm-per-column -- only
+    # --dpi ever had any effect (via resolve_mm_per_column). Confirmed on a
+    # real command: --mm-per-column 0.1 with a 200mm pattern rendered 1000
+    # columns, not the requested 2000 -- exactly the 0.2mm/column default.
+    # That silently doubled every column's physical width, which is why a
+    # checkerboard meant to be square (matching --pattern-square-mm/
+    # --pattern-square-height-mm, --mm-per-column == NOZZLE_PITCH_MM) still
+    # rendered 2x too tall in coverage.png.
+    args = cli.parse_args(["--pos", "--simulate", "--mm-per-column", "0.1"])
+    tracking = cli.build_tracking(args)
+    assert tracking.mm_per_column == 0.1, (
+        "--mm-per-column did not reach TrackingSettings -- it fell back to "
+        "the dataclass default instead")
+
+
+def test_cli_mm_per_column_default_still_matches_the_dataclass_default():
+    # Counter-check: with no override, build_tracking must still resolve to
+    # the documented 0.2 default -- proves the fix threads the CLI value
+    # through rather than just hardcoding some other number.
+    args = cli.parse_args(["--pos", "--simulate"])
+    tracking = cli.build_tracking(args)
+    assert tracking.mm_per_column == 0.2
+
+
+def test_cli_dpi_still_overrides_mm_per_column():
+    # --dpi and --mm-per-column are mutually exclusive on the CLI, but
+    # resolve_mm_per_column's own dpi-wins logic must still hold now that
+    # mm_per_column is threaded through unconditionally.
+    args = cli.parse_args(["--pos", "--simulate", "--dpi", "254"])
+    tracking = cli.build_tracking(args)
+    assert abs(tracking.mm_per_column - 25.4 / 254) < 1e-9
+
+
+def test_cli_mm_per_column_MUTATION_check_omitting_it_reintroduces_the_bug():
+    # Proof the regression test above actually exercises the fix: dropping
+    # mm_per_column from the TrackingSettings(...) call (the exact bug)
+    # makes tracking.mm_per_column silently ignore --mm-per-column again.
+    from printhead.config import TrackingSettings as _TS
+
+    args = cli.parse_args(["--pos", "--simulate", "--mm-per-column", "0.1"])
+    mode = args.mode if args.track else "time"
+    buggy = _TS(
+        enabled=args.track, mode=mode, page_frame=args.page_frame,
+        advance_axis=args.advance_axis, axis_sign=args.axis_sign,
+        auto_calibrate=args.auto_calibrate, calib_distance_mm=args.calib_distance,
+        origin=args.origin, min_move_mm=args.min_move, timeout_s=args.timeout,
+        smooth_ms=args.smooth_ms, poll_hz=args.poll_hz,
+        vendor_id=args.vendor_id, product_id=args.product_id,
+        sensor_id=args.sensor_id)                    # <-- the reverted, buggy omission
+    buggy.mm_per_column = buggy.resolve_mm_per_column(args.dpi)
+    assert buggy.mm_per_column != 0.1, (
+        "the old omit-mm_per_column construction was expected to still "
+        "fail here -- if this now passes, the mutation no longer "
+        "reproduces the original bug and this guard should be revisited")
+
+
 def test_cli_page_calibration_flag_defaults_to_none_and_parses():
     args = cli.parse_args(["--pos", "--simulate"])
     assert args.page_calibration is None
