@@ -474,7 +474,20 @@ def build_tracking(args: argparse.Namespace) -> TrackingSettings:
         origin=args.origin, min_move_mm=args.min_move, timeout_s=args.timeout,
         smooth_ms=args.smooth_ms, poll_hz=args.poll_hz,
         vendor_id=args.vendor_id, product_id=args.product_id,
-        sensor_id=args.sensor_id)
+        sensor_id=args.sensor_id,
+        # CORRECTION: this constructor call used to omit mm_per_column
+        # entirely, so TrackingSettings fell back to its own dataclass
+        # default (0.2) regardless of --mm-per-column -- only --dpi ever
+        # had any effect, via resolve_mm_per_column below. --mm-per-column
+        # is a real, documented CLI flag (and the default value in its own
+        # --help text), so silently ignoring it is a bug, not a feature:
+        # confirmed on a real command (200mm pattern, --mm-per-column 0.1)
+        # rendering 1000 columns instead of the requested 2000 -- exactly
+        # the 0.2mm/column default, and exactly why a page-mode checkerboard
+        # meant to be square (--pattern-square-mm == --pattern-square-height-mm,
+        # --mm-per-column == NOZZLE_PITCH_MM) still rendered 2x too tall in
+        # coverage.png: every column was twice as wide as intended.
+        mm_per_column=args.mm_per_column)
     tracking.mm_per_column = tracking.resolve_mm_per_column(args.dpi)
     return tracking
 

@@ -985,6 +985,38 @@ Druck-Zelle ist `mm_per_column` breit, aber `NOZZLE_PITCH_MM` hoch, also zwei
 unterschiedliche physische Maße — nur die unabhängige Skalierung auf die
 angeforderte Spalten-/Zeilenzahl ergibt auf dem Papier die korrekten Proportionen.
 
+⚠️ **Fehler behoben: `--mm-per-column` wurde komplett ignoriert.**
+`build_tracking()` in `cli.py` hat `TrackingSettings` gebaut, ohne
+`mm_per_column` überhaupt zu übergeben — dadurch griff immer der eigene
+Dataclass-Default (`0.2`), egal was auf der Kommandozeile stand. Nur `--dpi`
+hatte je einen echten Effekt (über `resolve_mm_per_column`). Direkt bestätigt:
+
+```bash
+python main.py --pattern checkerboard --pattern-length-mm 200 --mm-per-column 0.1 ...
+# vorher: "-> 1000 columns x 2000 rows"   (0.2mm/Spalte, der ignorierte Default)
+# jetzt:  "-> 2000 columns x 2000 rows"   (0.1mm/Spalte, wie angefordert)
+```
+
+Genau das war die Ursache, wenn ein eigentlich quadratisch gedachtes
+Schachbrett (`--pattern-square-mm` == `--pattern-square-height-mm`,
+`--mm-per-column` == `NOZZLE_PITCH_MM` = 0,1 mm) in `coverage.png` trotzdem
+doppelt so hoch wie breit aussah: jede Spalte war heimlich doppelt so breit
+wie angefordert. Betrifft **jeden** Aufruf mit `--mm-per-column ≠ 0.2` —
+Musterbreite, Coverage-Engine-Spaltenadressierung, alles, was
+`tracking.mm_per_column` liest.
+
+**Neue Tests** (`tests/test_patterns_and_mapping.py`):
+
+```
+test_cli_mm_per_column_reaches_build_tracking
+test_cli_mm_per_column_default_still_matches_the_dataclass_default
+test_cli_dpi_still_overrides_mm_per_column
+test_cli_mm_per_column_MUTATION_check_omitting_it_reintroduces_the_bug
+```
+
+Mutationsgeprüft gegen die reale, alte Konstruktion (nicht nur eine
+Nachbildung im Test).
+
 ## Düsen-Mapping
 
 Falls die physischen Düsen in Blöcken fester Größe verdrahtet sind, deren
