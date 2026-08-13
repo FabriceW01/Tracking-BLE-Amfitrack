@@ -348,6 +348,45 @@ def test_dose_does_not_accumulate_across_different_pixels():
     assert not eng.printed[0, 1]
 
 
+def test_arriving_at_a_pixel_credits_no_dwell_so_ink_volume_is_preserved():
+    # REGRESSION: the per-pixel dwell fix first credited a whole poll
+    # interval to a pixel's very FIRST sample (`.get(pixel, 0.0) + dt`).
+    # That completed every pixel one sample EARLIER than the original
+    # engine, so nozzles stopped firing sooner and the rig laid down far
+    # less ink for the same recorded coverage -- measured on a realistic
+    # moving pass: 1503 -> 904 fire events at dose_hold_s=0.001 (-40%),
+    # 5099 -> 2404 at the 0.00405 default (-53%), with the recorded
+    # `printed` count unchanged (~750 either way). Reported from hardware
+    # as "coverage.png looks fuller than the real print" / "only half of it
+    # printed". The dose_hold_s <-> firmware PATTERN_STRIDE pairing (~3
+    # drops per pixel) is calibrated against the original timing, so
+    # completing earlier de-calibrates the actual drop count.
+    #
+    # Pinned as the timing rule it comes from: a nozzle parked on one pixel
+    # must fire for ceil(dose_hold_s / dt) + 1 samples -- arrival sample
+    # (0 dwell) plus one sample per dt until dwell reaches dose_hold_s.
+    poll_hz = 500
+    dt = 1.0 / poll_hz
+    for hold, expected_fire_samples in ((0.001, 2), (0.00405, 4)):
+        ink = np.ones((NUM_NOZZLES + 5, 3), dtype=bool)
+        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=hold)
+        # One prior sample elsewhere so dt is a real interval by the time
+        # the nozzle arrives -- the very first step() call has dt == 0 and
+        # would mask the bug (which is exactly why a parked-from-t0 probe
+        # showed no difference and this uses an approach sample instead).
+        eng.step(u_mm=0.4, v_mm=-50.0, t=0.0)
+        fired = 0
+        for i in range(1, 12):
+            pattern, _ = eng.step(u_mm=0.4, v_mm=0.0, t=i * dt)
+            if pattern[0] & 0x01:
+                fired += 1
+        assert fired == expected_fire_samples, (
+            f"dose_hold_s={hold}: nozzle held its fire bit for {fired} "
+            f"samples, expected {expected_fire_samples} -- ink volume per "
+            f"pixel changed, which silently de-calibrates the dose_hold_s / "
+            f"PATTERN_STRIDE drop-count pairing")
+
+
 def test_dwell_survives_flapping_between_two_neighbouring_rows():
     # REGRESSION: found analysing a real freehand print whose recorded
     # coverage.png showed far less than what was actually inked on paper.
@@ -805,7 +844,12 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
                 if not wanted:
                     continue
                 pixel = (row, col)
-                dwell = pixel_dwell.get(pixel, 0.0) + dt
+                # Arrival credits 0.0, only subsequent samples on the same
+                # pixel add dt -- matching step()'s own timing (which
+                # reproduces the pre-fix elapsed-time semantics exactly; see
+                # coverage.py for why crediting dt on arrival halved the
+                # real ink laid down).
+                dwell = pixel_dwell[pixel] + dt if pixel in pixel_dwell else 0.0
                 pixel_dwell[pixel] = dwell
                 active[p] = True
                 if dwell >= 0.0018:

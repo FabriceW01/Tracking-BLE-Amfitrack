@@ -524,7 +524,33 @@ class CoverageEngine:
             # not reset by a key change -- only removed on completion below.
             first_row, first_col = members[0][1], members[0][2]
             pixel = (first_row, first_col)
-            dwell = self._pixel_dwell_s.get(pixel, 0.0) + dt
+            # CORRECTION: this first read `.get(pixel, 0.0) + dt`, i.e. it
+            # credited a whole poll interval to a pixel's very FIRST sample.
+            # That silently completed every pixel one sample EARLIER than the
+            # original engine, so nozzles stopped firing sooner and the rig
+            # laid down far less ink for the same recorded coverage --
+            # measured on a realistic moving pass: fire events dropped 1503
+            # -> 904 at dose_hold_s=0.001 (-40%) and 5099 -> 2404 at the
+            # 0.00405 default (-53%), while the recorded `printed` count
+            # stayed put (~750 both ways). On paper that reads exactly as
+            # "coverage.png looks fuller than the real print" / "only half
+            # of it printed", which is how it was reported. The whole
+            # dose_hold_s <-> firmware PATTERN_STRIDE pairing (~3 drops per
+            # pixel, see DEFAULT_DOSE_HOLD_S) is calibrated against the
+            # original timing, so shifting completion earlier de-calibrates
+            # the actual drop count.
+            #
+            # Arriving at a pixel therefore credits 0.0, exactly as the
+            # original "since = t" did; only SUBSEQUENT samples on that same
+            # pixel add dt. For a continuously-visited pixel that reproduces
+            # the original elapsed-time semantics exactly (after n samples:
+            # (n-1)*dt == t - t_first), while still surviving the row-flapping
+            # case this dict exists for, because the entry is not discarded
+            # when the group looks away for a sample.
+            if pixel in self._pixel_dwell_s:
+                dwell = self._pixel_dwell_s[pixel] + dt
+            else:
+                dwell = 0.0
             self._pixel_dwell_s[pixel] = dwell
 
             # Step 3: the whole group fires together.
