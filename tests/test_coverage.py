@@ -348,6 +348,113 @@ def test_dose_does_not_accumulate_across_different_pixels():
     assert not eng.printed[0, 1]
 
 
+def test_dwell_survives_flapping_between_two_neighbouring_rows():
+    # REGRESSION: found analysing a real freehand print whose recorded
+    # coverage.png showed far less than what was actually inked on paper.
+    # NOZZLE_PITCH_MM (0.1mm) is finer than realistic tracker position
+    # noise, so a nozzle sitting near a row boundary has its rounded row
+    # index flap between two neighbours sample to sample. The engine used
+    # to key dwell on a per-group "since" timestamp that RESET on every key
+    # change -- so neither neighbour ever accumulated dose_hold_s of dwell,
+    # even though `active` (and therefore real firmware firing) was True
+    # on literally every sample. Reproduced directly against the pre-fix
+    # engine: 200/200 samples fired, 0 pixels ever completed, from jitter
+    # of only +-0.001mm -- two orders of magnitude below plausible tracker
+    # noise. Dwell must now be tracked per PIXEL (persists across a key
+    # flap) rather than per group-slot (reset by one).
+    ink = np.zeros((200, 50), dtype=bool)
+    ink[50, 10] = True
+    ink[51, 10] = True
+    eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.004)
+    v_center = 50.5 * NOZZLE_PITCH_MM       # exact row-50/51 rounding boundary
+    t = 0.0
+    fired = 0
+    for i in range(200):
+        jitter = 0.001 if i % 2 == 0 else -0.001
+        pattern, _ = eng.step(u_mm=2.0, v_mm=v_center + jitter, t=t)
+        if any(pattern):
+            fired += 1
+        t += 0.002                          # 500 Hz poll
+
+    # Firing must have happened at all -- the pre-fix engine fired on every
+    # single one of these 200 samples (see the MUTATION check below) while
+    # completing nothing; the fixed engine fires only until both pixels
+    # complete, then correctly stops (nothing left wanted) -- so this is a
+    # lower bound, not the full 200.
+    assert fired >= 2, "sanity: the nozzle must have fired at least once"
+    assert eng.printed[50, 10], (
+        "row 50 never completed despite firing on every single sample -- "
+        "dwell was lost to key-flapping between the two boundary rows")
+    assert eng.printed[51, 10], (
+        "row 51 never completed despite firing on every single sample -- "
+        "dwell was lost to key-flapping between the two boundary rows")
+
+
+def test_dwell_resumes_after_the_group_stops_being_wanted_for_a_while():
+    # A pixel partially dwelled, then the cart wanders away (group not
+    # wanted for many samples -- e.g. off the page, or over an already-
+    # printed/blank stretch), then returns to the SAME still-unfinished
+    # pixel: the earlier partial dwell must still count. Distinct from the
+    # flapping test above (that one never leaves the group_wanted branch at
+    # all); this one specifically exercises the "not wanted" continue path
+    # not silently discarding progress.
+    ink = np.zeros((10, 10), dtype=bool)
+    ink[0, 0] = True
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
+
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)                 # arrive at (0,0)
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.006)               # 6ms dwelled, not yet done
+    assert not eng.printed[0, 0]
+
+    # Wander off to unwanted territory for a while (group_wanted False).
+    for i in range(20):
+        eng.step(u_mm=5.0, v_mm=5.0, t=0.006 + i * 0.001)
+
+    # Come back to (0,0): only need ~4ms more to cross dose_hold_s=0.01.
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.030)
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.034)
+    assert eng.printed[0, 0], (
+        "dwell accumulated before the excursion was discarded instead of "
+        "resumed on return")
+
+
+def test_dwell_flap_MUTATION_check_resetting_on_key_change_reintroduces_the_bug():
+    # Proof the regression test above actually exercises the fix: reverting
+    # to the old reset-on-key-change dwell rule (a plain per-call "since"
+    # timestamp, exactly what step() used before this fix) reproduces the
+    # original failure -- fires every sample, completes neither pixel.
+    ink = np.zeros((200, 50), dtype=bool)
+    ink[50, 10] = True
+    ink[51, 10] = True
+
+    printed = np.zeros_like(ink, dtype=bool)
+    pixel, since = None, None
+    v_center = 50.5 * NOZZLE_PITCH_MM
+    t = 0.0
+    fired = 0
+    for i in range(200):
+        v = v_center + (0.001 if i % 2 == 0 else -0.001)
+        row = int(round(v / NOZZLE_PITCH_MM))
+        col = int(round(2.0 / 0.2))
+        wanted = bool(ink[row, col]) and not printed[row, col]
+        if wanted:
+            key = (row, col)
+            if pixel != key:
+                pixel, since = key, t              # <-- the reverted, buggy reset
+            fired += 1
+            if t - since >= 0.004:
+                printed[row, col] = True
+        else:
+            pixel, since = None, None
+        t += 0.002
+
+    assert fired == 200, "sanity: same firing pattern as the fixed engine"
+    assert not printed[50, 10] and not printed[51, 10], (
+        "the old reset-on-key-change rule was expected to still fail here -- "
+        "if this now passes, the mutation no longer reproduces the original "
+        "bug and this guard should be revisited")
+
+
 def test_ink_not_requested_never_fires_or_prints():
     ink = np.zeros((10, 5), dtype=bool)          # nothing wanted anywhere
     eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
@@ -656,15 +763,31 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
     # The check above only proves the default IS 1 -- both runs go through
     # the same grouped code path, so on its own it cannot catch the grouping
     # rewrite changing behaviour. Compare against an INDEPENDENT
-    # reimplementation of the original per-nozzle rule (the code this
-    # replaced) to actually pin the equivalence.
+    # reimplementation of the per-nozzle rule (the code this replaced) to
+    # actually pin the equivalence.
+    #
+    # Dwell here is accumulated PER PIXEL (a plain dict, keyed on (row, col),
+    # never reset by a key change), matching step()'s own per-pixel dwell
+    # model -- NOT the earlier per-nozzle "since" timestamp that reset to
+    # zero the instant a nozzle's rounded key changed. That earlier version
+    # is what this test used to pin, and it was itself the bug: with
+    # NOZZLE_PITCH_MM (0.1mm) finer than realistic tracker noise, a nozzle
+    # hovering near a row boundary flaps its key every sample, so a
+    # reset-on-change timer never reaches dose_hold_s -- the nozzle fires
+    # every sample (see `active` below, set unconditionally once `wanted`)
+    # but no pixel is ever marked printed. Reproduced directly against the
+    # pre-fix engine: 200/200 samples fired, 0 pixels completed, from
+    # +-0.001mm jitter alone. See coverage.py's module/__init__ docstrings.
     def reference(yaw_rad):
-        """The pre-grouping per-nozzle rule, written out standalone."""
+        """The per-nozzle rule, written out standalone, with the same
+        never-reset-on-flap per-pixel dwell accumulation step() now uses."""
         printed = np.zeros_like(ink, dtype=bool)
-        nozzle_pixel = [None] * NUM_NOZZLES
-        nozzle_since = [None] * NUM_NOZZLES
+        pixel_dwell: "dict[tuple[int, int], float]" = {}
+        last_t = None
         out = []
         for u_mm, v_mm, t in samples:
+            dt = 0.0 if last_t is None else max(0.0, t - last_t)
+            last_t = t
             active = np.zeros(NUM_NOZZLES, dtype=bool)
             zero_yaw = yaw_rad == 0.0
             if zero_yaw:
@@ -680,14 +803,13 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
                 in_bounds = 0 <= row < ink.shape[0] and 0 <= col < ink.shape[1]
                 wanted = in_bounds and bool(ink[row, col]) and not printed[row, col]
                 if not wanted:
-                    nozzle_pixel[p] = None
-                    nozzle_since[p] = None
                     continue
-                if nozzle_pixel[p] != (row, col):
-                    nozzle_pixel[p] = (row, col)
-                    nozzle_since[p] = t
+                pixel = (row, col)
+                dwell = pixel_dwell.get(pixel, 0.0) + dt
+                pixel_dwell[pixel] = dwell
                 active[p] = True
-                if t - nozzle_since[p] >= 0.0018:
+                if dwell >= 0.0018:
+                    del pixel_dwell[pixel]
                     printed[row, col] = True
             out.append(pack_nozzle_bits(active))
         return out, printed
