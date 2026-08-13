@@ -124,8 +124,6 @@ from .rendering import pack_nozzle_bits
 # rounds of hardware iteration before it was right.
 DEFAULT_DOSE_HOLD_S = 0.00405
 
-_Pixel = Optional[Tuple[int, int]]
-
 
 def bar_offset_uv(offset_along_bar_mm: float, yaw_rad: float) -> Tuple[float, float]:
     """
@@ -197,15 +195,45 @@ class CoverageEngine:
         self.dose = np.zeros(ink.shape, dtype=np.float32)
         self._spray_kernel = self._build_spray_kernel()
 
-        # Per-GROUP dwell state: which pixel each group is currently over
-        # (None if the group is not wanted -- see step()) and when it
-        # arrived, keyed on the group's FIRST member's (row, col). At
-        # nozzle_group=1 a group is exactly one nozzle, so this is the same
-        # per-nozzle state the engine has always kept (bit-identical
-        # behaviour -- see step()'s docstring).
         self._num_groups = -(-NUM_NOZZLES // nozzle_group)   # ceil division
-        self._group_pixel: List[_Pixel] = [None] * self._num_groups
-        self._group_since: List[Optional[float]] = [None] * self._num_groups
+
+        # Per-PIXEL accumulated dwell time (seconds), keyed on (row, col) --
+        # NOT per-group-slot and NOT reset when a group briefly stops being
+        # wanted or switches to a different pixel. See step()'s docstring
+        # for why: NOZZLE_PITCH_MM (0.1mm) is finer than realistic tracker
+        # position noise, so a nozzle sitting near a row boundary has its
+        # rounded (row, col) key flap between two neighbours sample to
+        # sample. A per-group-slot "since" timestamp that resets on every
+        # key change (the engine's original design) never accumulates past
+        # dose_hold_s in that case -- the nozzle fires every single sample
+        # (see `active` below, set unconditionally once `wanted`), but
+        # NEITHER neighbour ever reaches dose_hold_s of counted dwell, so
+        # `printed` stays False and the pixel never completes, no matter how
+        # long the cart sits there. Reproduced directly: 200/200 samples of
+        # real firing, 0 pixels ever marked printed, with jitter of only
+        # +-0.001mm (two orders of magnitude below plausible tracker noise)
+        # straddling one row boundary. A synthetic noise sweep (0 to 0.2mm)
+        # confirmed the direction gets WORSE, not better, with more realistic
+        # noise: recorded coverage can drop even as the number of samples
+        # that actually fired goes up, because more noise means more
+        # boundary-crossing flips.
+        #
+        # Entries live here only while a pixel is wanted-but-incomplete;
+        # `_deposit` (via step()) removes the entry once dwell reaches
+        # dose_hold_s, so this dict's size is bounded by "distinct pixels
+        # currently in progress", not by image size or pass length.
+        self._pixel_dwell_s: "dict[Tuple[int, int], float]" = {}
+        # Wall time of the previous step() call (None before the first),
+        # used to turn each call's `t` into a bounded per-sample dt (about
+        # one poll interval) added to whichever pixel(s) are wanted THIS
+        # sample -- see step()'s Step 4. Deliberately a single engine-wide
+        # value, not per-pixel: step() is called once per poll sample
+        # regardless of how many groups are active, so this dt is always a
+        # real, small inter-sample gap, never a large one accumulated while
+        # a pixel sat untouched (which would let a brief revisit after a
+        # long absence complete instantly -- exactly the over-counting a
+        # dwell requirement exists to prevent).
+        self._last_step_t: Optional[float] = None
         self._last_pattern: Optional[bytes] = None
 
         # Whether the most recent step() had ANY nozzle in bounds of the
@@ -299,7 +327,25 @@ class CoverageEngine:
 
         Called exactly once per completing pixel: the centre always reaches
         1.0 here, so the pixel is `printed` on return, which makes it
-        unwanted and releases the nozzle -- it cannot deposit twice."""
+        unwanted and releases the nozzle -- it cannot deposit twice.
+
+        CORRECTION: the spray loop used to mark a neighbour ``printed`` on
+        dose alone, without checking ``self.ink[r, c]`` -- i.e. it could
+        mark a pixel that was never ``wanted`` (no ink asked for there) as
+        printed anyway. Confirmed harmless for the CENTRE (only ever called
+        on a pixel that WAS wanted -- see ``step()``), but the neighbours it
+        splats onto get no such guarantee. Concretely, a completed pixel
+        sitting near a pattern boundary (e.g. a checkerboard square's edge)
+        could spray a "printed" mark onto the far side of that boundary --
+        a pixel that was never fired at all, now permanently skipped if a
+        later pass tries to reach it (``wanted`` requires ``not
+        self.printed``), silently eating a real corner/edge of the pattern.
+        Reproduced directly: a 1-pixel-wide unwanted neighbour one row over
+        from a completed wanted pixel came back ``printed=True`` with
+        ``dose=1.0`` despite ``ink`` being False there and no fire ever
+        having reached it. Now gated on ``self.ink[r, c]`` the same way the
+        centre already effectively is (via ``wanted`` in ``step()``): spray
+        only ever finishes a pixel that was already asked for."""
         h, w = self.ink.shape
         self.dose[row, col] = 1.0
         self.printed[row, col] = True
@@ -307,7 +353,8 @@ class CoverageEngine:
             return
         for dr, dc, weight in self._spray_kernel:
             r, c = row + dr, col + dc
-            if 0 <= r < h and 0 <= c < w and not self.printed[r, c]:
+            if (0 <= r < h and 0 <= c < w and self.ink[r, c]
+                    and not self.printed[r, c]):
                 acc = self.dose[r, c] + weight
                 if acc >= 1.0:
                     self.dose[r, c] = 1.0
@@ -383,9 +430,15 @@ class CoverageEngine:
           * if wanted, every member's ``active[p]`` is set True -- the
             defining behaviour: they always fire together.
           * dwell is tracked ONCE per group (not per nozzle), keyed on the
-            group's FIRST member's ``(row, col)``; the key resets whenever
-            that pixel changes or the group stops being wanted, same as the
-            per-nozzle key does in the ungrouped case.
+            group's FIRST member's ``(row, col)`` -- but accumulated in
+            ``self._pixel_dwell_s`` (see ``__init__``), which does NOT reset
+            when the group switches to a different pixel or stops being
+            wanted for a while: it only grows, and only while this exact
+            pixel is the group's current key, until it reaches
+            ``dose_hold_s`` and the entry is removed. A later revisit of the
+            SAME pixel (by this group or, since the dict is keyed on the
+            pixel itself rather than a per-group slot, by any group) resumes
+            from where it left off rather than starting over.
           * on completion, ``_deposit`` is called for EVERY in-bounds member
             (not just the first) -- every member physically received ink, so
             every member's pixel must be marked printed.
@@ -413,6 +466,14 @@ class CoverageEngine:
         else:
             sin_yaw = math.sin(yaw_rad)
             cos_yaw = math.cos(yaw_rad)
+
+        # A bounded, real inter-sample gap -- see __init__'s docstring for
+        # why this is computed once per step() call (not per pixel/group):
+        # step() runs once per poll sample regardless of how many groups are
+        # active, so this is always about one poll interval, never a large
+        # gap accumulated while some pixel sat untouched.
+        dt = 0.0 if self._last_step_t is None else max(0.0, t - self._last_step_t)
+        self._last_step_t = t
 
         active = np.zeros(NUM_NOZZLES, dtype=bool)
         in_bounds_any = False
@@ -446,18 +507,25 @@ class CoverageEngine:
                 group_wanted = group_wanted or wanted
 
             if not group_wanted:
-                self._group_pixel[k] = None
-                self._group_since[k] = None
+                # Deliberately does NOT touch self._pixel_dwell_s: whatever
+                # pixel this group was accumulating dwell on (if any) simply
+                # is not visited THIS sample. Its progress must survive --
+                # see __init__'s docstring for why resetting it here was the
+                # bug (a nozzle sitting near a row boundary flaps between
+                # "wanted here" and "wanted next door" every sample, and a
+                # reset-on-any-change rule then never lets either accumulate
+                # enough dwell, no matter how long it fires).
                 continue
 
             # Step 4: dwell tracked once per group, keyed on the FIRST
             # member's (row, col) -- at group_size=1 this is that one
             # nozzle's own (row, col), same key the ungrouped code used.
+            # Accumulated in the persistent per-pixel dict (see __init__),
+            # not reset by a key change -- only removed on completion below.
             first_row, first_col = members[0][1], members[0][2]
             pixel = (first_row, first_col)
-            if self._group_pixel[k] != pixel:
-                self._group_pixel[k] = pixel
-                self._group_since[k] = t
+            dwell = self._pixel_dwell_s.get(pixel, 0.0) + dt
+            self._pixel_dwell_s[pixel] = dwell
 
             # Step 3: the whole group fires together.
             for p, _row, _col, _in_bounds in members:
@@ -465,7 +533,8 @@ class CoverageEngine:
 
             # Step 5: on completion, every in-bounds member actually
             # received ink and must be marked printed -- not just the first.
-            if t - self._group_since[k] >= self.dose_hold_s:
+            if dwell >= self.dose_hold_s:
+                del self._pixel_dwell_s[pixel]
                 for _p, row, col, in_bounds in members:
                     if in_bounds:
                         self._deposit(row, col)

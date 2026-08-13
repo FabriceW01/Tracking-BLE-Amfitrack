@@ -627,6 +627,62 @@ PATTERN_STRIDE × 450 µs` (jetzt `PATTERN_STRIDE = 3`). Wird nur eine Seite ge�
 Tropfenzahl pro Pixel nicht mehr — die Firmware muss bei einer Änderung
 **neu geflasht** werden.
 
+⚠️ **Fehler behoben: Verweildauer ging bei Zeilen-Flapping komplett verloren,
+`coverage.png` zeigte deutlich weniger als real gedruckt wurde.**
+`NOZZLE_PITCH_MM` (0,1 mm) ist feiner als reales Tracker-Rauschen. Steht eine
+Düse nahe an einer Zeilengrenze, kippt die gerundete Zeile von Sample zu
+Sample zwischen zwei Nachbarn — die Engine hat den Verweildauer-Zähler bisher
+bei **jedem** Wechsel auf 0 zurückgesetzt. Die Düse feuert dabei trotzdem
+(`active[p]` wird gesetzt, sobald ein Pixel gewollt ist — unabhängig davon,
+ob die Verweildauer schon erreicht wurde), aber `dose_hold_s` wurde nie
+erreicht, weil der Zähler nie über einen Sample-Wechsel hinweg überlebt hat.
+Reproduziert: Düse (fast) still auf einer Zeilengrenze, nur ±0,001 mm
+Rauschen (zwei Größenordnungen unter realem Sensorrauschen) — **200 von 200
+Samples feuern real, aber 0 Pixel werden als gedruckt verbucht.** Eine
+Rausch-Messreihe zeigt zusätzlich: Mit mehr (realistischerem) Rauschen
+feuert die Düse öfter, aber die verbuchte Fläche geht **runter statt
+rauf** — das genaue Gegenteil dessen, was man erwarten würde:
+
+```
+Rauschen (mm)   Proben mit Feuern   verbuchte Pixel
+         0.00           164/1000                192
+         0.05           491/1000                191
+         0.20           963/1000                173
+```
+
+Behoben, indem die Verweildauer jetzt **pro Pixel** akkumuliert wird
+(`CoverageEngine._pixel_dwell_s`, ein Dict, keyed auf `(row, col)`) statt pro
+Düsen-/Gruppen-Slot mit Reset bei jedem Zeilenwechsel. Ein Wechsel weg von
+einem Pixel — sei es Flapping zur Nachbarzeile oder ein längerer Ausflug,
+weil der Wagen woanders hin fährt — lässt die bereits angesammelte
+Verweildauer unangetastet; sie läuft beim nächsten Besuch einfach weiter,
+statt bei 0 neu zu beginnen. Der Eintrag wird erst beim Fertigstellen des
+Pixels aus dem Dict entfernt, der Speicherbedarf bleibt also auf „gerade
+angefangene, noch nicht fertige Pixel" begrenzt, nicht auf die Bildgröße.
+
+Kleine, bewusst hingenommene Verhaltensänderung dabei: Der pro-Sample-Anteil
+(`dt`, ungefähr ein Poll-Intervall) wird jetzt auch auf das allererste
+Sample eines neuen Pixels angerechnet, statt (wie vorher) erst ab dem
+zweiten — bei `poll_hz=500` (Default) ändert das nichts an der
+Mindest-Sample-Zahl für eine Fertigstellung, weil `dose_hold_s` (4,05 ms)
+mehr als ein Poll-Intervall (2,00 ms) braucht.
+
+**Neue Tests** (`tests/test_coverage.py`):
+
+```
+test_dwell_survives_flapping_between_two_neighbouring_rows
+test_dwell_resumes_after_the_group_stops_being_wanted_for_a_while
+test_dwell_flap_MUTATION_check_resetting_on_key_change_reintroduces_the_bug
+```
+
+Zusätzlich musste `test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all`s
+unabhängige Referenzimplementierung aktualisiert werden — sie bildete bisher
+exakt die alte, jetzt behobene Reset-Logik nach und hätte den Fix sonst als
+„Abweichung" markiert, obwohl die neue Engine hier richtig liegt.
+Mutationsgeprüft direkt gegen die echte Vorher-Version aus der Git-Historie
+(nicht nur gegen eine Nachbildung im Test): Beide neuen Tests fangen sie
+zuverlässig.
+
 ### Tintenausbreitung: `--spray-radius-mm` / `--spray-strength`
 
 Ein echter Tropfen landet nicht exakt in *einer* Rasterzelle, er benetzt eine
