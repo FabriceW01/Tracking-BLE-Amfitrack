@@ -81,6 +81,44 @@ Kalibrierung nötig) weiterhin `--mode line` verwenden.
 `--page-frame simple` überspringt die Seiten-Kalibrierung komplett und nimmt
 direkt das Amfitrack-Koordinatensystem als Seiten-Rahmen:
 
+> **Gierwinkel im einfachen Modus: absoluter Twist um die z-Achse.**
+> Der Gierwinkel kommt hier aus `rotation.twist_about_axis` — der vom
+> Hardware-Betreiber selbst erprobten Berechnung aus dessen
+> `amfitrack_live_pose.py` (`quaternion_twist_angle_deg` mit Achse
+> `(0, 0, 1)`), wortwörtlich portiert und über 20 000 Zufallsquaternionen ×
+> 4 Achsen gegen die Vorlage geprüft (größte Abweichung 2,3 · 10⁻¹³ Grad).
+>
+> Der Unterschied zur vorherigen Rechnung (`yaw_about_normal`): **keine
+> Referenzpose nötig.** Es ist der absolute Twist des Wagens um die Achse,
+> nicht die Drehung relativ zu einem aufgenommenen Boresight. Genau das war
+> hier wiederholt die Schwachstelle — blinde Erfassung beim ersten Sample
+> greift irgendeine Pose ab (BLE noch nicht eingeschwungen, Hand noch nicht
+> ruhig), und der gespeicherte Boresight der Anlage lag ~110° neben „flach".
+> Eine absolute Ablesung hat dieses Fehlerbild nicht: dieselbe physische
+> Orientierung liefert lauf für lauf denselben Wert. Zusätzlich ist der Wert
+> auf ±180° gewickelt und damit immun gegen die Quaternion-Doppel­überdeckung
+> (`q` und `−q` lesen gleich).
+>
+> An deinem echten 360°-Handdreh-Datensatz nachgemessen: Verstärkung
+> (gemeldeter Gierwinkel pro Grad echter Drehung, endpunktgemessen) **0,994
+> bis 1,006**, effektiv monoton (ein einziger „Rückschritt" über 242 Samples,
+> und der beträgt exakt 0,0°), Gesamtsumme 366,9° für eine 360°-Handdrehung.
+>
+> Ein aufgenommener oder per `--simple-boresight` gesetzter Boresight
+> verschiebt weiterhin nur den **Nullpunkt** (sein eigener Twist um dieselbe
+> Achse wird abgezogen), damit die Pose, an der er erfasst wurde, weiterhin
+> 0° liest.
+>
+> **Nicht** umgestellt wurden Roll/Nick: Drei unabhängige Einzelachsen-Twists
+> sind keine orthogonale Zerlegung einer Drehung — so gelesen meldet eine
+> *reine* Drehung um die Normale bereits Ausschläge auf den anderen beiden
+> Achsen (gemessen: 15° flache Drehung aus der realen Montagepose ergibt 15°
+> „Roll"). Für die Live-Anzeige des Betreibers, wo jede Achse für sich
+> betrachtet wird, ist das in Ordnung; hier sind Roll/Nick aber gerade der
+> „steht der Wagen schief?"-Indikator und wären damit unbrauchbar. Sie
+> behalten deshalb die boresight-relative Swing-Twist-Rechnung. Der
+> **kalibrierte** Modus bleibt vollständig unverändert.
+
 | | einfach (`--page-frame simple`) | kalibriert (Standard) |
 |---|---|---|
 | Spaltenachse `u` | Tracker-**x** | abgefahrene Spaltenkante |

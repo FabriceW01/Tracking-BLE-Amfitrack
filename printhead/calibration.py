@@ -265,6 +265,19 @@ class PageCalibration:
     col_sample_count: Optional[int] = None
     row_sample_count: Optional[int] = None
     normal_tilt_deg: Optional[float] = None
+    # True only for simple_frame() below: report cart angles as the cart's
+    # ABSOLUTE twist about each page axis (rotation.twist_about_axis, the
+    # hardware owner's own known-good readout) instead of rotation relative
+    # to a captured boresight pose. See tracking.PageMapper.project.
+    #
+    # Lives on the calibration rather than being a PageMapper argument so no
+    # caller can construct a simple frame and forget to opt in -- every
+    # simple frame comes from simple_frame(), which sets it. Deliberately
+    # NOT serialised by to_dict/from_dict: a simple frame is built fresh
+    # from --page-frame simple on every run and is never saved, while a
+    # LOADED calibration is by definition a traced one, which must keep the
+    # boresight-relative behaviour its own tests pin.
+    absolute_twist_yaw: bool = False
 
     @classmethod
     def simple_frame(cls, boresight_quat: Optional[np.ndarray] = None) -> "PageCalibration":
@@ -319,6 +332,7 @@ class PageCalibration:
             e_row=np.array([0.0, 1.0, 0.0]),
             boresight_quat=(np.array(boresight_quat, dtype=float)
                             if boresight_quat is not None else None),
+            absolute_twist_yaw=True,
         )
 
     def project(self, pos) -> "tuple[float, float, float]":

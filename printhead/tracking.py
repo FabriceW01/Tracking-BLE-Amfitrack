@@ -38,9 +38,16 @@ from .geometry import (
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
-from .rotation import cart_rotation_angles, yaw_about_normal
+from .rotation import cart_rotation_angles, twist_about_axis, yaw_about_normal
 
 _AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
+
+
+def _wrap_pi(angle_rad: float) -> float:
+    """Wrap to ``(-pi, +pi]`` -- used when subtracting a boresight's own
+    twist from a live one, since the difference of two already-wrapped
+    angles can land outside the range (see PageMapper.project)."""
+    return (angle_rad + math.pi) % (2.0 * math.pi) - math.pi
 
 
 # ============================================================================
@@ -319,7 +326,57 @@ class PageMapper:
             placement sample to sample.
         """
         u, v, z = self.calibration.project(pos)
-        if self.calibration.boresight_quat is not None and quat is not None:
+        if self.calibration.absolute_twist_yaw and quat is not None:
+            # Simple frame: the cart's ABSOLUTE twist about each page axis,
+            # no reference pose subtracted -- the hardware owner's own
+            # known-good readout (see rotation.twist_about_axis, a faithful
+            # port of their amfitrack_live_pose.py). This needs no boresight
+            # at all, which is the point: in this frame a captured reference
+            # has repeatedly been the weak link (blind first-sample capture
+            # grabbing whatever pose the cart was in; the rig's saved
+            # boresight measuring ~110 deg off flat), and an absolute
+            # reading has no such failure mode -- the same physical
+            # orientation always reads the same, run to run.
+            #
+            # The page axes ARE the tracker axes here (simple_frame sets
+            # e_col = x, e_row = y, so the normal is z), so twisting about
+            # them is exactly the operator's axis-(0,0,1)/(1,0,0)/(0,1,0)
+            # calls. Written against the calibration's own axes rather than
+            # hardcoded x/y/z so it stays honest if simple_frame's axes
+            # ever change.
+            #
+            # A captured/pinned boresight, when present, only shifts the
+            # ZERO POINT: its own twist about the same axis is subtracted,
+            # so the pose it was captured at still reads 0 -- preserving
+            # --simple-boresight's meaning without reintroducing the
+            # boresight-relative math it used to rely on. With no boresight
+            # the reading is simply absolute.
+            normal = np.cross(np.asarray(self.calibration.e_col, dtype=float),
+                              np.asarray(self.calibration.e_row, dtype=float))
+            bore = self.calibration.boresight_quat
+            yaw = twist_about_axis(quat, normal)
+            if bore is not None:
+                yaw = _wrap_pi(yaw - twist_about_axis(bore, normal))
+            self.last_yaw_rad = yaw + self.boresight_offset_rad
+
+            # Roll/pitch deliberately NOT switched to the same per-axis
+            # twist. Three independent single-axis twists are not an
+            # orthogonal decomposition of one rotation: read that way, a
+            # PURE turn about the normal already makes the other two axes
+            # report nonzero (measured: a flat 15 deg turn from the rig's
+            # real mounting pose reads 15 deg of "roll"). That is fine for
+            # the operator's live readout, where each axis is looked at on
+            # its own, but here roll/pitch are specifically the "is the cart
+            # tilted?" indicator, and a yaw-driven reading would make them
+            # useless for that. They therefore keep the boresight-relative
+            # swing-twist below, and stay 0.0 when no boresight exists --
+            # unchanged behaviour. Only the Z-AXIS ROTATION was asked to
+            # move to the absolute twist, and only that moved.
+            if bore is not None:
+                self.last_roll_rad, self.last_pitch_rad, _ = cart_rotation_angles(
+                    quat, bore, self.calibration.e_col, self.calibration.e_row
+                )
+        elif self.calibration.boresight_quat is not None and quat is not None:
             self.last_yaw_rad = yaw_about_normal(
                 quat, self.calibration.boresight_quat,
                 self.calibration.e_col, self.calibration.e_row

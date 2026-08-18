@@ -138,6 +138,63 @@ def _normalize_quat(quat) -> "tuple[float, float, float, float]":
     return (float(x), float(y), float(z), float(w))
 
 
+def twist_about_axis(quat, axis) -> float:
+    """
+    Signed ABSOLUTE twist (radians, wrapped to ``(-pi, +pi]``) of ``quat``
+    about the fixed world axis ``axis`` -- a swing-twist decomposition of the
+    orientation itself, with NO reference/boresight pose subtracted.
+
+    Supplied by the hardware owner as their own known-good z-rotation
+    readout (``amfitrack_live_pose.py``'s ``quaternion_twist_angle_deg``,
+    called with axis ``(0, 0, 1)``) and adopted verbatim for the simple page
+    frame -- see ``tracking.PageMapper``. Kept a faithful port rather than
+    re-derived: same normalisation of the input quaternion, same
+    ``2 * atan2(dot(v, axis), w)``, same wrap to +-180 degrees.
+
+    How this differs from ``yaw_about_normal``, and why the simple frame
+    wants THIS one:
+
+      * **No boresight.** ``yaw_about_normal`` reports rotation relative to
+        a captured reference pose; this reports the cart's absolute twist
+        about the axis. The simple frame's whole point is working without a
+        traced calibration, and a captured reference has repeatedly been the
+        weak link in practice (blind first-sample auto-capture picking up
+        whatever pose the cart happened to be in; the rig's own saved
+        boresight measuring ~110 deg away from flat). An absolute reading
+        has no such failure mode: the same physical orientation always
+        gives the same number, run to run.
+      * **Wrapped to +-180.** ``yaw_about_normal`` deliberately spans
+        ``(-360, +360]`` (see its docstring); this wraps, matching the
+        operator's script exactly.
+      * **Double-cover safe.** ``q`` and ``-q`` are the same physical
+        orientation, and unlike ``yaw_about_normal``'s wide range this
+        formula's wrap makes both give the same answer.
+
+    ``axis`` need not be unit length (it is normalised here). A zero-length
+    axis returns 0.0 rather than raising -- the operator's own version does
+    the same, and a degenerate axis has no meaningful twist to report.
+    """
+    x, y, z, w = _normalize_quat(quat)
+    axis = np.asarray(axis, dtype=float)
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm < 1e-12:
+        return 0.0
+    ax, ay, az = axis / axis_norm
+
+    dot_v_axis = x * ax + y * ay + z * az
+    # Normalising (w, dot) before atan2 is redundant for the angle itself
+    # (atan2 is scale-invariant) but is kept to mirror the source script
+    # line for line; it also gives the near-zero guard below something
+    # meaningful to test.
+    twist_norm = math.hypot(w, dot_v_axis)
+    if twist_norm < 1e-12:
+        return 0.0
+
+    angle = 2.0 * math.atan2(dot_v_axis / twist_norm, w / twist_norm)
+    # Wrap to (-pi, +pi]: 2*atan2 spans (-2pi, +2pi] on its own.
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
 def yaw_about_normal(quat, boresight_quat, e_col, e_row) -> float:
     """
     Signed yaw (radians) of the cart about the page normal, relative to the
