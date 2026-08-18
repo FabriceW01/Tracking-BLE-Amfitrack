@@ -623,15 +623,63 @@ def test_zero_at_nozzle_does_not_disturb_yaw_readout():
     assert abs(math.degrees(mapper.last_yaw_rad) - 37.5) < 1e-9
 
 
-def test_simple_frame_without_a_captured_reference_applies_no_rotation():
-    # No orientation at START (tracker reported none): rather than reference
-    # a wrong pose, the frame must fall back to no rotation correction at all
-    # -- the same safe behaviour as a pre-boresight traced calibration.
+def test_simple_frame_without_a_captured_reference_reads_absolute_twist():
+    # PREMISE CHANGED BY DESIGN (was: "applies no rotation"). The simple
+    # frame now reports the cart's ABSOLUTE twist about each page axis
+    # (rotation.twist_about_axis, the hardware owner's own known-good
+    # readout), so it no longer needs -- and no longer waits for -- a
+    # captured reference pose at all. The old fallback existed because a
+    # boresight-relative yaw is meaningless without a reference; an
+    # absolute twist has no such dependency, which is exactly why it was
+    # adopted (a captured reference kept being the weak link in the field).
     mapper = PageMapper(PageCalibration.simple_frame())
     mapper.capture_boresight(None)                  # explicit no-op
     assert mapper.calibration.boresight_quat is None
     mapper.project(np.array([1.0, 2.0, 3.0]), _quat_about_z(37.5))
-    assert mapper.last_yaw_rad == 0.0
+    assert abs(math.degrees(mapper.last_yaw_rad) - 37.5) < 1e-9
+
+
+def test_simple_frame_absolute_twist_is_repeatable_without_any_reference():
+    # The property the absolute reading buys, pinned directly: the SAME
+    # physical orientation must give the SAME yaw on two independently
+    # constructed mappers, with no shared reference pose and no matching
+    # start-up sequence. The boresight-relative version could not do this
+    # -- its answer depended on whatever pose each run happened to capture.
+    q = _quat_mul(_quat_about_z(64.0), (0.479, 0.510, -0.511, 0.499))
+    a = PageMapper(PageCalibration.simple_frame())
+    b = PageMapper(PageCalibration.simple_frame())
+    b.project(np.array([50.0, 60.0, 0.0]), _quat_about_z(200.0))   # unrelated history
+    a.project(np.zeros(3), q)
+    b.project(np.zeros(3), q)
+    assert abs(a.last_yaw_rad - b.last_yaw_rad) < 1e-12
+
+
+def test_simple_frame_absolute_twist_is_double_cover_invariant():
+    # q and -q are the same physical orientation. yaw_about_normal's wide
+    # (-360, +360] range is not invariant to that (see its docstring); the
+    # wrapped absolute twist is, so the simple frame cannot report a
+    # 360-degree jump from a sign flip alone.
+    q = np.array(_quat_mul(_quat_about_z(143.0), (0.479, 0.510, -0.511, 0.499)))
+    m = PageMapper(PageCalibration.simple_frame())
+    m.project(np.zeros(3), q)
+    plus = m.last_yaw_rad
+    m.project(np.zeros(3), -q)
+    assert abs(plus - m.last_yaw_rad) < 1e-12
+
+
+def test_simple_frame_pinned_boresight_only_shifts_the_zero_point():
+    # --simple-boresight keeps its meaning: the pinned pose still reads 0,
+    # and a turn away from it still reads the size of that turn -- but it is
+    # now a plain offset on the absolute twist, not a return to the
+    # boresight-relative math.
+    q_mount = np.array([0.479, 0.510, -0.511, 0.499])
+    q_mount = q_mount / np.linalg.norm(q_mount)
+    mapper = PageMapper(PageCalibration.simple_frame(boresight_quat=q_mount))
+    mapper.project(np.zeros(3), q_mount)
+    assert abs(math.degrees(mapper.last_yaw_rad)) < 1e-9      # reference reads 0
+    for deg in (15.0, 90.0, -40.0):
+        mapper.project(np.zeros(3), _quat_mul(_quat_about_z(deg), q_mount))
+        assert abs(math.degrees(mapper.last_yaw_rad) - deg) < 1e-9, deg
 
 
 def test_captured_reference_makes_a_flat_turn_read_out_exactly():
