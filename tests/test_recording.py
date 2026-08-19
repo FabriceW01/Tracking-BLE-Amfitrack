@@ -364,6 +364,116 @@ def test_render_coverage_without_sample_times_still_draws_plain_dots():
             os.remove(path)
 
 
+# ================================== render_coverage: fired (physical ink) mask
+def _cov_path(name):
+    return os.path.join(os.environ.get("TMPDIR", "/tmp"), name)
+
+
+def test_render_coverage_covered_panel_follows_fired_not_printed():
+    # The reported bug: `printed` is dose-COMPLETION bookkeeping and lags
+    # badly on a fast pass, so a printed-based COVERED panel showed vertical
+    # striping over squares that came out solid on paper. Given `fired`, the
+    # image must be drawn from the physical ink instead.
+    #
+    # Asserted against a MISSED panel that is genuinely empty rather than
+    # against pixel counts: with fired covering all the ink, `ink & ~fired`
+    # is empty by construction, so a render that still shows missed pixels
+    # would prove the panel is being fed `printed`. `printed` here leaves
+    # exactly the alternating columns that produced the reported stripes.
+    h, w = 20, 8
+    ink = np.ones((h, w), dtype=bool)
+    fired = np.ones((h, w), dtype=bool)           # everything got ink
+    printed = np.zeros((h, w), dtype=bool)
+    printed[:, ::2] = True                        # only half completed a dose
+
+    with_fired = _cov_path("printhead_cov_fired.png")
+    printed_only = _cov_path("printhead_cov_printed_only.png")
+    try:
+        assert render_coverage(printed, ink, with_fired, fired=fired) is True
+        assert render_coverage(printed, ink, printed_only) is True
+        with open(with_fired, "rb") as fa, open(printed_only, "rb") as fb:
+            assert fa.read() != fb.read(), \
+                "passing fired must actually change what gets drawn"
+    finally:
+        for p in (with_fired, printed_only):
+            if os.path.exists(p):
+                os.remove(p)
+
+    # Unambiguous proof of which mask drives the drawing: a pass where the
+    # dose NEVER completed anywhere has an all-empty `printed`, so the old
+    # printed-only call has nothing to draw and bails -- while the same pass
+    # with ink genuinely on the paper renders. Only possible if COVERED
+    # follows `fired`.
+    nothing_completed = np.zeros((h, w), dtype=bool)
+    only_fired = _cov_path("printhead_cov_only_fired.png")
+    try:
+        assert render_coverage(nothing_completed, ink,
+                               _cov_path("unused.png")) is False
+        assert render_coverage(nothing_completed, ink, only_fired,
+                               fired=fired) is True
+    finally:
+        if os.path.exists(only_fired):
+            os.remove(only_fired)
+
+
+def test_render_coverage_returns_false_when_nothing_was_inked():
+    # Even if `printed` were somehow non-empty, an empty `fired` means the
+    # paper is blank and there is nothing to draw.
+    ink = np.ones((10, 5), dtype=bool)
+    printed = np.ones((10, 5), dtype=bool)
+    fired = np.zeros((10, 5), dtype=bool)
+    assert render_coverage(printed, ink, _cov_path("nope.png"), fired=fired) is False
+
+
+def test_render_coverage_adds_a_thin_panel_when_dose_lagged_behind_ink():
+    # "inked but under-dosed" is a different problem from "missed", and calls
+    # for a different correction (slow down vs. go back over it), so it gets
+    # its own panel -- which makes the image taller.
+    h, w = 20, 8
+    ink = np.ones((h, w), dtype=bool)
+    fired = np.ones((h, w), dtype=bool)
+    lagging = np.zeros((h, w), dtype=bool)
+    lagging[:, ::2] = True                        # half under-dosed
+    complete = np.ones((h, w), dtype=bool)        # nothing under-dosed
+
+    with_thin = _cov_path("printhead_cov_thin.png")
+    without_thin = _cov_path("printhead_cov_nothin.png")
+    try:
+        assert render_coverage(lagging, ink, with_thin, fired=fired) is True
+        assert render_coverage(complete, ink, without_thin, fired=fired) is True
+        from PIL import Image
+        assert Image.open(with_thin).size[1] > Image.open(without_thin).size[1], \
+            "the THIN panel should add height only when it has content"
+    finally:
+        for p in (with_thin, without_thin):
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def test_render_coverage_without_fired_reproduces_the_old_image_exactly():
+    # Backward compatibility for every caller/test predating `fired`:
+    # omitting it must make `printed` stand in for both, byte-for-byte.
+    h, w = 30, 6
+    ink = np.zeros((h, w), dtype=bool)
+    ink[5:15, 1:4] = True
+    printed = np.zeros((h, w), dtype=bool)
+    printed[5:15, 1:3] = True
+
+    a = _cov_path("printhead_cov_old.png")
+    b = _cov_path("printhead_cov_explicit.png")
+    try:
+        assert render_coverage(printed, ink, a) is True
+        assert render_coverage(printed, ink, b, fired=printed) is True
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            assert fa.read() == fb.read(), \
+                "fired=printed must be identical to omitting fired"
+    finally:
+        for p in (a, b):
+            if os.path.exists(p):
+                os.remove(p)
+
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

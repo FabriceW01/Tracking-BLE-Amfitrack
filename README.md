@@ -1350,6 +1350,31 @@ gezeichnete Spur ist der **Sensor-Mittelpunkt**, orange die **Düsenleisten-Mitt
 prüfen — ist der Wagen dort nie vorbeigekommen, oder war er zu schnell für
 `--dose-hold-s`?
 
+⚠️ **Fehler behoben: `coverage.png` zeigte senkrechte Streifen, obwohl der echte
+Druck vollflächig war.** COVERED/MISSED wurden aus `printed` gezeichnet — das ist
+aber die **Dosis-Abschluss**-Buchhaltung, nicht die tatsächlich gelandete Tinte.
+Eine Düse feuert, sobald ihr Pixel gewollt ist; `printed` wird dagegen erst
+gesetzt, wenn die Verweildauer `--dose-hold-s` erreicht ist, wofür eine Spalte
+**mindestens zwei Samples** braucht. Gemessen an den echten Einstellungen der
+Anlage (`--mm-per-column 0.087`, `--dose-hold-s 0.001`, `--poll-hz 500`):
+
+| Wagen-Geschwindigkeit | Samples/Spalte | `printed` | tatsächlich gefeuert |
+|---|---|---|---|
+| 17,3 mm/s | 2,51 | 99,3 % | 99,3 % |
+| 25 mm/s | 1,74 | **73,3 %** | 99,3 % |
+| 30 mm/s | 1,45 | **44,2 %** | 99,3 % |
+
+Unterhalb von zwei Samples pro Spalte schließt keine Dosis mehr ab, die Düse hat
+aber auf dem einen Sample gefeuert — das Papier ist voll, das Bild zeigte Lücken.
+`CoverageEngine.fired` hält jetzt zusätzlich fest, wo Tinte **physisch** gelandet
+ist (gegen eine unabhängige Rekonstruktion der gesendeten BLE-Patterns bit-genau
+geprüft), und COVERED/MISSED sowie die `Covered N/M`-Zeile stammen daraus.
+`printed` behält seine Dosis-Rolle unverändert (steuert Nachfeuern und
+`coverage.done`, und die `--dose-hold-s`↔`PATTERN_STRIDE`-Tropfenzahl hängt davon
+ab). Weichen beide voneinander ab, kommt ein zusätzliches **THIN**-Panel dazu
+(Tinte da, Dosis unvollständig) plus eine Zeile in der Zusammenfassung — das
+bedeutet „langsamer fahren", nicht „Stelle verpasst".
+
 Das ganze PNG wird dabei standardmäßig **3-fach vergrößert** (`recording.
 DEFAULT_RECORD_SCALE`) — INTENDED/COVERED/MISSED blockig (jeder Block bleibt exakt
 eine reale Düsenzeile/-spalte, kein Weichzeichnen, das eine falsche
