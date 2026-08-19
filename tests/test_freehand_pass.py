@@ -1546,6 +1546,133 @@ def test_verbose_status_line_does_not_garble_the_final_message():
                      r"Finished pass; sent blank frame\.", text), text
 
 
+# ============================ pass reporting counts physical ink, not dose
+# A pass where the dose completes NOWHERE: one sample per column (so dwell
+# never accumulates) and, once the sweep ends, the cart parks far off the
+# page rather than sitting on the last column -- without that park the final
+# column would keep collecting samples and complete after all, which is
+# exactly what made an earlier version of these tests pass even with the
+# fix reverted.
+_FAST_PASS = dict(dose_hold_s=0.05, poll_hz=500.0, timeout_s=1.0)
+
+
+def _fast_tracker():
+    return ScriptedTracker([(float(c), 0.0, 0.0) for c in range(40)]
+                           + [(0.0, 1000.0, 0.0)])
+
+def test_pass_end_covered_count_reports_physical_ink_not_dose_completion():
+    # Reported from hardware: the real print's fill was perfect while
+    # coverage.png (and the count beside it) showed heavy gaps. The cause is
+    # that `printed` only marks a pixel once its dose completed, which needs
+    # ~2 samples on the same column -- a fast pass inks everything but
+    # completes almost nothing. The pass-end count must describe the paper.
+    ink = np.ones((30, 40), dtype=bool)
+    ctrl = _controller(ink, **_FAST_PASS)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+    text = out.getvalue()
+
+    m = re.search(r"Covered (\d+)/(\d+) ink pixels", text)
+    assert m, text
+    # Decisive: on this pass the dose completes NOWHERE, so a count taken
+    # from `printed` reads exactly 0 while the paper is fully inked.
+    assert int(m.group(1)) == int(m.group(2)), \
+        ("every swept pixel received ink, so the count must be complete "
+         "-- reading 0 here means the count came from the dose mask:\n" + text)
+
+
+def test_pass_end_flags_inked_but_underdosed_pixels_separately():
+    # "inked but light" and "missed entirely" need different corrections, so
+    # the summary says which one happened rather than folding them together.
+    ink = np.ones((30, 40), dtype=bool)
+    ctrl = _controller(ink, **_FAST_PASS)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+    text = out.getvalue()
+    assert "never completed --dose-hold-s" in text, text
+
+
+def test_pass_end_omits_the_underdose_note_when_every_dose_completed():
+    # On a normally-paced pass the two counts agree and the extra line would
+    # be pure noise.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+    assert "Page fully covered." in text, text
+    assert "never completed --dose-hold-s" not in text, text
+
+
+def test_progress_json_carries_both_the_inked_and_full_dose_counts():
+    ink = np.ones((30, 40), dtype=bool)
+    ctrl = _controller(ink, progress_json=True, **_FAST_PASS)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+    events = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    done = [e for e in events if e["event"] == "coverage_done"][-1]
+    # Decisive: the two must be REPORTED SEPARATELY and actually differ here
+    # -- a `covered` taken from the dose mask would equal full_dose (both 0).
+    assert done["full_dose"] == 0, done
+    assert done["covered"] > done["full_dose"], done
+
+
+def test_verbose_live_count_agrees_with_the_pass_end_count_on_a_fast_pass():
+    # The live --verbose count and the pass-end summary must describe the
+    # SAME quantity. On a slow pass they agree trivially (dose completes
+    # everywhere), so this pins the fast case, where a live count read from
+    # the dose mask would show 0 while the summary reports full coverage --
+    # exactly the contradiction that made the coverage report untrustworthy.
+    ink = np.ones((30, 40), dtype=bool)
+    ctrl = _controller(ink, verbose=True, **_FAST_PASS)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+    text = out.getvalue()
+
+    final = re.search(r"Covered (\d+)/(\d+) ink pixels", text)
+    assert final, text
+    live = [re.search(r"covered (\d+)/(\d+)", l)
+            for l in re.split(r"[\r\n]+", text) if "covered " in l]
+    live = [m for m in live if m]
+    assert live, text
+    assert live[-1].groups() == final.groups(), (live[-1].group(0), final.group(0))
+
+
+def test_record_is_given_the_fired_mask_so_the_image_matches_the_paper():
+    # Guards the wiring specifically: the controller must hand
+    # render_coverage the physical-ink mask, not just the dose mask.
+    from printhead import recording as recording_module
+    captured = {}
+    real = recording_module.render_coverage
+
+    def fake(printed, ink, path, **kw):
+        captured["fired"] = kw.get("fired")
+        return real(printed, ink, path, **kw)
+
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        ctrl = _controller(ink, timeout_s=5.0,
+                           record=os.path.join(tmp, "coverage.png"))
+        tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+        recording_module.render_coverage = fake
+        try:
+            with redirect_stdout(io.StringIO()):
+                asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+        finally:
+            recording_module.render_coverage = real
+
+    assert captured.get("fired") is not None, \
+        "render_coverage was called without the fired mask"
+
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

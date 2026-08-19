@@ -855,7 +855,7 @@ class PrintController:
 
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None
-        prev_printed = coverage.printed.copy() if pj else None
+        prev_printed = coverage.fired.copy() if pj else None
         done_reason = None
         speed_warn_state = False   # current value of the speed-warning flag
         last_verbose_t = None      # throttle for --verbose's live status line
@@ -989,7 +989,11 @@ class PrintController:
                         v_row = int(round(v_mm / NOZZLE_PITCH_MM))
                         v_col = (int(round(u_mm / t.mm_per_column))
                                 if t.mm_per_column else 0)
-                        covered = int(coverage.printed.sum())
+                        # Physically-inked count, same quantity the pass-end
+                        # summary and the rendered COVERED panel report --
+                        # a live number that later disagreed with the final
+                        # one would be worse than no live number at all.
+                        covered = int((coverage.ink & coverage.fired).sum())
                         total = int(coverage.ink.sum())
                         line = (f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
                                f"page u={u_mm:8.2f}  v={v_mm:8.2f} mm  "
@@ -1017,17 +1021,23 @@ class PrintController:
                     new_cells = []
                     if pj:
                         # NOT gated on `changed`: a nozzle's dose completing
-                        # updates printed[row, col] on this tick, but its bit
+                        # updates its mask entry on this tick, but its bit
                         # in `pattern` only flips off on the *next* tick (once
                         # wanted becomes False for that pixel) -- so `changed`
                         # lags a fresh completion by one sample and would miss
                         # it here if the pass ends (coverage.done) before that
                         # next tick ever happens.
-                        new_mask = coverage.printed & ~prev_printed
+                        #
+                        # Diffed against `fired`, not `printed`: the UI canvas
+                        # draws what is on the paper, and must agree with the
+                        # COVERED panel and the pass-end count rather than
+                        # showing gaps that only exist in the dose bookkeeping
+                        # (see CoverageEngine.fired).
+                        new_mask = coverage.fired & ~prev_printed
                         if new_mask.any():
                             rows, cols = np.nonzero(new_mask)
                             new_cells = list(zip(rows.tolist(), cols.tolist()))
-                            prev_printed = coverage.printed.copy()
+                            prev_printed = coverage.fired.copy()
 
                     if pj:
                         col = int(round(u_mm / t.mm_per_column)) if t.mm_per_column else 0
@@ -1095,17 +1105,26 @@ class PrintController:
                 from .recording import render_coverage
                 if render_coverage(coverage.printed, coverage.ink, self.record,
                                    sensor_path=sensor_path, nozzle_path=nozzle_path,
-                                   sample_times=sample_times):
+                                   sample_times=sample_times,
+                                   fired=coverage.fired):
                     if not pj:
                         print(f"Coverage reconstruction -> {self.record}")
                 elif not pj:
                     print("Nothing was recorded (nothing printed).")
 
-            covered = int(coverage.printed.sum())
+            # "Covered" counts where ink physically LANDED, matching the
+            # rendered image's COVERED panel and the paper itself -- not the
+            # dose-completion mask, which undercounts badly above ~2 samples
+            # per column (see CoverageEngine.fired). full_dose is reported
+            # alongside it whenever the two differ, since that gap is the
+            # actionable "slow down" signal rather than a coverage hole.
+            covered = int((coverage.ink & coverage.fired).sum())
+            full_dose = int((coverage.ink & coverage.printed).sum())
             total = int(coverage.ink.sum())
             if pj:
                 print(json.dumps({"event": "coverage_done", "reason": done_reason,
                                   "covered": covered, "total": total,
+                                  "full_dose": full_dose,
                                   "in_bounds_samples": in_bounds_samples,
                                   "samples": samples,
                                   "u_min": round(u_min, 3) if u_min is not None else None,
@@ -1140,6 +1159,16 @@ class PrintController:
             else:
                 print(f"Finished pass; sent blank frame. Covered {covered}/{total} "
                       f"ink pixels.")
+                # Only when it actually differs: on a normally-paced pass the
+                # two are equal and a second identical-looking number would
+                # just be noise.
+                if full_dose < covered:
+                    thin = covered - full_dose
+                    print(f"  of those, {thin} got ink but never completed "
+                          f"--dose-hold-s ({full_dose}/{total} did) -- the cart "
+                          f"passed over them faster than the dose needs, so "
+                          f"they are inked but lighter. Move slower, or raise "
+                          f"--poll-hz, if the print looks faint there.")
 
     # ---------------------------------------------- dry-run simulation path
     async def _dry_run_line_pass(self) -> None:

@@ -120,19 +120,33 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
                     nozzle_path: Optional[List[Tuple[int, int]]] = None,
                     sample_times: Optional[List[float]] = None,
                     scale: int = DEFAULT_RECORD_SCALE,
-                    marker_interval_s: float = DEFAULT_MARKER_INTERVAL_S) -> bool:
+                    marker_interval_s: float = DEFAULT_MARKER_INTERVAL_S,
+                    fired: Optional[np.ndarray] = None) -> bool:
     """
     Write a PNG comparing the intended page-mode image to what
-    ``CoverageEngine`` actually covered. Returns False if nothing was
-    printed.
+    ``CoverageEngine`` actually put on paper. Returns False if nothing was
+    inked.
 
     Unlike :meth:`SendRecorder.reconstruct` (line mode), there is nothing to
-    reconstruct here: ``printed`` already IS a true-position record of what
-    got inked, built live by ``CoverageEngine.step()`` sample by sample,
-    rather than modelled after the fact from a send log against an assumed
-    queue-slot layout. A third MISSED panel (ink wanted but never printed)
-    is included since that is the whole open question after a freehand pass
-    -- did the cart cover everything, and if not, where.
+    reconstruct here: the masks already ARE true-position records, built
+    live by ``CoverageEngine.step()`` sample by sample, rather than modelled
+    after the fact from a send log against an assumed queue-slot layout.
+
+    ``fired`` (``CoverageEngine.fired``) is where ink physically landed and
+    is what COVERED/MISSED are drawn from when given; ``printed`` is the
+    dose-COMPLETION mask, which additionally requires a pixel to be held
+    long enough for ``dose_hold_s``. Passing only ``printed`` (the older
+    signature) makes it stand in for both, reproducing the pre-``fired``
+    image exactly. The distinction matters on a real pass: a cart moving
+    faster than roughly two samples per column never completes a dose, so a
+    ``printed``-only image shows dense vertical striping across squares that
+    came out perfectly solid on paper -- see ``CoverageEngine.fired`` for
+    the measured numbers. A MISSED panel (ink wanted, never inked at all) is
+    included since that is the whole open question after a freehand pass --
+    did the cart cover everything, and if not, where -- and a THIN panel
+    (inked, but dose never completed) is added when non-empty, since "you
+    moved too fast here" and "you missed this spot" call for different
+    corrections.
 
     ``sensor_path``/``nozzle_path``, if given, are lists of ``(row, col)``
     pixel coordinates -- one point per live sample, same convention
@@ -169,14 +183,34 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
     """
     printed = np.asarray(printed, dtype=bool)
     ink = np.asarray(ink, dtype=bool)
-    if not printed.any():
+    # COVERED/MISSED report where ink physically LANDED whenever the caller
+    # can say (`fired`), falling back to the dose-completion mask otherwise.
+    # These are not the same picture: `printed` only marks a pixel once its
+    # dose completed, so a pass moving faster than ~2 samples per column
+    # leaves heavy vertical striping in a `printed`-based image while the
+    # paper itself came out solid -- see CoverageEngine.fired for the
+    # measured numbers behind that. The fallback keeps older/simpler callers
+    # (and every test written before `fired` existed) rendering exactly as
+    # they did.
+    fired = printed if fired is None else np.asarray(fired, dtype=bool)
+    if not fired.any():
         return False
-    missed = ink & ~printed
+    missed = ink & ~fired
+    # Got ink, but never enough dwell for the full intended dose -- the
+    # information the old `printed`-based COVERED panel was really showing,
+    # kept as its own panel rather than silently folded into "covered". A
+    # large THIN area means "slow down", not "you missed a spot". Omitted
+    # entirely when empty (the common, healthy case) so the usual image
+    # keeps its familiar three mask panels.
+    thin = ink & fired & ~printed
     panels = [
         ("INTENDED", ink),
-        (f"COVERED ({int(printed.sum())}/{int(ink.sum())} ink pixels)", printed),
+        (f"COVERED ({int((ink & fired).sum())}/{int(ink.sum())} ink pixels)", fired),
         (f"MISSED ({int(missed.sum())} ink pixels)", missed),
     ]
+    if thin.any():
+        panels.append(
+            (f"THIN ({int(thin.sum())} ink pixels: inked, dose incomplete)", thin))
     extra_rgb_panels = []
     if sensor_path or nozzle_path:
         n_pts = max(len(sensor_path or ()), len(nozzle_path or ()))

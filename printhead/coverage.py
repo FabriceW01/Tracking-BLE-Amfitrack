@@ -175,6 +175,34 @@ class CoverageEngine:
             raise ValueError(f"nozzle_group must be >= 1, got {nozzle_group}")
         self.ink = ink
         self.printed = np.zeros_like(ink, dtype=bool)
+        # Where ink PHYSICALLY landed: set for every in-bounds nozzle on
+        # every sample it actually fired, which is the instant its pixel is
+        # wanted -- NOT gated on dose completion the way `printed` is.
+        #
+        # The two diverge exactly when a pixel is visited fewer times than
+        # `dose_hold_s` needs, i.e. when the cart is moving fast relative to
+        # mm_per_column. Measured on a simulated pass at the rig's real
+        # settings (mm_per_column 0.087, dose_hold_s 0.001, poll_hz 500),
+        # sweeping a checkerboard:
+        #
+        #   speed     samples/col   printed   fired
+        #   17.3 mm/s     2.51        99.3%   99.3%
+        #   25.0 mm/s     1.74        73.3%   99.3%
+        #   30.0 mm/s     1.45        44.2%   99.3%
+        #
+        # Below two samples per column a pixel never accumulates enough
+        # dwell to be marked printed, yet the nozzle fired on the one sample
+        # it did get, so the paper is fully inked. Reporting `printed` as
+        # "coverage" therefore drew heavy vertical striping over squares that
+        # came out solid on paper -- reported from hardware as "the real
+        # print's fill is perfect, the coverage image looks nothing like it".
+        #
+        # `printed` deliberately keeps its dosing role (it gates re-firing
+        # and `done`, and the dose_hold_s <-> firmware PATTERN_STRIDE drop
+        # count is calibrated against it); this mask exists purely to report
+        # what the paper actually looks like. The gap between them is itself
+        # useful -- see recording.render_coverage's THIN panel.
+        self.fired = np.zeros_like(ink, dtype=bool)
         self.mm_per_column = mm_per_column
         self.dose_hold_s = dose_hold_s
         self.spray_radius_mm = spray_radius_mm
@@ -553,9 +581,16 @@ class CoverageEngine:
                 dwell = 0.0
             self._pixel_dwell_s[pixel] = dwell
 
-            # Step 3: the whole group fires together.
-            for p, _row, _col, _in_bounds in members:
+            # Step 3: the whole group fires together -- and every in-bounds
+            # member that fires physically puts ink on its own cell, right
+            # now, whether or not the dose ever completes there (see
+            # self.fired in __init__). Recorded per member, not just for the
+            # dwell-key pixel, for the same reason _deposit is called for
+            # every member on completion: they all really did fire.
+            for p, row, col, in_bounds in members:
                 active[p] = True
+                if in_bounds:
+                    self.fired[row, col] = True
 
             # Step 5: on completion, every in-bounds member actually
             # received ink and must be marked printed -- not just the first.

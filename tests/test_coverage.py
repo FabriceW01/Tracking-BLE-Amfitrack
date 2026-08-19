@@ -973,6 +973,106 @@ def test_step_MUTATION_check_ignoring_yaw_rad_breaks_the_spread_test():
         "actually exercising yaw_rad")
 
 
+# ============================================ fired (physical ink) vs printed
+def test_fired_marks_a_pixel_on_its_very_first_sample_before_any_dose_completes():
+    # The core semantic: a nozzle puts ink down the instant its pixel is
+    # wanted (active[p]), NOT when the dose finishes. `fired` records that;
+    # `printed` deliberately does not.
+    ink = np.zeros((NUM_NOZZLES, 3), dtype=bool)
+    ink[0, 0] = True
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+
+    pattern, _ = eng.step(0.0, 0.0, 0.0)          # one single sample
+    assert _unpack(pattern)[0] == 1, "nozzle 0 must fire on the first sample"
+    assert eng.fired[0, 0], "fired must record that first firing"
+    assert not eng.printed[0, 0], "dose cannot be complete after one sample"
+
+
+def test_fired_never_marks_a_pixel_no_nozzle_ever_visited():
+    ink = np.ones((NUM_NOZZLES, 4), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    for i in range(5):
+        eng.step(0.0, 0.0, i * 0.05)              # parked on column 0 only
+    assert eng.fired[:, 0].any()
+    assert not eng.fired[:, 1:].any(), "columns never driven over must stay clean"
+
+
+def test_fired_equals_printed_on_a_slow_pass():
+    # No divergence at a pace that comfortably clears dose_hold_s: this is
+    # what makes `fired` a strictly better report rather than a different
+    # one -- on a healthy pass the two pictures are identical.
+    ink = np.ones((NUM_NOZZLES, 6), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
+    t = 0.0
+    for col in range(6):
+        for _ in range(8):                        # 8 samples/column, dt=2ms
+            eng.step(float(col), 0.0, t)
+            t += 0.002
+    assert np.array_equal(eng.fired, eng.printed), \
+        (int(eng.fired.sum()), int(eng.printed.sum()))
+
+
+def test_fast_pass_inks_everything_while_printed_shows_gaps():
+    # THE reported bug, pinned with numbers: at the rig's real settings
+    # (mm_per_column 0.087, dose_hold_s 0.001, poll_hz 500) a cart moving
+    # ~30mm/s gets fewer than two samples per column, so most pixels never
+    # accumulate enough dwell to be marked printed -- yet the nozzle fired
+    # on the one sample each column did get, and the paper came out solid.
+    # A printed-based coverage image therefore drew dense vertical striping
+    # over squares that were physically fine.
+    mm_per_col, dt, speed = 0.087, 1 / 500.0, 30.0
+    ink = np.ones((NUM_NOZZLES, 200), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_col, dose_hold_s=0.001)
+    t = u = 0.0
+    while u < 150 * mm_per_col:
+        eng.step(u, 0.0, t)
+        u += speed * dt
+        t += dt
+
+    swept = ink[:, :150]
+    fired = eng.fired[:, :150]
+    printed = eng.printed[:, :150]
+    assert fired.all(), "every swept pixel physically received ink"
+    assert not printed.all(), "printed is expected to lag at this speed"
+    # Not a marginal difference -- this is why the image looked wrong.
+    assert printed.sum() < 0.75 * fired.sum(), \
+        (int(printed.sum()), int(fired.sum()))
+
+
+def test_fast_pass_MUTATION_check_reporting_printed_reintroduces_the_stripes():
+    # Confirms the test above measures the fix and not a coincidence: the
+    # SAME sweep, read through `printed` (what the coverage image used to
+    # render), leaves whole columns entirely blank -- the vertical stripes.
+    mm_per_col, dt, speed = 0.087, 1 / 500.0, 30.0
+    ink = np.ones((NUM_NOZZLES, 200), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_col, dose_hold_s=0.001)
+    t = u = 0.0
+    while u < 150 * mm_per_col:
+        eng.step(u, 0.0, t)
+        u += speed * dt
+        t += dt
+
+    blank_cols_printed = [c for c in range(150) if not eng.printed[:, c].any()]
+    blank_cols_fired = [c for c in range(150) if not eng.fired[:, c].any()]
+    assert blank_cols_printed, "expected fully blank columns in the printed mask"
+    assert not blank_cols_fired, \
+        f"fired must have no blank columns, got {blank_cols_fired[:5]}"
+
+
+def test_fired_records_every_member_of_a_firing_group_not_just_the_first():
+    # nozzle_group=2 fires both members together (OR rule), so both really
+    # do put ink down -- fired must say so, same reasoning as _deposit being
+    # called for every in-bounds member on completion.
+    ink = np.zeros((NUM_NOZZLES, 2), dtype=bool)
+    ink[0, 0] = True                              # only nozzle 0's pixel wanted
+    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S,
+                         nozzle_group=2)
+    eng.step(0.0, 0.0, 0.0)
+    assert eng.fired[0, 0] and eng.fired[1, 0], \
+        "both group members fire, so both cells receive ink"
+
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
