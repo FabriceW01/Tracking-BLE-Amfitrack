@@ -37,22 +37,25 @@ from printhead.ui.server import _try_parse_json                      # noqa: E40
 
 # =================================================================== geometry
 def test_nozzle_pitch_matches_measured_bar_width():
-    # User re-measurement: 152 nozzles span a 15.2mm-wide bar edge-to-edge,
-    # i.e. 152 cells of NOZZLE_PITCH_MM each (not 151 gaps between centres --
-    # that reading is NOZZLE_BAR_SPAN_MM below, a different, smaller number).
-    # 15.2 / 152 == 0.1 exactly, which is what makes NOZZLE_PITCH_MM the
-    # primary constant now (see geometry.py's comment).
+    # User re-measurement (supersedes an earlier 15.2mm reading -- see
+    # geometry.py's comment for the full history): 152 nozzles span a
+    # 13.2mm-wide bar edge-to-edge, i.e. 152 cells of NOZZLE_PITCH_MM each
+    # (not 151 gaps between centres -- that reading is NOZZLE_BAR_SPAN_MM
+    # below, a different, smaller number). Unlike the earlier 15.2mm
+    # measurement, 13.2 / 152 is not a round number, so there is no
+    # clean-division self-check here -- the cell interpretation is kept
+    # purely for consistency with how the bar was measured before.
     assert NUM_NOZZLES == 152
-    assert NOZZLE_PITCH_MM == 0.1
+    assert math.isclose(NOZZLE_PITCH_MM, 13.2 / 152)
     assert math.isclose(NOZZLE_PITCH_MM * NUM_NOZZLES, NOZZLE_BAR_WIDTH_MM)
-    assert math.isclose(NOZZLE_BAR_WIDTH_MM, 15.2)
+    assert math.isclose(NOZZLE_BAR_WIDTH_MM, 13.2)
 
     # NOZZLE_BAR_SPAN_MM is the OTHER quantity: nozzle-0-to-nozzle-151
     # centre-to-centre distance (151 gaps), used for "nozzle 0 -> bar centre"
     # conversions (tracking.PageMapper) -- deliberately NOT the same value as
-    # NOZZLE_BAR_WIDTH_MM under the new cell-based pitch definition.
+    # NOZZLE_BAR_WIDTH_MM under the cell-based pitch definition.
     assert math.isclose(NOZZLE_PITCH_MM * (NUM_NOZZLES - 1), NOZZLE_BAR_SPAN_MM)
-    assert math.isclose(NOZZLE_BAR_SPAN_MM, 15.1)
+    assert math.isclose(NOZZLE_BAR_SPAN_MM, 151 * 13.2 / 152)
     assert not math.isclose(NOZZLE_BAR_WIDTH_MM, NOZZLE_BAR_SPAN_MM)
 
 

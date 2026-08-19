@@ -23,9 +23,9 @@ and revisits without ever accumulating dose across pixels.
 Cart yaw about the page normal is corrected here on a per-nozzle basis: with
 the bar rotated by ``yaw_rad``, nozzle ``p`` is no longer at the same column
 as nozzle 0 (see ``step()``'s ``yaw_rad`` parameter). Measured from a real
-pass (``pass5.csv``), yaw spans 75.6 deg, which spreads the 15.1mm nozzle-0-
+pass (``pass5.csv``), yaw spans 75.6 deg, which spreads the ~13.1mm nozzle-0-
 to-nozzle-151 span (``NOZZLE_BAR_SPAN_MM``, see geometry.py) across
-~14.6mm (~73 columns at 0.2 mm/col) -- ignoring that put nozzles that were
+~12.7mm (~63 columns at 0.2 mm/col) -- ignoring that put nozzles that were
 nowhere near a wanted pixel into the fired pattern, and vice versa. Only yaw
 is corrected: tilt (pitch/roll) is small by comparison in the same data
 (median 2.7 deg, max 7.8 deg) and is a deliberate, measured non-goal, not an
@@ -200,7 +200,7 @@ class CoverageEngine:
         # Per-PIXEL accumulated dwell time (seconds), keyed on (row, col) --
         # NOT per-group-slot and NOT reset when a group briefly stops being
         # wanted or switches to a different pixel. See step()'s docstring
-        # for why: NOZZLE_PITCH_MM (0.1mm) is finer than realistic tracker
+        # for why: NOZZLE_PITCH_MM (~0.087mm) is finer than realistic tracker
         # position noise, so a nozzle sitting near a row boundary has its
         # rounded (row, col) key flap between two neighbours sample to
         # sample. A per-group-slot "since" timestamp that resets on every
@@ -274,10 +274,10 @@ class CoverageEngine:
 
         The radius is given in MILLIMETRES, not pixels, and converted per
         axis, because the grid is strongly anisotropic: a cell is
-        ``NOZZLE_PITCH_MM`` (0.1mm) tall but ``mm_per_column`` (0.2mm by
-        default) wide, so a physically round drop is about 2:1 elliptical in
-        pixel space. A pixel-count radius would silently mean two different
-        physical distances on the two axes.
+        ``NOZZLE_PITCH_MM`` (~0.087mm) tall but ``mm_per_column`` (0.2mm by
+        default) wide, so a physically round drop is about 2.3:1 elliptical
+        in pixel space. A pixel-count radius would silently mean two
+        different physical distances on the two axes.
 
         Weight falls off linearly with physical distance, NORMALISED so the
         CLOSEST neighbour in the kernel receives exactly ``spray_strength``

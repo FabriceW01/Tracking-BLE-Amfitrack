@@ -273,12 +273,13 @@ class PageMapper:
         it puts the origin at the *sensor*, but ``project()`` deliberately
         reports where the nozzle bar is, a fixed
         ``SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM`` (~62mm) away. Zeroing at the
-        sensor therefore leaves the bar at ``v ~ 54.8mm`` (at the +62.36mm
+        sensor therefore leaves the bar at ``v ~ 55.8mm`` (at the +62.36mm
         sign this constant originally shipped with -- ``62.36 -
         NOZZLE_BAR_SPAN_MM / 2``; magnitude only changes with the
         constant's current sign, the failure mode does not) -- far outside a
-        15.2mm-tall page -- so every sample reads out of bounds and NOTHING
-        prints. Seen for real on the first simulated simple-frame pass.
+        ``NOZZLE_BAR_WIDTH_MM``-tall page (~13.2mm) -- so every sample reads
+        out of bounds and NOTHING prints. Seen for real on the first
+        simulated simple-frame pass.
 
         Shifting the origin by ``d`` along ``e_col`` moves ``u`` by
         ``-d * scale_col`` (see ``PageCalibration.project``), so cancelling a

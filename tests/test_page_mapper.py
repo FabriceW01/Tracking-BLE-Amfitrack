@@ -109,7 +109,9 @@ def test_page_mapper_default_offset_shifts_uv_by_the_exact_measured_amount():
     u, v, z = mapper.project(pos)
 
     expected_row_shift = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_SPAN_MM / 2.0
-    assert abs(expected_row_shift - (-69.91)) < 1e-9  # -62.36 - 15.1/2 = -69.91
+    # -62.36 - (151 * 13.2/152)/2 = -68.9165789... (NOZZLE_BAR_SPAN_MM itself
+    # tracks the measured NOZZLE_PITCH_MM, see geometry.py)
+    assert abs(expected_row_shift - (-62.36 - (151 * 13.2 / 152) / 2.0)) < 1e-9
     expected_col_shift = SENSOR_TO_NOZZLE_COL_MM      # 0.0, no bar-width term
 
     assert abs(u - (u_raw + expected_col_shift)) < 1e-9
@@ -571,9 +573,9 @@ def test_monitor_position_reports_an_error_for_a_bad_calibration_path():
 # ======================================== simple frame origin zeroing (M10)
 def test_zero_at_nozzle_puts_the_origin_under_the_nozzle_bar():
     # The bug this method exists for: set_origin() alone zeroes at the
-    # SENSOR, leaving the nozzle bar ~69.91mm away along v (magnitude only --
+    # SENSOR, leaving the nozzle bar ~68.92mm away along v (magnitude only --
     # direction depends on the constant's current, hardware-measured sign),
-    # so every sample reads out of bounds on a 15.2mm-tall page and nothing
+    # so every sample reads out of bounds on a ~13.2mm-tall page and nothing
     # prints (observed on the first simulated simple-frame pass). After
     # zero_at_nozzle, the start pose must project to exactly (0, 0).
     mapper = PageMapper(PageCalibration.simple_frame())

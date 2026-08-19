@@ -11,8 +11,11 @@ Run with:  python tests/test_position_pass.py
 """
 
 import asyncio
+import io
 import os
+import re
 import sys
+from contextlib import redirect_stdout
 
 import numpy as np
 
@@ -148,8 +151,67 @@ def test_startpoint_reset_restarts_from_zero():
     assert withreset.blank_writes > baseline.blank_writes
 
 
+# ============================================================= --verbose
+def test_verbose_prints_a_live_position_status_line():
+    # The --pos equivalent, but usable while an actual line-mode pass is
+    # running (see _print_line_pass's docstring) -- unlike --pos itself,
+    # which is one of cli.py's standalone diagnostics and cannot be combined
+    # with a real print pass at all.
+    render = RenderSettings(text="Hi")
+    trk = TrackingSettings(mode="line", advance_axis="y", mm_per_column=0.2,
+                           min_move_mm=0.01, smooth_ms=0.0,
+                           poll_hz=1000.0, timeout_s=5.0)
+    ctrl = PrintController(render, BleSettings(verbose=True), trk)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_line_pass(_NullPrinthead(), RampTracker(),
+                                          _ImmediateEvent()))
+    text = out.getvalue()
+    assert "advance=" in text and "col=" in text, text
+
+
+def test_verbose_off_by_default_prints_no_status_line():
+    render = RenderSettings(text="Hi")
+    trk = TrackingSettings(mode="line", advance_axis="y", mm_per_column=0.2,
+                           min_move_mm=0.01, smooth_ms=0.0,
+                           poll_hz=1000.0, timeout_s=5.0)
+    ctrl = PrintController(render, BleSettings(), trk)      # verbose=False
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_line_pass(_NullPrinthead(), RampTracker(),
+                                          _ImmediateEvent()))
+    assert "advance=" not in out.getvalue()
+
+
+def test_verbose_status_line_does_not_garble_the_final_message():
+    # REGRESSION guard: the status line ends every write with `\r`, not
+    # `\n` (see the throttled block in _print_line_pass), so without the
+    # trailing print() flush in the finally block, "Finished pass..." would
+    # land on top of that partial line instead of a fresh one.
+    render = RenderSettings(text="Hi")
+    trk = TrackingSettings(mode="line", advance_axis="y", mm_per_column=0.2,
+                           min_move_mm=0.01, smooth_ms=0.0,
+                           poll_hz=1000.0, timeout_s=5.0)
+    ctrl = PrintController(render, BleSettings(verbose=True), trk)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_line_pass(_NullPrinthead(), RampTracker(),
+                                          _ImmediateEvent()))
+    text = out.getvalue()
+    assert re.search(r"(^|\n)Finished pass; sent blank frame\.\s*$", text), text
+
+
 if __name__ == "__main__":
     test_no_reprint_on_reverse()
     print("OK: no-reprint-on-reverse test passed.")
     test_startpoint_reset_restarts_from_zero()
     print("OK: startpoint-reset test passed.")
+    test_verbose_prints_a_live_position_status_line()
+    print("OK: verbose status line test passed.")
+    test_verbose_off_by_default_prints_no_status_line()
+    print("OK: verbose off-by-default test passed.")
+    test_verbose_status_line_does_not_garble_the_final_message()
+    print("OK: verbose final-message flush test passed.")

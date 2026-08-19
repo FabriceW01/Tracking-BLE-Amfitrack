@@ -136,7 +136,7 @@ def test_spray_kernel_gives_the_nearest_neighbour_exactly_the_strength():
 
 
 def test_spray_radius_is_physical_so_the_kernel_is_anisotropic():
-    # A cell is NOZZLE_PITCH_MM (0.1mm) tall but mm_per_column (0.2mm)
+    # A cell is NOZZLE_PITCH_MM (~0.087mm) tall but mm_per_column (0.2mm)
     # wide, so a round drop must reach further in ROWS than in COLUMNS. A
     # pixel-count radius would silently mean two different real distances.
     kernel = _spray_engine(0.2, 1.0, mm_per_column=0.2)._spray_kernel
@@ -145,11 +145,11 @@ def test_spray_radius_is_physical_so_the_kernel_is_anisotropic():
     assert max_dr > max_dc, (max_dr, max_dc)
     assert abs(max_dr - round(0.2 / NOZZLE_PITCH_MM)) <= 1
 
-    # mm_per_column == NOZZLE_PITCH_MM exactly (0.1mm, unlike the old
-    # ~0.0993mm pitch this pins to a round number) means the cells are
-    # exactly square, so the kernel must be EXACTLY symmetric, not just
-    # close -- both axes run the identical radius/mm_per_column formula
-    # against the identical mm value.
+    # mm_per_column == NOZZLE_PITCH_MM exactly (whatever that constant's
+    # current value is -- deliberately read from geometry.py, not a literal
+    # here) means the cells are exactly square, so the kernel must be
+    # EXACTLY symmetric, not just close -- both axes run the identical
+    # radius/mm_per_column formula against the identical mm value.
     square = _spray_engine(0.2, 1.0, mm_per_column=NOZZLE_PITCH_MM)._spray_kernel
     square_max_dr = max(abs(dr) for dr, _, _ in square)
     square_max_dc = max(abs(dc) for _, dc, _ in square)
@@ -390,7 +390,7 @@ def test_arriving_at_a_pixel_credits_no_dwell_so_ink_volume_is_preserved():
 def test_dwell_survives_flapping_between_two_neighbouring_rows():
     # REGRESSION: found analysing a real freehand print whose recorded
     # coverage.png showed far less than what was actually inked on paper.
-    # NOZZLE_PITCH_MM (0.1mm) is finer than realistic tracker position
+    # NOZZLE_PITCH_MM (~0.087mm) is finer than realistic tracker position
     # noise, so a nozzle sitting near a row boundary has its rounded row
     # index flap between two neighbours sample to sample. The engine used
     # to key dwell on a per-group "since" timestamp that RESET on every key
@@ -711,7 +711,7 @@ def test_bar_offset_uv_matches_the_bar_centre_of_steps_own_spread():
         predicted_centre_col, observed_centre_col)
     # math.pi/2 isn't bit-exact (math.pi is a finite approximation of pi),
     # so cos(yaw) is ~6e-17, not exactly 0.0 -- negligible against
-    # NOZZLE_PITCH_MM (0.1mm) and rounds away in row0 above, but not
+    # NOZZLE_PITCH_MM (~0.087mm) and rounds away in row0 above, but not
     # literally zero; assert "negligible", not "==".
     assert abs(dv) < 1e-9, "bar centre must stay on nozzle 0's row at 90 deg yaw"
 
@@ -810,7 +810,7 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
     # model -- NOT the earlier per-nozzle "since" timestamp that reset to
     # zero the instant a nozzle's rounded key changed. That earlier version
     # is what this test used to pin, and it was itself the bug: with
-    # NOZZLE_PITCH_MM (0.1mm) finer than realistic tracker noise, a nozzle
+    # NOZZLE_PITCH_MM (~0.087mm) finer than realistic tracker noise, a nozzle
     # hovering near a row boundary flaps its key every sample, so a
     # reset-on-change timer never reaches dose_hold_s -- the nozzle fires
     # every sample (see `active` below, set unconditionally once `wanted`)

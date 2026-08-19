@@ -11,8 +11,9 @@ of the error, and pitch/roll correction is a deliberate, measured
 non-goal (see the module docstrings of ``coverage.py`` / ``tracking.py``
 for where the resulting error actually shows up: a 62.36mm sensor->nozzle
 lever arm rotating with the cart, up to ~76mm of position error at the
-measured yaw span, and the 15.1mm nozzle-0-to-nozzle-151 span itself
-sweeping across columns as it tilts, ~14.6mm at 75 deg).
+measured yaw span, and the ``NOZZLE_BAR_SPAN_MM`` nozzle-0-to-nozzle-151
+span itself (~13.1mm) sweeping across columns as it tilts, ~12.7mm at
+75 deg).
 
 Kept as its own module rather than folded into ``calibration.py``: this is
 quaternion/rotation-matrix algebra used at PRINT time (every sample, via

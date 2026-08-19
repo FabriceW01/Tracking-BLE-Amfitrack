@@ -60,6 +60,14 @@ _STALL_GRACE_S = 0.2
 # cutoff derived from any firmware constant.
 DEFAULT_SPEED_WARNING_MM_S = 25.0
 
+# Throttle for --verbose's live status line during a print pass (see
+# _print_line_pass/_print_freehand_pass below): matches --pos's own default
+# hz=15 in diagnostics.monitor_position, so the two read at the same rate
+# even though a print pass itself samples at --poll-hz (default now 500) --
+# printing every single poll sample would flood the terminal for no benefit,
+# since nobody reads faster than this anyway.
+_VERBOSE_STATUS_INTERVAL_S = 1.0 / 15.0
+
 
 def _speed_warning_transition(is_warning: bool, speed_mm_s: float,
                                threshold_mm_s: float) -> bool:
@@ -302,7 +310,14 @@ class PrintController:
 
         A startpoint-button press during the pass re-zeros the origin at the
         current position and resets the frontier, restarting the print from
-        column 0."""
+        column 0.
+
+        ``--verbose`` (``self.ble.verbose``) prints a live, self-overwriting
+        status line (position/advance/column/firing state) throttled to
+        ``_VERBOSE_STATUS_INTERVAL_S`` -- the printing-time equivalent of
+        ``--pos``, which cannot be combined with an actual print pass since
+        it is one of the standalone diagnostics that connect, report, and
+        exit (see cli.py's mutually-exclusive debug group)."""
         t = self.tracking
         mapper = AdvanceMapper(t)
         pos_filter = PositionFilter(t.smooth_ms / 1000.0)
@@ -347,6 +362,7 @@ class PrintController:
         t_start = ref_t
         prev_adv = None
         prev_t = None
+        last_verbose_t = None
 
         try:
             while True:
@@ -391,6 +407,13 @@ class PrintController:
                             break                        # reached the end of the text
                         col = max(0, col)
 
+                        if (self.ble.verbose and (last_verbose_t is None
+                                or now - last_verbose_t >= _VERBOSE_STATUS_INTERVAL_S)):
+                            last_verbose_t = now
+                            print(f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
+                                  f"advance={adv:9.2f} mm  |  col={col:5d}/{self.width}  |  "
+                                  f"{'firing' if firing else 'idle '}", end="\r", flush=True)
+
                         if not moving:
                             # head stopped -> stop firing (avoid an ink blob)
                             if firing:
@@ -432,6 +455,14 @@ class PrintController:
                     break
                 await asyncio.sleep(interval)
         finally:
+            # The --verbose status line above ends every write with `\r`,
+            # not `\n`, so it can overwrite itself in place; the messages
+            # below use ordinary print() calls and would otherwise land on
+            # top of that partial line instead of a fresh one (mirrors
+            # diagnostics.monitor_position's identical "print() once before
+            # real messages resume" cleanup).
+            if self.ble.verbose:
+                print()
             # Same cleanup-ordering bug as the freehand pass (defect 3): an
             # exception out of the loop above (KeyboardInterrupt included)
             # must not skip closing the profiler CSV or rendering --record.
@@ -519,6 +550,18 @@ class PrintController:
         unconditionally at pass end, in the same tolerant ``finally`` path
         as ``sender.close()``/the final blank frame, so a stale warning never
         outlives the pass that raised it.
+
+        ``--verbose`` (``self.ble.verbose``) prints a live, self-overwriting
+        status line -- sensor x/y/z, page u/v, row/col, yaw/roll/pitch and
+        the running covered/total count -- throttled to
+        ``_VERBOSE_STATUS_INTERVAL_S``, so the position readout ``--pos``
+        gives can be watched *while actually printing* instead of only as a
+        separate standalone run beforehand: ``--pos`` is one of cli.py's
+        mutually-exclusive debug checks (connect, report, exit) and cannot
+        be combined with a real pass at all. Suppressed whenever
+        ``self.progress_json`` is set -- that stream must stay pure NDJSON
+        for the UI consumer, same reasoning as the plain-text warnings
+        above.
         """
         if self.page_calibration is None:
             raise RuntimeError("Freehand pass requires a page calibration "
@@ -658,6 +701,8 @@ class PrintController:
         prev_printed = coverage.printed.copy() if pj else None
         done_reason = None
         speed_warn_state = False   # current value of the speed-warning flag
+        last_verbose_t = None      # throttle for --verbose's live status line
+        verbose_flushed = False    # see the finally block's newline flush below
 
         # Out-of-page visibility (defect 2): a pass whose (u, v) never lands
         # inside the target image is otherwise indistinguishable from a
@@ -762,6 +807,27 @@ class PrintController:
                         if profiler is not None:
                             profiler.record_page_sample(u_mm, v_mm, speed, quat=quat)
 
+                    # Live --verbose status line (see this method's docstring):
+                    # the --pos equivalent, but usable while an actual pass is
+                    # running instead of only as a separate standalone check.
+                    if self.ble.verbose and not pj and (
+                            last_verbose_t is None
+                            or now - last_verbose_t >= _VERBOSE_STATUS_INTERVAL_S):
+                        last_verbose_t = now
+                        v_row = int(round(v_mm / NOZZLE_PITCH_MM))
+                        v_col = (int(round(u_mm / t.mm_per_column))
+                                if t.mm_per_column else 0)
+                        covered = int(coverage.printed.sum())
+                        total = int(coverage.ink.sum())
+                        line = (f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
+                               f"page u={u_mm:8.2f}  v={v_mm:8.2f} mm  "
+                               f"row={v_row:4d} col={v_col:5d}  |  "
+                               f"yaw={math.degrees(yaw_rad):+6.2f} deg  "
+                               f"roll={math.degrees(mapper.last_roll_rad):+6.2f} deg  "
+                               f"pitch={math.degrees(mapper.last_pitch_rad):+6.2f} deg  |  "
+                               f"covered {covered}/{total}")
+                        print(line, end="\r", flush=True)
+
                     # Nothing has ever been in bounds yet: say so periodically
                     # instead of running the whole pass in silence (plain-text
                     # mode only -- progress-json carries this in coverage_done
@@ -801,15 +867,31 @@ class PrintController:
                 if coverage.done:
                     done_reason = "complete"
                     if not pj:
+                        if self.ble.verbose:
+                            print()   # end the overwriting --verbose line first
+                            verbose_flushed = True
                         print("Page fully covered.")
                     break
                 if now - t_start > t.timeout_s:
                     done_reason = "timeout"
                     if not pj:
+                        if self.ble.verbose:
+                            print()
+                            verbose_flushed = True
                         print("Freehand pass timed out.")
                     break
                 await asyncio.sleep(interval)
         finally:
+            # The --verbose status line ends every write with `\r`, not `\n`
+            # (see the throttled block above), so it can overwrite itself in
+            # place; an exception/KeyboardInterrupt breaking out of the loop
+            # above skips the two explicit newline flushes next to "Page
+            # fully covered."/"Freehand pass timed out." above (verbose_flushed
+            # stays False on that path), so this covers it too -- guarded on
+            # the flag rather than unconditional so the normal-exit paths
+            # above don't also print a second, redundant blank line here.
+            if self.ble.verbose and not pj and not verbose_flushed:
+                print()
             # Everything below must still run on a KeyboardInterrupt or any
             # other exception raised out of the loop above (defect 3): the
             # profiler CSV is otherwise never closed/flushed (0-byte file),

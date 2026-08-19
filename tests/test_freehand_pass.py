@@ -87,9 +87,9 @@ def _identity_calibration():
 
 def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
                 profile=False, profile_csv=None, record=None, progress_json=False,
-                speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S):
+                speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S, verbose=False):
     render = RenderSettings(text="freehand test")
-    ble = BleSettings()
+    ble = BleSettings(verbose=verbose)
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
                            poll_hz=poll_hz, timeout_s=timeout_s)
     # Sensor->nozzle offsets neutralised: these tests check
@@ -1189,6 +1189,106 @@ def test_freehand_pass_never_warns_when_tracker_never_moves():
     asyncio.run(ctrl._print_freehand_pass(null, tracker))
 
     assert null.speed_warnings == [False]
+
+
+# ============================================================= --verbose
+def test_verbose_prints_a_live_status_line_while_printing():
+    # The --pos equivalent, but usable while an actual pass is running (see
+    # this method's docstring) -- must show page position and yaw/roll/pitch,
+    # not just bare BLE write logging (that's --mode time's older, unrelated
+    # meaning of the same flag).
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, verbose=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    assert "page u=" in text and "yaw=" in text, text
+    assert "covered " in text, text
+
+
+def test_verbose_off_by_default_prints_no_status_line():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)          # verbose=False
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    assert "page u=" not in out.getvalue()
+
+
+def test_verbose_status_line_is_suppressed_in_progress_json_mode():
+    # progress_json must stay pure NDJSON for the UI consumer (see the
+    # method's docstring) -- --verbose must not leak a plain-text `\r` line
+    # into that stream even when both flags are set together.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, verbose=True, progress_json=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    for line in out.getvalue().splitlines():
+        if line.strip():
+            json.loads(line)          # every non-blank line must be valid JSON
+
+
+def test_verbose_status_line_covered_counts_never_decrease_and_stay_in_bounds():
+    # The --verbose line is throttled (_VERBOSE_STATUS_INTERVAL_S), so its
+    # last printed snapshot is not guaranteed to land on the exact same
+    # sample that later flips coverage.done -- do NOT assert exact equality
+    # against the final "Covered N/M" tally (that is timing-dependent and
+    # flaky by construction). Instead check what must ALWAYS hold: every
+    # line reports the same (constant) total, "covered" never goes
+    # backwards across samples, and it never exceeds the true final count --
+    # i.e. the live number genuinely tracks CoverageEngine.printed, not a
+    # separately-computed or stale counter.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, verbose=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+
+    final = re.search(r"Covered (\d+)/(\d+) ink pixels", text)
+    assert final, text
+    final_covered, final_total = int(final.group(1)), int(final.group(2))
+
+    verbose_lines = [l for l in re.split(r"[\r\n]+", text) if "covered " in l]
+    assert verbose_lines, text
+    counts = [tuple(map(int, re.search(r"covered (\d+)/(\d+)", l).groups()))
+             for l in verbose_lines]
+
+    assert all(total == final_total for _, total in counts), (counts, final_total)
+    covered_values = [c for c, _ in counts]
+    assert covered_values == sorted(covered_values), covered_values
+    assert covered_values[-1] <= final_covered, (covered_values, final_covered)
+
+
+def test_verbose_status_line_does_not_garble_the_final_message():
+    # REGRESSION guard: the status line ends every write with `\r`, not
+    # `\n` (see the throttled block above), so without the newline flush
+    # right before "Page fully covered."/"Freehand pass timed out." (and the
+    # finally-block fallback for the exception path), that message would
+    # land on top of the partial status line instead of a fresh one.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, verbose=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+    # The line immediately preceding "Finished pass..." must start clean
+    # (preceded by \n, not by a bare \r) -- assert on the exact boundary.
+    assert re.search(r"\n(Page fully covered\.|Freehand pass timed out\.)\n"
+                     r"Finished pass; sent blank frame\.", text), text
 
 
 if __name__ == "__main__":
