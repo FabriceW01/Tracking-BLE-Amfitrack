@@ -377,8 +377,18 @@ class PrintController:
                 await asyncio.gather(*waiters, return_exceptions=True)
 
     async def _set_page_origin(self, tracker) -> None:
-        """Re-zero the page origin under the nozzle bar at the cart's
-        current position (page mode, STARTPOINT button while idle).
+        """Re-zero the page origin so the target image's CENTRE lands under
+        the nozzle bar at the cart's current position (page mode, STARTPOINT
+        button while idle).
+
+        Deliberately the image's centre, not its top-left corner (which is
+        what ``target_uv``'s default ``(0, 0)`` would place here): the
+        operator points at the spot they want the PATTERN centred on, not at
+        a corner they'd otherwise have to estimate by eye and by the
+        pattern's own width/height, which nothing about the physical paper
+        tells them. Corner placement is still available -- it's just
+        ``zero_at_nozzle``'s own default -- but centring is what this button
+        is for.
 
         Only ``PageCalibration.origin`` moves. The traced axes/scales from a
         ``--page-calibration`` file -- the plane definition itself -- are
@@ -386,8 +396,8 @@ class PrintController:
         image start", not "where is the sheet", which is exactly the split
         the calibration file already encodes.
 
-        Uses ``zero_at_nozzle``, not ``set_origin``: the origin has to land
-        under the NOZZLE BAR, not under the sensor ~62mm away, or every
+        Uses ``zero_at_nozzle``, not ``set_origin``: the target point has to
+        land under the NOZZLE BAR, not under the sensor ~62mm away, or every
         sample reads out of bounds and nothing prints (see that method).
 
         A tracker that yields no pose is reported and otherwise ignored --
@@ -419,11 +429,17 @@ class PrintController:
         if (self.tracking.page_frame == "simple"
                 and self.page_calibration.boresight_quat is None):
             mapper.capture_boresight(quat)
-        mapper.zero_at_nozzle(pos, quat)
+        # Middle INDEX of 0..width-1 / 0..height-1, in mm along each axis --
+        # a continuous mm value, not rounded to a pixel, so it lands exactly
+        # between the two centre pixels on an even width/height rather than
+        # being pulled a half-pixel toward one side.
+        center_u_mm = (self.width - 1) / 2.0 * self.tracking.mm_per_column
+        center_v_mm = (self.height - 1) / 2.0 * NOZZLE_PITCH_MM
+        mapper.zero_at_nozzle(pos, quat, target_uv=(center_u_mm, center_v_mm))
         self._page_origin_pinned = True
-        print(f"[startpoint] page origin placed at the nozzle bar's current "
-              f"position (sensor at {pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f} "
-              f"mm). Press START to print from here.")
+        print(f"[startpoint] page origin placed -- pattern CENTRE now at the "
+              f"nozzle bar's current position (sensor at {pos[0]:.1f}, "
+              f"{pos[1]:.1f}, {pos[2]:.1f} mm). Press START to print from here.")
 
     # ------------------------------------------------- position-based pass
     async def _print_line_pass(self, ble, tracker, startpoint_event) -> None:

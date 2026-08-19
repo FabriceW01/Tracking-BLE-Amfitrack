@@ -263,11 +263,18 @@ class PageMapper:
         if quat is not None:
             self.calibration.boresight_quat = np.asarray(quat, dtype=float).copy()
 
-    def zero_at_nozzle(self, pos, quat=None) -> None:
+    def zero_at_nozzle(self, pos, quat=None,
+                       target_uv: "tuple[float, float]" = (0.0, 0.0)) -> None:
         """
         Re-zero the page frame so that ``project(pos, quat)`` returns
-        ``(0, 0)`` -- i.e. put the page's origin under the NOZZLE BAR, not
-        under the sensor.
+        ``target_uv`` (default ``(0, 0)``) -- i.e. put that page-plane point
+        under the NOZZLE BAR, not under the sensor.
+
+        ``target_uv`` lets a caller park an arbitrary page-plane point at the
+        held position, not just the origin -- see
+        ``PrintController._set_page_origin``, which passes the target
+        image's CENTRE so a STARTPOINT press marks where the pattern's
+        middle should land rather than always its top-left corner.
 
         ``set_origin(pos)`` alone is not enough, and gets this visibly wrong:
         it puts the origin at the *sensor*, but ``project()`` deliberately
@@ -283,10 +290,11 @@ class PageMapper:
 
         Shifting the origin by ``d`` along ``e_col`` moves ``u`` by
         ``-d * scale_col`` (see ``PageCalibration.project``), so cancelling a
-        residual ``u0`` needs a shift of ``+u0 / scale_col``; likewise for
-        ``v``. The frame's own axes are used rather than world axes so this
-        stays correct for a rotated (traced) frame too, even though only the
-        simple frame currently calls it.
+        residual ``u0 - target_u`` needs a shift of
+        ``+(u0 - target_u) / scale_col``; likewise for ``v``. The frame's own
+        axes are used rather than world axes so this stays correct for a
+        rotated (traced) frame too, even though only the simple frame
+        currently calls it.
 
         ``quat`` matters because the sensor->nozzle offset is rotated by the
         cart's current yaw: this zeroes at the bar's position *for the pose
@@ -295,10 +303,11 @@ class PageMapper:
         """
         self.set_origin(pos)
         u0, v0, _ = self.project(pos, quat)
+        du, dv = u0 - target_uv[0], v0 - target_uv[1]
         cal = self.calibration
         cal.origin = (cal.origin
-                      + (u0 / cal.scale_col) * cal.e_col
-                      + (v0 / cal.scale_row) * cal.e_row)
+                      + (du / cal.scale_col) * cal.e_col
+                      + (dv / cal.scale_row) * cal.e_row)
 
     def project(self, pos, quat=None) -> "tuple[float, float, float]":
         """

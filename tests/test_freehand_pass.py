@@ -1377,9 +1377,9 @@ def test_startpoint_stop_MUTATION_check_without_the_break_the_pass_runs_on():
 
 
 def test_set_page_origin_moves_only_the_origin_and_zeroes_the_held_pose():
-    # The whole point of the idle press: place WHERE the image starts without
-    # touching the traced plane definition (axes/scales) the calibration file
-    # exists to provide.
+    # The whole point of the idle press: place WHERE the image is CENTRED
+    # without touching the traced plane definition (axes/scales) the
+    # calibration file exists to provide.
     ink = np.ones((30, 5), dtype=bool)
     ctrl = _controller(ink)
     cal = ctrl.page_calibration
@@ -1396,12 +1396,16 @@ def test_set_page_origin_moves_only_the_origin_and_zeroes_the_held_pose():
     assert ctrl._page_origin_pinned is True
 
     # zero_at_nozzle, not set_origin: the pose held at the press must project
-    # to (0, 0) through the SAME offsets the pass uses, i.e. the nozzle bar
-    # lands on the origin, not the sensor ~62mm away.
+    # to the image's CENTRE (not the corner) through the SAME offsets the
+    # pass uses, i.e. the nozzle bar lands on the pattern's middle, not the
+    # sensor ~62mm away and not the top-left corner.
     mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
     u, v, _ = mapper.project(np.array(held, dtype=float))
-    assert abs(u) < 1e-9 and abs(v) < 1e-9, (u, v)
+    expected_u = (ctrl.width - 1) / 2.0 * ctrl.tracking.mm_per_column
+    expected_v = (ctrl.height - 1) / 2.0 * NOZZLE_PITCH_MM
+    assert abs(u - expected_u) < 1e-9 and abs(v - expected_v) < 1e-9, \
+        (u, v, expected_u, expected_v)
 
 
 def test_set_page_origin_survives_a_tracker_that_never_yields_a_pose():
