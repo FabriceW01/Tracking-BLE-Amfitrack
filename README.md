@@ -83,13 +83,13 @@ gerade gedruckt wird:
 
 | Situation | Tastendruck bewirkt |
 |---|---|
-| **Kein Druck aktiv** (`Waiting for next START press ...`) | Setzt den **Startpunkt**: der Seiten-Nullpunkt `(0, 0)` landet dort, wo die **Düsenleiste** gerade steht. Ausgabe: `[startpoint] page origin placed at the nozzle bar's current position ...` Beliebig oft wiederholbar — der zuletzt gesetzte Punkt gilt. Danach START drücken. |
+| **Kein Druck aktiv** (`Waiting for next START press ...`) | Setzt den **Startpunkt**: die **Mitte** des zu druckenden Musters landet dort, wo die **Düsenleiste** gerade steht (nicht die obere linke Ecke des Bildes). Ausgabe: `[startpoint] page origin placed -- pattern CENTRE now at the nozzle bar's current position ...` Beliebig oft wiederholbar — der zuletzt gesetzte Punkt gilt. Danach START drücken. |
 | **Druck läuft** | **STOP**: der Pass endet sofort, es wird ein Blank-Frame gesendet, `--record`/`--profile-csv` werden noch sauber geschrieben, und die Ausgabe kehrt zu `Waiting for next START press ...` zurück. Ausgabe: `[startpoint] pass stopped by button press.` |
 
 Wichtig: Nur der **Ursprung** wird verschoben. Die abgefahrene Ebene aus
 `page_calibration.json` (Achsen `e_col`/`e_row`, Skalen) bleibt komplett
 unangetastet — die Kalibrierungsdatei definiert weiterhin *wo die Ebene liegt*,
-der Taster nur *wo auf dem Blatt das Bild anfängt*.
+der Taster nur *wo auf dem Blatt die Mitte des Bildes liegt*.
 
 Der Ursprung bleibt über mehrere Pässe hinweg gesetzt (wie eine Kalibrierung),
 bis er erneut per Taster verschoben wird. Im einfachen Modus
