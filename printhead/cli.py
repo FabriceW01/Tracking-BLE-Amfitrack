@@ -279,7 +279,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--preview", help="Save a PNG preview of the rendered image")
     g.add_argument("--dry-run", action="store_true",
                    help="Render (and optionally preview/simulate) only; no BLE")
-    g.add_argument("--verbose", action="store_true")
+    g.add_argument("--verbose", action="store_true",
+                   help="--mode line/page: print a live, self-overwriting "
+                        "position status line (x/y/z, page u/v/yaw/roll/"
+                        "pitch, covered/total) WHILE actually printing -- "
+                        "the --pos equivalent usable during a real pass, "
+                        "unlike --pos itself which cannot be combined with "
+                        "one. --mode time: verbose BLE write logging "
+                        "(unchanged)")
 
     # --- debug / diagnostics (each runs a standalone check and exits) -------
     g = ap.add_argument_group("debug / diagnostics (each runs a check and exits)")

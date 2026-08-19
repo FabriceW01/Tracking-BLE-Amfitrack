@@ -947,6 +947,7 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | `--vendor-id` / `--product-id` | USB-IDs des Amfitrack-Dongles (Default `0x0C17` / `0x0D12`) |
 | `--sensor-id` | optionaler `tx_id`-Filter unter den „Sensor"-Nodes (Default: alle) |
 | `--simulate` | Fake-Tracker (keine Hardware) zum Testen des Loops |
+| `--verbose` | Bei `--mode line`/`page`: druckt eine live überschreibende Statuszeile (Position, bei `page` zusätzlich `page u/v`, Gierwinkel/Roll/Pitch, `covered N/M`) **während des laufenden Drucks** — das `--pos`-Äquivalent, aber nutzbar im echten Druck, da `--pos` selbst einer der eigenständigen Diagnose-Checks ist und sich nicht mit einem echten Druck kombinieren lässt (siehe unten). Wird bei `--progress-json` unterdrückt, damit dieser Stream reines NDJSON bleibt. Bei `--mode time` unverändert: loggt jeden 50. Spaltenschreibvorgang. |
 
 ## Kalibrierung & Testmuster
 
