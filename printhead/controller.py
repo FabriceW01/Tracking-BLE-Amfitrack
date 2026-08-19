@@ -183,6 +183,16 @@ class PrintController:
         # captured boresight -- see PageMapper.boresight_offset_rad / CLI's
         # --boresight-deg. 0.0 = trust the captured boresight exactly.
         self.boresight_deg = boresight_deg
+        # True once a STARTPOINT button press between passes has re-zeroed
+        # page_calibration.origin (see _set_page_origin). Read by
+        # _print_freehand_pass, which then does NOT re-zero the simple frame
+        # at pass start -- an operator-placed origin must outrank the blind
+        # "wherever the cart is at START" fallback, exactly as an explicitly
+        # pinned --simple-boresight outranks blind boresight auto-capture.
+        # Deliberately sticky across passes rather than cleared at pass end:
+        # a placed origin, like a traced calibration, is meant to survive
+        # until the operator moves it again.
+        self._page_origin_pinned = False
 
         # Rendered once up front, unless the caller already built the ink
         # (calibration ruler / test patterns bypass text rendering entirely).
@@ -280,14 +290,30 @@ class PrintController:
 
             try:
                 while True:
-                    await press_event.wait()
+                    # In page mode a STARTPOINT press while idle places the
+                    # page origin instead of starting a pass; see
+                    # _wait_for_start_press. Every other mode keeps the plain
+                    # "block until START" behaviour it always had.
+                    await self._wait_for_start_press(press_event, startpoint_event,
+                                                     tracker, mode)
                     press_event.clear()
+                    # Page mode only: drop a STARTPOINT press that arrived
+                    # while idle and was already acted on (or raced in just
+                    # before START). During a page pass the same button means
+                    # STOP, so inheriting a stale press would abort the pass
+                    # on its very first sample. Line mode deliberately keeps
+                    # its latched press -- `--origin startpoint` waits on
+                    # exactly this event at pass start, and clearing it here
+                    # would force a second press it never used to need.
+                    if mode == "page":
+                        startpoint_event.clear()
                     state["busy"] = True
                     try:
                         if mode == "line":
                             await self._print_line_pass(ble, tracker, startpoint_event)
                         elif mode == "page":
-                            await self._print_freehand_pass(ble, tracker)
+                            await self._print_freehand_pass(ble, tracker,
+                                                            startpoint_event)
                         else:
                             await ble.stream_time(self.frames, self.ble.period,
                                                   self.ble.verbose)
@@ -303,6 +329,101 @@ class PrintController:
             finally:
                 if tracker is not None:
                     tracker.close()
+
+    # --------------------------------------------- idle STARTPOINT handling
+    async def _wait_for_start_press(self, press_event, startpoint_event,
+                                    tracker, mode) -> None:
+        """Block until the START button is pressed.
+
+        In **page mode** a STARTPOINT press arriving while no pass is running
+        does not start anything: it places the page origin at the cart's
+        current position (see :meth:`_set_page_origin`) and goes back to
+        waiting, so the operator can aim, place, re-place, and only then
+        press START. That is the idle half of the button's page-mode role --
+        the other half is STOP during a running pass (see
+        ``_print_freehand_pass``).
+
+        Every other mode falls straight through to the plain
+        ``press_event.wait()`` this replaced: line mode already gives the
+        same button a different, established meaning (``--origin startpoint``
+        waits on it at pass start, and a mid-pass press re-zeros the origin),
+        and consuming presses here would break both.
+        """
+        if mode != "page" or tracker is None:
+            await press_event.wait()
+            return
+        while True:
+            # Flags first, so a press latched before this call (or acted on
+            # by the previous iteration) is seen without waiting for a
+            # further edge. START wins a simultaneous pair: the pending
+            # STARTPOINT is dropped by the caller rather than acted on here,
+            # since the operator's intent in that case is to print.
+            if press_event.is_set():
+                return
+            if startpoint_event.is_set():
+                startpoint_event.clear()
+                await self._set_page_origin(tracker)
+                continue
+            waiters = [asyncio.ensure_future(press_event.wait()),
+                       asyncio.ensure_future(startpoint_event.wait())]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                # Both are awaited after cancelling: a bare cancel() leaves
+                # the loser pending long enough to surface as a "Task was
+                # destroyed but it is pending" warning on shutdown.
+                for w in waiters:
+                    w.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+
+    async def _set_page_origin(self, tracker) -> None:
+        """Re-zero the page origin under the nozzle bar at the cart's
+        current position (page mode, STARTPOINT button while idle).
+
+        Only ``PageCalibration.origin`` moves. The traced axes/scales from a
+        ``--page-calibration`` file -- the plane definition itself -- are
+        deliberately untouched: this answers "where on the sheet does the
+        image start", not "where is the sheet", which is exactly the split
+        the calibration file already encodes.
+
+        Uses ``zero_at_nozzle``, not ``set_origin``: the origin has to land
+        under the NOZZLE BAR, not under the sensor ~62mm away, or every
+        sample reads out of bounds and nothing prints (see that method).
+
+        A tracker that yields no pose is reported and otherwise ignored --
+        returning to the START wait beats letting a RuntimeError out of the
+        idle loop and tearing down the whole BLE session over a button press.
+        """
+        if self.page_calibration is None:
+            print("[startpoint] no page calibration loaded -- cannot place "
+                  "an origin.")
+            return
+        loop = asyncio.get_event_loop()
+        try:
+            pos, quat = await self._wait_for_pose(tracker, loop)
+        except RuntimeError as exc:
+            print(f"[startpoint] origin NOT placed: {exc}")
+            return
+
+        mapper = PageMapper(self.page_calibration,
+                            sensor_offset_row_mm=self.sensor_offset_row_mm,
+                            sensor_offset_col_mm=self.sensor_offset_col_mm,
+                            boresight_offset_rad=math.radians(self.boresight_deg))
+        # Simple frame with no reference pose yet: adopt the one being held
+        # right now, so the placement gesture fixes position AND heading
+        # together -- the pass would otherwise capture its heading later,
+        # from a different pose, and the placed origin would be referenced
+        # to an angle the operator never confirmed. Guarded on `is None` so
+        # an explicitly pinned --simple-boresight is never overwritten,
+        # matching _print_freehand_pass's own guard.
+        if (self.tracking.page_frame == "simple"
+                and self.page_calibration.boresight_quat is None):
+            mapper.capture_boresight(quat)
+        mapper.zero_at_nozzle(pos, quat)
+        self._page_origin_pinned = True
+        print(f"[startpoint] page origin placed at the nozzle bar's current "
+              f"position (sensor at {pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f} "
+              f"mm). Press START to print from here.")
 
     # ------------------------------------------------- position-based pass
     async def _print_line_pass(self, ble, tracker, startpoint_event) -> None:
@@ -513,7 +634,8 @@ class PrintController:
             await asyncio.sleep(0.005)
 
     # --------------------------------------------------- freehand page pass
-    async def _print_freehand_pass(self, ble, tracker) -> None:
+    async def _print_freehand_pass(self, ble, tracker,
+                                   startpoint_event=None) -> None:
         """
         Freehand 2D pass: project live position through a fixed
         ``PageCalibration`` (no per-pass origin -- the calibration already
@@ -521,7 +643,8 @@ class PrintController:
         button-zeroed origin), dose per-nozzle via ``CoverageEngine``, and
         stream the live pattern through a ``PatternSender`` ("latest wins",
         see ``pattern_sender.py``) instead of a queue of distinct columns.
-        Runs until the whole target image is covered or the pass times out.
+        Runs until the whole target image is covered, the pass times out, or
+        the operator stops it (below).
 
         Unlike ``_print_line_pass``, there is no separate stall-grace/anti-
         blob logic here: ``CoverageEngine`` already stops firing a pixel once
@@ -529,10 +652,17 @@ class PrintController:
         stalled -- that cutoff *is* the anti-blob protection, per pixel
         rather than per pass.
 
-        A startpoint-button press is not handled here yet (unlike line mode,
-        where it re-zeros the origin) -- there is no obvious equivalent
-        gesture for a fixed page calibration, so this is left for later
-        rather than guessing.
+        ``startpoint_event`` is the STARTPOINT button, and in page mode it
+        means **STOP**: a press ends this pass immediately (blank frame,
+        profiler/record still flushed through the usual ``finally``) and
+        returns to "Waiting for next START press ...". Deliberately NOT line
+        mode's meaning -- there, mid-pass, the same button re-zeros the origin
+        and reprints from column 0, which needs a monotonically advancing
+        frontier to be worth doing. A page pass has no frontier to rewind and
+        an already-placed origin (see ``_set_page_origin``, the idle half of
+        this button's page-mode role), so "abort what I'm doing" is the
+        useful gesture that was missing. ``None`` disables it, for the
+        dry-run/simulate path that has no button at all.
 
         ``self.progress_json``, if set, switches stdout from the plain-text
         status lines below to NDJSON progress events -- one ``coverage_start``
@@ -652,7 +782,18 @@ class PrintController:
         # calibration is deliberately NOT re-zeroed: its origin is a measured
         # page corner meant to outlive a single pass (see PageMapper.
         # set_origin).
-        if t.page_frame == "simple":
+        #
+        # _page_origin_pinned skips this entirely: the operator already placed
+        # the origin with the STARTPOINT button while idle (see
+        # _set_page_origin), and blindly re-zeroing at whatever pose START
+        # happens to catch would silently throw that placement away -- the
+        # same "explicit beats blind auto-capture" rule --simple-boresight
+        # follows for the yaw reference just below.
+        if t.page_frame == "simple" and self._page_origin_pinned:
+            if not pj:
+                print("[simple] using the page origin placed with the "
+                      "STARTPOINT button -- NOT re-zeroed at this START.")
+        elif t.page_frame == "simple":
             raw_pos, start_quat = await self._wait_for_pose(tracker, loop)
             start_pos = pos_filter.update(raw_pos, loop.time())
             # Only auto-capture a reference pose if none was already pinned
@@ -736,6 +877,21 @@ class PrintController:
         try:
             while True:
                 now = loop.time()
+
+                # STARTPOINT button = STOP in page mode (see the docstring).
+                # Checked before reading the tracker so a press lands within
+                # one poll interval rather than after another full sample's
+                # worth of dosing/sending.
+                if startpoint_event is not None and startpoint_event.is_set():
+                    startpoint_event.clear()
+                    done_reason = "stopped"
+                    if not pj:
+                        if self.ble.verbose:
+                            print()   # end the overwriting --verbose line first
+                            verbose_flushed = True
+                        print("[startpoint] pass stopped by button press.")
+                    break
+
                 pos, quat = tracker.read_pose()
                 if pos is not None:
                     pos = pos_filter.update(pos, now)   # low-pass the noisy signal
@@ -941,7 +1097,14 @@ class PrintController:
                                   "v_min": round(v_min, 3) if v_min is not None else None,
                                   "v_max": round(v_max, 3) if v_max is not None else None}),
                       flush=True)
-            elif in_bounds_samples == 0 and samples > 0:
+            elif (in_bounds_samples == 0 and samples > 0
+                    and done_reason != "stopped"):
+                # done_reason "stopped" is excluded: an operator who aborts
+                # with the STARTPOINT button before ever reaching the page
+                # has not hit the bug this diagnosis describes, and its
+                # advice ("the calibration origin/axes do not correspond to
+                # where you think the page corner is") would be actively
+                # misleading about a pass that simply ended early on purpose.
                 req_u = self.width * t.mm_per_column
                 req_v = NOZZLE_BAR_SPAN_MM
                 print("Finished pass; sent blank frame.")

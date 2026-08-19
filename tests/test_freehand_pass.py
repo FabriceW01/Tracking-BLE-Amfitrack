@@ -1271,6 +1271,257 @@ def test_verbose_status_line_covered_counts_never_decrease_and_stay_in_bounds():
     assert covered_values[-1] <= final_covered, (covered_values, final_covered)
 
 
+# ================================== STARTPOINT button (page mode: place/stop)
+class StopAfter:
+    """STARTPOINT-button stub whose is_set() starts returning True on the
+    k-th call, mirroring test_position_pass.py's FireOnce (line mode's
+    re-zero press) for the page-mode STOP press."""
+
+    def __init__(self, at_check):
+        self._checks = 0
+        self._at = at_check
+        self._fired = False
+
+    def is_set(self):
+        self._checks += 1
+        if self._checks >= self._at:
+            self._fired = True
+        return self._fired
+
+    def clear(self):
+        self._fired = False
+
+
+def test_startpoint_press_stops_a_running_pass():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+    null = _NullPrinthead()
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(null, tracker, StopAfter(at_check=4)))
+    text = out.getvalue()
+
+    assert "[startpoint] pass stopped by button press." in text, text
+    # Stopped early, so NOT everything got covered -- this is what separates
+    # a real stop from the check simply never firing (the pass otherwise
+    # reaches "Page fully covered." on this sweep, see
+    # test_freehand_pass_covers_the_page_and_stops_before_timeout).
+    assert "Page fully covered." not in text, text
+    m = re.search(r"Covered (\d+)/(\d+) ink pixels", text)
+    assert m, text
+    assert int(m.group(1)) < int(m.group(2)), m.group(0)
+
+
+def test_startpoint_stop_still_runs_the_normal_cleanup():
+    # The stop breaks out of the loop, so the usual `finally` must still
+    # blank the head -- a stopped pass that leaves nozzles firing would be
+    # worse than not having the button at all.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+    null = _NullPrinthead()
+
+    with redirect_stdout(io.StringIO()):
+        asyncio.run(ctrl._print_freehand_pass(null, tracker, StopAfter(at_check=4)))
+
+    assert null.blank_writes == 1, null.blank_writes
+    assert null.speed_warnings[-1] is False, null.speed_warnings
+
+
+def test_startpoint_stop_reports_a_stopped_reason_in_progress_json():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, progress_json=True)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker,
+                                              StopAfter(at_check=4)))
+    events = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    done = [e for e in events if e["event"] == "coverage_done"]
+    assert done and done[-1]["reason"] == "stopped", events[-3:]
+
+
+def test_startpoint_stop_skips_the_misleading_out_of_page_diagnosis():
+    # A deliberate early stop before ever reaching the page must not be
+    # reported as "the calibration origin/axes do not correspond to where
+    # you think the page corner is" -- that advice is about a different bug.
+    ink = np.ones((5, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)
+    tracker = ScriptedTracker([(0.0, 1000.0, 0.0)])      # far off the page
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker,
+                                              StopAfter(at_check=4)))
+    text = out.getvalue()
+    assert "never overlapped the target page" not in text, text
+    assert "Covered 0/25 ink pixels." in text, text
+
+
+def test_startpoint_stop_MUTATION_check_without_the_break_the_pass_runs_on():
+    # Confirms the test above measures the stop and not just a short pass:
+    # the SAME sweep with no startpoint event at all reaches full coverage.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0)
+    tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    text = out.getvalue()
+    assert "Page fully covered." in text, text
+    assert "[startpoint]" not in text, text
+
+
+def test_set_page_origin_moves_only_the_origin_and_zeroes_the_held_pose():
+    # The whole point of the idle press: place WHERE the image starts without
+    # touching the traced plane definition (axes/scales) the calibration file
+    # exists to provide.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink)
+    cal = ctrl.page_calibration
+    e_col_before, e_row_before = cal.e_col.copy(), cal.e_row.copy()
+    scales_before = (cal.scale_col, cal.scale_row)
+    held = (12.0, 34.0, 0.0)
+
+    with redirect_stdout(io.StringIO()):
+        asyncio.run(ctrl._set_page_origin(ScriptedTracker([held])))
+
+    assert np.allclose(cal.e_col, e_col_before)
+    assert np.allclose(cal.e_row, e_row_before)
+    assert (cal.scale_col, cal.scale_row) == scales_before
+    assert ctrl._page_origin_pinned is True
+
+    # zero_at_nozzle, not set_origin: the pose held at the press must project
+    # to (0, 0) through the SAME offsets the pass uses, i.e. the nozzle bar
+    # lands on the origin, not the sensor ~62mm away.
+    mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
+                        sensor_offset_col_mm=0.0)
+    u, v, _ = mapper.project(np.array(held, dtype=float))
+    assert abs(u) < 1e-9 and abs(v) < 1e-9, (u, v)
+
+
+def test_set_page_origin_survives_a_tracker_that_never_yields_a_pose():
+    # A button press must never tear down the BLE session; the idle loop has
+    # to keep waiting for START instead.
+    class DeadTracker:
+        def open(self): pass
+        def close(self): pass
+        def read_position(self): return None
+        def read_pose(self): return None, None
+
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink)
+    origin_before = ctrl.page_calibration.origin.copy()
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._set_page_origin(DeadTracker()))
+
+    assert "origin NOT placed" in out.getvalue(), out.getvalue()
+    assert ctrl._page_origin_pinned is False
+    assert np.allclose(ctrl.page_calibration.origin, origin_before)
+
+
+def _run_idle_wait(ctrl, mode, tracker):
+    """Drive _wait_for_start_press with a STARTPOINT already latched and a
+    START arriving shortly after; returns (returned_after_start, startpoint)."""
+    async def scenario():
+        press, startpoint = asyncio.Event(), asyncio.Event()
+        startpoint.set()                       # STARTPOINT arrives first
+        async def press_later():
+            await asyncio.sleep(0.05)
+            press.set()
+        later = asyncio.ensure_future(press_later())
+        await ctrl._wait_for_start_press(press, startpoint, tracker, mode)
+        returned_after_start = press.is_set()
+        await later
+        return returned_after_start, startpoint.is_set()
+    return asyncio.run(scenario())
+
+
+def test_idle_startpoint_places_the_origin_and_keeps_waiting_for_start():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        returned_after_start, _ = _run_idle_wait(ctrl, "page",
+                                                 ScriptedTracker([(5.0, 6.0, 0.0)]))
+
+    # Did NOT return on the startpoint press alone (it waited for START), and
+    # placed the origin while waiting.
+    assert returned_after_start is True
+    assert ctrl._page_origin_pinned is True
+    assert "page origin placed" in out.getvalue(), out.getvalue()
+
+
+def test_idle_startpoint_is_left_alone_outside_page_mode():
+    # Line mode gives the same button an established, different meaning
+    # (--origin startpoint waits on this very event at pass start), so the
+    # idle handler must not consume the press or place anything.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        returned_after_start, still_set = _run_idle_wait(
+            ctrl, "line", ScriptedTracker([(5.0, 6.0, 0.0)]))
+
+    assert returned_after_start is True
+    assert still_set is True, "line mode must leave the latched press alone"
+    assert ctrl._page_origin_pinned is False
+    assert "page origin placed" not in out.getvalue()
+
+
+def test_simple_frame_placed_origin_is_not_rezeroed_at_start():
+    # REGRESSION guard: the simple frame re-zeros at whatever pose START
+    # catches. Once the operator has placed an origin with the button, that
+    # blind re-zero would silently throw the placement away.
+    ink = np.ones((30, 5), dtype=bool)
+    render = RenderSettings(text="placed origin test")
+    trk = TrackingSettings(mode="page", page_frame="simple", mm_per_column=1.0,
+                           smooth_ms=0.0, poll_hz=500.0, timeout_s=1.0)
+    cal = PageCalibration.simple_frame()
+    ctrl = PrintController(render, BleSettings(), trk, ink=ink,
+                           page_calibration=cal, dose_hold_s=0.01)
+
+    with redirect_stdout(io.StringIO()):
+        asyncio.run(ctrl._set_page_origin(ScriptedTracker([(5.0, 6.0, 0.0)])))
+    placed_origin = cal.origin.copy()
+
+    # Pass starts from a DIFFERENT position: a re-zero would move the origin.
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(
+            _NullPrinthead(), ScriptedTracker([(80.0, 90.0, 0.0)])))
+
+    assert np.allclose(cal.origin, placed_origin), (cal.origin, placed_origin)
+    assert "placed with the STARTPOINT button" in out.getvalue(), out.getvalue()
+
+
+def test_simple_frame_without_a_placed_origin_still_zeroes_at_start():
+    # The unpinned path must keep working exactly as before.
+    ink = np.ones((30, 5), dtype=bool)
+    render = RenderSettings(text="unpinned origin test")
+    trk = TrackingSettings(mode="page", page_frame="simple", mm_per_column=1.0,
+                           smooth_ms=0.0, poll_hz=500.0, timeout_s=1.0)
+    cal = PageCalibration.simple_frame()
+    ctrl = PrintController(render, BleSettings(), trk, ink=ink,
+                           page_calibration=cal, dose_hold_s=0.01)
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(
+            _NullPrinthead(), ScriptedTracker([(80.0, 90.0, 0.0)])))
+    text = out.getvalue()
+    assert "page origin zeroed at the nozzle bar's current position" in text, text
+    assert "placed with the STARTPOINT button" not in text, text
+
+
 def test_verbose_status_line_does_not_garble_the_final_message():
     # REGRESSION guard: the status line ends every write with `\r`, not
     # `\n` (see the throttled block above), so without the newline flush

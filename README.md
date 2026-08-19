@@ -76,6 +76,31 @@ gespeicherte Datei dann per `--page-calibration PATH` laden. Details:
 alten 1D-Closed-Loop (Wagen bewegt sich nur in eine Richtung, keine
 Kalibrierung nötig) weiterhin `--mode line` verwenden.
 
+### Startpoint-Taster im Seiten-Modus: Startpunkt setzen / Druck abbrechen
+
+Im Seiten-Modus hat der Startpoint-Taster **zwei** Bedeutungen, je nachdem, ob
+gerade gedruckt wird:
+
+| Situation | Tastendruck bewirkt |
+|---|---|
+| **Kein Druck aktiv** (`Waiting for next START press ...`) | Setzt den **Startpunkt**: der Seiten-Nullpunkt `(0, 0)` landet dort, wo die **Düsenleiste** gerade steht. Ausgabe: `[startpoint] page origin placed at the nozzle bar's current position ...` Beliebig oft wiederholbar — der zuletzt gesetzte Punkt gilt. Danach START drücken. |
+| **Druck läuft** | **STOP**: der Pass endet sofort, es wird ein Blank-Frame gesendet, `--record`/`--profile-csv` werden noch sauber geschrieben, und die Ausgabe kehrt zu `Waiting for next START press ...` zurück. Ausgabe: `[startpoint] pass stopped by button press.` |
+
+Wichtig: Nur der **Ursprung** wird verschoben. Die abgefahrene Ebene aus
+`page_calibration.json` (Achsen `e_col`/`e_row`, Skalen) bleibt komplett
+unangetastet — die Kalibrierungsdatei definiert weiterhin *wo die Ebene liegt*,
+der Taster nur *wo auf dem Blatt das Bild anfängt*.
+
+Der Ursprung bleibt über mehrere Pässe hinweg gesetzt (wie eine Kalibrierung),
+bis er erneut per Taster verschoben wird. Im einfachen Modus
+(`--page-frame simple`) hat ein so gesetzter Ursprung **Vorrang** vor dem
+sonst automatischen Nullen beim START — sonst würde die bewusste Platzierung
+still überschrieben. Ohne Tastendruck bleibt dort alles wie bisher (Nullpunkt
+beim START-Druck).
+
+Der Line-Modus (`--mode line`) behält seine bisherige, andere Taster-Bedeutung
+(Nullpunkt-Reset mitten im Druck, Neubeginn bei Spalte 0) unverändert.
+
 ### Einfacher Modus: `--page-frame simple` (ohne Kalibrierung)
 
 `--page-frame simple` überspringt die Seiten-Kalibrierung komplett und nimmt
@@ -902,6 +927,9 @@ bisherige Front hinausfährt, kommen neue Spalten dazu.
 Drucks jederzeit** den Nullpunkt auf die **aktuelle Position** und setzt die Frontier
 zurück – der Druck beginnt also wieder bei Spalte 0, ohne dass ein neuer START-Druck
 nötig ist.
+
+> Im **Seiten-Modus** (`--mode page`) hat derselbe Taster eine andere, dort
+> passendere Bedeutung – siehe „Startpoint-Taster im Seiten-Modus" weiter oben.
 
 ### Verfahrachse / verdreht eingebauter Sensor
 
