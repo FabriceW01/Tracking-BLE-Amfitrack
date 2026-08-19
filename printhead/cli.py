@@ -92,11 +92,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "Page mode only: line/time mode packs fixed frames via "
                         "frames_from_ink(), which requires exactly IMAGE_HEIGHT "
                         "rows, so this is rejected outside --mode page. Without "
-                        "it the pattern is capped at IMAGE_HEIGHT rows (15.2mm).")
+                        "it the pattern is capped at IMAGE_HEIGHT rows (13.2mm).")
     g.add_argument("--pattern-square-height-mm", type=float, default=None,
                    help="Row period in mm for checkerboard/h-stripes; overrides "
                         "--pattern-square-rows (square_rows = max(1, round(v / "
-                        "NOZZLE_PITCH_MM))). A raw row is exactly 0.1mm, so this "
+                        "NOZZLE_PITCH_MM))). A raw row is ~0.087mm, so this "
                         "is usually what you want for actually-square tiles.")
     g.add_argument("--calib-major-mm", type=float, default=10.0,
                    help="Distance between full-height ruler ticks (default 10 = 1cm)")
@@ -143,7 +143,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "around a completed pixel that also receives a "
                         "partial dose, since a real drop wets more than its "
                         "own grid cell. In MILLIMETRES, not pixels -- a cell "
-                        "is 0.1mm tall but --mm-per-column (0.2 default) "
+                        "is ~0.087mm tall but --mm-per-column (0.2 default) "
                         "wide, so the same pixel count would mean two "
                         "different physical distances per axis. Default 0 "
                         "(off, exactly the pre-spray behaviour); pair with "
@@ -166,8 +166,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "addressable unit that always fires (and doses) "
                         "together or not at all -- for coarser VERTICAL "
                         "addressing. N=2 halves the smallest addressable "
-                        "vertical step from NOZZLE_PITCH_MM (0.1mm) to "
-                        "0.2mm; the physical nozzle pitch itself does "
+                        "vertical step from NOZZLE_PITCH_MM (~0.087mm) to "
+                        "~0.174mm; the physical nozzle pitch itself does "
                         "not change. A group fires if ANY member's pixel "
                         "still wants ink (OR rule), so a group straddling "
                         "an ink/no-ink boundary also inks the no-ink side. "
@@ -509,8 +509,8 @@ def build_ink(args: argparse.Namespace, mm_per_column: float):
     height_mm = rows * NOZZLE_PITCH_MM
 
     # --pattern-square-height-mm is just a mm-based alternative unit for
-    # --pattern-square-rows -- a raw row is exactly 0.1mm, so mm is usually what
-    # you actually want for a square tile.
+    # --pattern-square-rows -- a raw row is NOZZLE_PITCH_MM (~0.087mm), so mm
+    # is usually what you actually want for a square tile.
     square_rows = args.pattern_square_rows
     if args.pattern_square_height_mm is not None:
         square_rows = max(1, round(args.pattern_square_height_mm / NOZZLE_PITCH_MM))
