@@ -372,6 +372,28 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "no effect on a calibration with no boresight "
                         "captured (default: 0.0, i.e. trust the captured "
                         "boresight exactly)")
+    g.add_argument("--latency-compensate-s", type=float, default=None,
+                   help="Page mode: linearly extrapolate the position fed to "
+                        "the coverage engine forward by this many seconds, "
+                        "using the current sample's own velocity estimate "
+                        "((u,v) - previous (u,v), divided by the elapsed "
+                        "time) -- a heuristic correction for the measured "
+                        "~13ms typical BLE-connection-interval + firmware-"
+                        "queue + fire-slot pipeline delay between 'position "
+                        "read' and 'ink actually placed', which otherwise "
+                        "shows up as a position lag whose direction flips "
+                        "with the direction of travel. Only the coordinates "
+                        "passed to CoverageEngine.step() are shifted -- "
+                        "--record's path panels, the out-of-page bounds "
+                        "check and the speed warning all keep using the "
+                        "real, uncompensated position, since those exist to "
+                        "show where the cart actually was. Default 0.0 (off, "
+                        "today's behaviour): this is a heuristic tuned to a "
+                        "measured pipeline delay, not a general-purpose "
+                        "smoothing knob, and a wrong value can overshoot "
+                        "(most visibly right as the cart stops or reverses) "
+                        "as easily as it corrects -- start small and check "
+                        "against a real print before trusting it")
     mx.add_argument("--list-nodes", action="store_true",
                     help="List the Amfitrack USB nodes (name/uuid/tx_id) and exit")
     mx.add_argument("--scan-ble", action="store_true",
@@ -596,6 +618,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         kwargs["sensor_offset_col_mm"] = args.sensor_offset_col_mm
     if args.boresight_deg is not None:
         kwargs["boresight_deg"] = args.boresight_deg
+    if args.latency_compensate_s is not None:
+        kwargs["latency_compensate_s"] = args.latency_compensate_s
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,

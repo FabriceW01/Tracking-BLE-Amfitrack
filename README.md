@@ -341,6 +341,33 @@ live `yaw` in Grad an. Wird der Wagen exakt in der Referenzpose gehalten
 liegen — weicht es deutlich ab, per `--boresight-deg` nachjustieren oder neu
 kalibrieren (Boresight neu aufnehmen).
 
+### Latenz-Kompensation (`--latency-compensate-s`)
+
+Zwischen "Position gelesen" und "Tinte tatsächlich platziert" liegt eine
+messbare Pipeline-Verzögerung: das ausgehandelte BLE-Verbindungsintervall
+(auf echter Hardware gemessen: durchgängig 15,00 ms, `itvl=12`), die
+Firmware-Queue (6 Slots × 450 µs ≈ 2,7 ms) und der Feuer-Takt selbst
+(`PATTERN_STRIDE` × 450 µs ≈ 1,35 ms). Zusammen ergibt das grob **5 ms
+bestenfalls, ~13 ms typisch, ~21 ms im ungünstigsten Fall** — bei 20 mm/s
+sind das ca. 0,26 mm bzw. 3 Spalten systematischer Nachlauf, der bei einem
+Richtungswechsel das Vorzeichen wechselt.
+
+`--latency-compensate-s SEKUNDEN` extrapoliert **nur** die an
+`CoverageEngine.step()` übergebene Position linear entlang der aktuell
+gemessenen Geschwindigkeit nach vorn (`u/v + Geschwindigkeit × Sekunden`) —
+alles andere (die `--record`-Pfad-Panels, die Out-of-Page-Prüfung, der
+Profiler, die Speed-Warnung) bleibt auf der echten, unkompensierten Position,
+da diese zeigen sollen, wo der Wagen wirklich war. Default `0.0` = aus,
+heutiges Verhalten.
+
+⚠️ Das ist eine **Heuristik gegen einen geschätzten Wert**, kein
+Allzweck-Glättungsregler: ein zu hoher Wert schießt vor allem beim Abbremsen
+oder Richtungswechsel kurz übers Ziel hinaus (die Extrapolation nutzt noch
+die Geschwindigkeit von kurz davor). Klein anfangen und gegen einen echten
+Druck prüfen, bevor man sich darauf verlässt. Die Geschwindigkeitsschätzung
+selbst (Differenz aufeinanderfolgender Positionen) verstärkt außerdem
+Rauschen — je größer der gewählte Wert, desto empfindlicher.
+
 ### Gierwinkel-Singularität behoben: Swing-Twist statt Rotationsvektor
 
 Die relative Rotation (aktuelle Pose gegen Boresight) wurde bisher als
@@ -976,6 +1003,7 @@ python main.py "Text" --dpi 96                # alternativ über Auflösung (25.
 | `--sensor-id` | optionaler `tx_id`-Filter unter den „Sensor"-Nodes (Default: alle) |
 | `--simulate` | Fake-Tracker (keine Hardware) zum Testen des Loops |
 | `--verbose` | Bei `--mode line`/`page`: druckt eine live überschreibende Statuszeile (Position, bei `page` zusätzlich `page u/v`, Gierwinkel/Roll/Pitch, `covered N/M`) **während des laufenden Drucks** — das `--pos`-Äquivalent, aber nutzbar im echten Druck, da `--pos` selbst einer der eigenständigen Diagnose-Checks ist und sich nicht mit einem echten Druck kombinieren lässt (siehe unten). Wird bei `--progress-json` unterdrückt, damit dieser Stream reines NDJSON bleibt. Bei `--mode time` unverändert: loggt jeden 50. Spaltenschreibvorgang. |
+| `--latency-compensate-s S` | Seiten-Modus: extrapoliert nur die an die Coverage-Engine übergebene Position um `S` Sekunden entlang der gemessenen Geschwindigkeit nach vorn, gegen die gemessene BLE/Firmware-Pipeline-Verzögerung (~13ms typisch). Default `0.0` = aus. Siehe Abschnitt „Latenz-Kompensation" oben. |
 
 ## Kalibrierung & Testmuster
 

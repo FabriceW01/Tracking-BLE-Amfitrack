@@ -91,6 +91,29 @@ def _speed_warning_transition(is_warning: bool, speed_mm_s: float,
     return is_warning
 
 
+def _extrapolate_uv(u_mm: float, v_mm: float, vx_mm_s: float, vy_mm_s: float,
+                    latency_s: float) -> "tuple[float, float]":
+    """
+    Linearly project ``(u_mm, v_mm)`` forward by ``latency_s`` seconds along
+    the velocity ``(vx_mm_s, vy_mm_s)`` -- see
+    ``PrintController._print_freehand_pass``'s docstring (``--latency-
+    compensate-s``) for the full rationale. ``latency_s <= 0`` (including the
+    default 0.0) is a no-op, returned unchanged rather than as
+    ``u_mm + 0.0`` -- keeps the disabled path bit-identical to never having
+    called this at all, and lets a caller pass a negative value through
+    without silently clamping it to zero (an operator experimenting with the
+    sign gets exactly what they asked for, not a surprise no-op).
+
+    Pure function of its five inputs -- kept free of asyncio/BLE/CoverageEngine
+    so it is directly, deterministically unit-testable (see
+    tests/test_freehand_pass.py), same reasoning as
+    ``_speed_warning_transition`` above.
+    """
+    if latency_s == 0.0:
+        return u_mm, v_mm
+    return u_mm + vx_mm_s * latency_s, v_mm + vy_mm_s * latency_s
+
+
 class _NullPrinthead:
     """Stand-in for PrintheadBLE used by ``--dry-run --simulate`` (no BLE)."""
 
@@ -155,7 +178,8 @@ class PrintController:
                  progress_json: bool = False,
                  sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
                  sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
-                 boresight_deg: float = 0.0):
+                 boresight_deg: float = 0.0,
+                 latency_compensate_s: float = 0.0):
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -183,6 +207,12 @@ class PrintController:
         # captured boresight -- see PageMapper.boresight_offset_rad / CLI's
         # --boresight-deg. 0.0 = trust the captured boresight exactly.
         self.boresight_deg = boresight_deg
+        # Seconds to linearly extrapolate the position forward by before
+        # handing it to CoverageEngine.step() -- see CLI's
+        # --latency-compensate-s and _print_freehand_pass's docstring for the
+        # full rationale/caveats. 0.0 (default) = today's behaviour, no
+        # extrapolation.
+        self.latency_compensate_s = latency_compensate_s
         # True once a STARTPOINT button press between passes has re-zeroed
         # page_calibration.origin (see _set_page_origin). Read by
         # _print_freehand_pass, which then does NOT re-zero the simple frame
@@ -708,6 +738,25 @@ class PrintController:
         ``self.progress_json`` is set -- that stream must stay pure NDJSON
         for the UI consumer, same reasoning as the plain-text warnings
         above.
+
+        ``self.latency_compensate_s`` (``--latency-compensate-s``, default
+        0.0 = off), if set, linearly extrapolates the ``(u, v)`` handed to
+        ``CoverageEngine.step()`` forward by that many seconds along the
+        current sample's own velocity estimate, to correct for the measured
+        pipeline delay between reading a position and that position's ink
+        actually landing (BLE connection interval + firmware queue + fire
+        slot -- see the CLI flag's help text for the numbers this is tuned
+        against). Deliberately narrow in scope: only the coverage-engine
+        input is shifted. Every other use of position in this method --
+        ``--record``'s path panels, the out-of-page bounds tracking, the
+        profiler, the speed warning above -- keeps the real, uncompensated
+        ``u_mm``/``v_mm``, since those exist to show where the cart actually
+        was; extrapolating them too would make ``--record``'s own diagnostic
+        image lie about that. This is a heuristic tuned to one measured
+        delay estimate, not a general smoothing knob -- a value that is too
+        large overshoots most visibly right as the cart decelerates or
+        reverses, since the extrapolation still uses the velocity from just
+        before that happened.
         """
         if self.page_calibration is None:
             raise RuntimeError("Freehand pass requires a page calibration "
@@ -952,10 +1001,18 @@ class PrintController:
                     v_min = v_mm if v_min is None else min(v_min, v_mm)
                     v_max = v_mm if v_max is None else max(v_max, v_mm)
 
+                    # vx/vy (mm/s along u/v) are the same backward finite
+                    # difference `speed` (below) has always used, just kept
+                    # as signed components instead of collapsed into a
+                    # magnitude -- --latency-compensate-s (see below) needs
+                    # the direction, not just how fast.
                     speed = None
+                    vx = vy = 0.0
                     if prev_u is not None and now > prev_t:
-                        speed = ((u_mm - prev_u) ** 2 + (v_mm - prev_v) ** 2) ** 0.5 \
-                            / (now - prev_t)
+                        dt_uv = now - prev_t
+                        vx = (u_mm - prev_u) / dt_uv
+                        vy = (v_mm - prev_v) / dt_uv
+                        speed = (vx ** 2 + vy ** 2) ** 0.5
                     prev_u, prev_v, prev_t = u_mm, v_mm, now
 
                     # Speed warning, with hysteresis (see
@@ -971,7 +1028,23 @@ class PrintController:
                             speed_warn_state = new_warn
                             await ble.set_speed_warning(speed_warn_state)
 
-                    pattern, changed = coverage.step(u_mm, v_mm, now, yaw_rad=yaw_rad)
+                    # --latency-compensate-s: linearly extrapolate ONLY the
+                    # coordinates fed to the coverage engine, forward along
+                    # the current velocity estimate, to correct for the
+                    # measured position-read -> ink-placed pipeline delay
+                    # (BLE connection interval + firmware queue + fire slot,
+                    # see the CLI flag's help text for the numbers). u_mm/
+                    # v_mm themselves stay the real, uncompensated position
+                    # for everything else below (path recording, the
+                    # out-of-page bounds, the profiler, the speed warning
+                    # above) -- those exist to show where the cart actually
+                    # was, and compensating them too would make --record's
+                    # own diagnostic path lie about that. 0.0 (default)
+                    # short-circuits to exactly today's behaviour.
+                    u_fire, v_fire = _extrapolate_uv(u_mm, v_mm, vx, vy,
+                                                     self.latency_compensate_s)
+
+                    pattern, changed = coverage.step(u_fire, v_fire, now, yaw_rad=yaw_rad)
                     if coverage.last_in_bounds:
                         in_bounds_samples += 1
                     if changed:
