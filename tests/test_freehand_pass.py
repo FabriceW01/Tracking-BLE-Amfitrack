@@ -27,6 +27,7 @@ from printhead.controller import (                                    # noqa: E4
     DEFAULT_SPEED_WARNING_MM_S,
     PrintController,
     _NullPrinthead,
+    _extrapolate_uv,
     _speed_warning_transition,
 )
 from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
@@ -87,7 +88,8 @@ def _identity_calibration():
 
 def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
                 profile=False, profile_csv=None, record=None, progress_json=False,
-                speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S, verbose=False):
+                speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S, verbose=False,
+                latency_compensate_s=0.0):
     render = RenderSettings(text="freehand test")
     ble = BleSettings(verbose=verbose)
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
@@ -112,7 +114,8 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
                            progress_json=progress_json,
                            speed_warning_mm_s=speed_warning_mm_s,
                            sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
-                           sensor_offset_col_mm=0.0)
+                           sensor_offset_col_mm=0.0,
+                           latency_compensate_s=latency_compensate_s)
 
 
 def _sweep_positions(n_cols, samples_per_col=12):
@@ -1670,6 +1673,115 @@ def test_record_is_given_the_fired_mask_so_the_image_matches_the_paper():
 
     assert captured.get("fired") is not None, \
         "render_coverage was called without the fired mask"
+
+
+
+# ==================================================== --latency-compensate-s
+def test_extrapolate_uv_is_a_noop_at_zero_latency():
+    # 0.0 is the default and must be bit-identical to never calling this at
+    # all -- not just "adds 0.0", but literally returns the same values.
+    assert _extrapolate_uv(12.5, -3.2, 999.0, -999.0, 0.0) == (12.5, -3.2)
+
+
+def test_extrapolate_uv_projects_forward_along_velocity():
+    # Direct formula pin: u/v shift by velocity * latency, independently
+    # per axis (unequal vx/vy, unequal signs, so a swapped-axis bug would
+    # show up immediately).
+    u, v = _extrapolate_uv(u_mm=10.0, v_mm=5.0, vx_mm_s=20.0, vy_mm_s=-4.0,
+                           latency_s=0.1)
+    assert abs(u - 12.0) < 1e-9, u          # 10.0 + 20.0*0.1
+    assert abs(v - 4.6) < 1e-9, v           # 5.0 + (-4.0)*0.1
+
+
+def test_extrapolate_uv_negative_latency_projects_backward():
+    # Deliberately not clamped to >= 0 -- an operator experimenting with the
+    # sign gets exactly what they asked for (see the function's docstring).
+    u, v = _extrapolate_uv(u_mm=10.0, v_mm=5.0, vx_mm_s=20.0, vy_mm_s=-4.0,
+                           latency_s=-0.5)
+    assert abs(u - 0.0) < 1e-9, u           # 10.0 + 20.0*(-0.5)
+    assert abs(v - 7.0) < 1e-9, v           # 5.0 + (-4.0)*(-0.5)
+
+
+def test_extrapolate_uv_MUTATION_check_ignoring_v_reintroduces_the_swap_bug():
+    # Confirms the two axes are actually independent in the implementation,
+    # not one shared scalar accidentally applied to both.
+    u, v = _extrapolate_uv(0.0, 0.0, vx_mm_s=1.0, vy_mm_s=2.0, latency_s=1.0)
+    assert (u, v) == (1.0, 2.0)
+    assert u != v, "vx != vy here, so a per-axis bug would make these equal"
+
+
+def test_latency_compensate_reaches_pixels_the_real_position_never_touches():
+    # Wiring + effect, end to end: a cart that (for real) only ever reaches
+    # u=0..50mm must not ink anything at u=51..90mm on its own -- but WITH
+    # compensation, the extrapolated fire position briefly does reach past
+    # 50mm while the cart is still moving fast, which must ink cells there.
+    # The exact shift depends on real wall-clock sample timing (jitter), so
+    # this asserts a wide target range and a generous latency rather than an
+    # exact column -- see the inline math for why the margin holds even
+    # under realistic jitter.
+    ink = np.zeros((10, 90), dtype=bool)
+    ink[:, 51:90] = True                          # only reachable by extrapolation
+    positions = [(float(c), 0.0, 0.0) for c in range(51)]     # u = 0..50mm
+
+    def run(latency_s):
+        captured = {}
+        from printhead import recording as recording_module
+        real = recording_module.render_coverage
+
+        def fake(printed, ink_, path, **kw):
+            captured["fired"] = kw.get("fired")
+            return real(printed, ink_, path, **kw)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ctrl = _controller(ink, timeout_s=0.3,
+                               record=os.path.join(tmp, "coverage.png"),
+                               latency_compensate_s=latency_s)
+            recording_module.render_coverage = fake
+            try:
+                with redirect_stdout(io.StringIO()):
+                    asyncio.run(ctrl._print_freehand_pass(
+                        _NullPrinthead(), ScriptedTracker(positions)))
+            finally:
+                recording_module.render_coverage = real
+        return captured["fired"]
+
+    uncompensated = run(0.0)
+    # 0.1s is deliberately much larger than any real pipeline delay -- a
+    # generous margin against real wall-clock sample-timing jitter is more
+    # important here than a realistic value (realistic values belong in the
+    # CLI help text, not in a test that must not flake).
+    compensated = run(0.1)
+
+    assert not uncompensated[:, 51:90].any(),         "the real sweep never reaches past u=50mm -- must not ink there"
+    assert compensated[:, 51:90].any(),         "compensation should reach ahead of the real position into 51..90mm"
+
+
+def test_latency_compensate_off_by_default_matches_omitting_it():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl_default = _controller(ink, timeout_s=5.0)                          # omitted
+    ctrl_explicit = _controller(ink, timeout_s=5.0, latency_compensate_s=0.0)
+    assert ctrl_default.latency_compensate_s == ctrl_explicit.latency_compensate_s == 0.0
+
+
+def test_cli_latency_compensate_s_defaults_to_none_and_parses():
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
+    assert args.latency_compensate_s is None
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--latency-compensate-s", "0.013"])
+    assert args.latency_compensate_s == 0.013
+
+
+def test_cli_latency_compensate_s_reaches_the_controller_when_given():
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line",
+                           "--latency-compensate-s", "0.02"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.latency_compensate_s == 0.02
+
+
+def test_cli_latency_compensate_s_defaults_to_zero_unset():
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
+    ctrl = cli.build_controller(args)
+    assert ctrl.latency_compensate_s == 0.0
 
 
 
