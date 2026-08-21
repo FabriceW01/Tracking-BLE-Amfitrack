@@ -26,6 +26,7 @@ from .geometry import (
     BLANK_FRAME,
     MODE_UUID,
     NOZZLE_UUID,
+    PROCESS_STOP_UUID,
     ROW_BYTES,
     SPEED_WARN_UUID,
     START_BTN_UUID,
@@ -168,6 +169,50 @@ class PrintheadBLE:
                 SPEED_WARN_UUID, bytes([1 if warn else 0]), response=False)
         except Exception as exc:
             print(f"(could not set speed warning to {int(warn)}: {exc})")
+
+    # ------------------------------------------------------ process stop
+    async def request_process_stop(self) -> bool:
+        """
+        Tell the firmware a print pass has just ended, so it can stop I2S
+        output on its own instead of waiting for a second physical START
+        press (see :meth:`PrintController._run_ble`'s per-pass cleanup,
+        the one call site -- it calls this after EVERY pass, regardless of
+        mode or how the pass ended).
+
+        Why this exists: the firmware's physical START button is a hard
+        toggle (main.c's ``mainloop()`` -- press = start if stopped, press
+        = STOP if already running) with no other way to learn that a pass
+        which ends *itself* (timeout, full coverage, or a STARTPOINT abort)
+        is over. Without this write, the firmware stays "running" after
+        such a pass; the operator's NEXT physical START press is then the
+        toggle's *second* press since it last started, so the firmware
+        reads it as STOP while this client reads the same button edge as
+        the start of a fresh pass -- coverage counts climb normally, but
+        the print head just turned off. No error, no ink, no current. The
+        press after *that* one is the one that actually restarts printing
+        -- reported as "have to press START twice, and the first press's
+        counter climbs with nothing coming out". See the firmware repo's
+        README_BLE_INTERFACE.md, "6) Process Stop Characteristic".
+
+        ``response=True`` (like :meth:`set_print_mode`): a silently dropped
+        delivery here would reintroduce exactly the bug this exists to fix,
+        so the round trip to confirm delivery is worth it. Never raises,
+        though (unlike :meth:`set_print_mode`): this always runs in
+        cleanup, after a pass has already finished one way or another, and
+        must not itself abort anything or block the controller from
+        returning to "Waiting for next START press ...". Firmware that
+        predates this characteristic (the write fails) just means the
+        pre-existing button-toggle desync is not fixed on that firmware --
+        no worse than before this existed. Returns whether the write is
+        believed to have reached the firmware.
+        """
+        try:
+            await self._client.write_gatt_char(
+                PROCESS_STOP_UUID, bytes([1]), response=True)
+        except Exception as exc:
+            print(f"(could not request a firmware process stop: {exc})")
+            return False
+        return True
 
     # --------------------------------------------------------------- write
     async def write_column(self, frame: bytes, response: bool = False) -> None:

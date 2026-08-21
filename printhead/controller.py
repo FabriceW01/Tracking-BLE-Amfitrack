@@ -352,6 +352,19 @@ class PrintController:
                     finally:
                         state["busy"] = False
                         startpoint_event.clear()
+                        # Tell the firmware this pass is over -- see
+                        # ble_client.PrintheadBLE.request_process_stop's
+                        # docstring for the full "why". Applies to every
+                        # mode (the firmware's physical START button is a
+                        # hard toggle regardless of line/page/time), on
+                        # every exit path (this `finally` runs whether the
+                        # pass above completed normally or raised), and is
+                        # never allowed to itself raise or block getting
+                        # back to "Waiting for next START press ..." --
+                        # request_process_stop() already swallows its own
+                        # failures, matching the tolerance every other call
+                        # in this finally block has.
+                        await ble.request_process_stop()
 
                     if self.ble.once:
                         break

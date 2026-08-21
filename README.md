@@ -101,6 +101,49 @@ beim START-Druck).
 Der Line-Modus (`--mode line`) behält seine bisherige, andere Taster-Bedeutung
 (Nullpunkt-Reset mitten im Druck, Neubeginn bei Spalte 0) unverändert.
 
+### START-Taster: manchmal zweimal drücken nötig behoben (Process-Stop-Fix)
+
+**Symptom:** Der START-Taster wurde immer korrekt erkannt und angezeigt, der
+Pässe-Zähler (`../..  gedruckt`) stieg beim ersten Druck normal hoch — aber es
+floss weder Strom noch Tinte. Erst ein zweiter Tastendruck brachte den Druck
+wirklich in Gang.
+
+**Ursache:** Der physische START-Taster auf der Firmware ist ein reiner
+Hardware-Toggle (`mainloop()` in `main.c`): Druck = Start, wenn gerade gestoppt;
+Druck = Stop, wenn gerade am Laufen. Die Firmware hat aber keine andere
+Möglichkeit zu erfahren, dass ein vom Client gesteuerter Pass **von selbst**
+zu Ende gegangen ist (Timeout, volle Coverage, oder ein per Startpoint-Taster
+ausgelöster Abbruch) — sie bleibt intern "running", obwohl der Client den Pass
+bereits als beendet betrachtet. Der **nächste** physische Tastendruck des
+Bedieners ist damit aus Firmware-Sicht bereits der **zweite** Druck seit dem
+letzten Start und wird als STOP gelesen, während der Client denselben
+Tastendruck als Beginn eines **neuen** Passes interpretiert: der Coverage-
+Zähler springt normal hoch, aber der Druckkopf schaltet währenddessen ab —
+kein Fehler, keine Tinte, kein Strom. Erst der Druck danach startet wieder
+wirklich. Ein reiner Zwei-Repo-Bug: keine der beiden Seiten allein sieht
+genug, um den Zustand des jeweils anderen zu rekonstruieren.
+
+**Fix:** Neue GATT-Characteristic `PROCESS_STOP_UUID` (write-only, 1 Byte),
+die der Client nach **jedem** Pass schreibt — unabhängig vom Modus
+(`line`/`page`/`time`) und unabhängig davon, ob der Pass normal zu Ende ging
+oder mit einem Fehler abbrach (`_run_ble()`'s `finally`-Block, läuft auf jedem
+Ausstiegspfad). Die Firmware konsumiert das Signal genau einmal und beendet
+I2S-Ausgabe/`process_running` selbst, statt auf einen zweiten physischen
+Tastendruck zu warten. Der Schreibversuch selbst wirft nie eine Exception
+(`request_process_stop()` fängt jeden Fehler ab und gibt nur `False` zurück) —
+ein Fehlschlag hier darf niemals den Rücksprung zu
+`Waiting for next START press ...` verhindern. Firmware ohne diese
+Characteristic (älterer Flash-Stand) verhält sich wie bisher — kein neuer
+Fehler, nur der alte Bug bleibt für diesen Fall bestehen.
+
+Betrifft beide Repos: die Firmware-Seite (`ble_server.c`/`main.c`/
+`README_BLE_INTERFACE.md`, siehe „6) Process Stop Characteristic" dort) und
+diese Client-Seite (`geometry.py`, `ble_client.py`, `controller.py`). Beide
+Seiten müssen den passenden Firmware-/Client-Stand tragen, damit der Fix
+greift — mit alter Firmware bei neuem Client (oder umgekehrt) bleibt das
+ursprüngliche Verhalten (Taster funktioniert, Characteristic wird ignoriert
+bzw. nie geschrieben).
+
 ### Einfacher Modus: `--page-frame simple` (ohne Kalibrierung)
 
 `--page-frame simple` überspringt die Seiten-Kalibrierung komplett und nimmt
@@ -1444,6 +1487,9 @@ sobald `--mode page` aktiv ist — keine zusätzliche Option nötig.
 | Nozzle char | `41a9348e-2f6b-8db1-934d-743c6f17649a` (Write/WriteNoRsp, Vielfaches von 19 Bytes) |
 | Start btn | `b473a21f-6e58-6380-2647-abd7cd4a904e` (Read/Notify, 1 Byte 0/1) |
 | Startpoint | `cc1087f5-1d92-6ca4-b84f-3e5880e6713d` (Read/Notify, 1 Byte 0/1) |
+| Mode | `f5ad7c1f-f6e1-4dd7-bbb7-d8b9286a88c6` (Read/Write, 1 Byte 0=line/1=page) |
+| Speed warning | `58c05253-945f-48fc-a26c-989c785d6678` (Read/Write, 1 Byte 0/1) |
+| Process stop | `a2e1c9d4-7f3b-4a8e-9c1d-5b6f8e2a0d47` (Write, 1 Byte, nur `1` gültig) — siehe „START-Taster: manchmal zweimal drücken nötig behoben" oben |
 
 Eine Spalte = 19 Bytes = 152 Nozzle-Bits, LSB-first: Bit `j` (Byte `j//8`, Bit `j%8`).
 Die Firmware paddt oben und unten je ein Nullbyte auf das alte 21-Byte-Layout, d. h.
