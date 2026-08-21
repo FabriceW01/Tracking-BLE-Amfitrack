@@ -106,10 +106,18 @@ class _FakeConnectedBLE:
     PrintheadBLE itself performs the write (that is covered above).
     """
     instances = []
+    # Class-level, not constructor args: _run_ble() constructs this with a
+    # single positional arg (PrintheadBLE(self.ble)), so a test that wants
+    # non-default behaviour sets these on the CLASS before calling _run_ble()
+    # and resets them afterwards -- same "external class-level control" idea
+    # already used for `instances` above.
+    fail_stream_time = False
+    fail_process_stop = False
 
     def __init__(self, settings):
         self.settings = settings
         self.mode_calls = []
+        self.stop_requests = 0
         _FakeConnectedBLE.instances.append(self)
 
     async def __aenter__(self):
@@ -126,10 +134,21 @@ class _FakeConnectedBLE:
         return True
 
     async def stream_time(self, frames, period, verbose=False):
-        pass
+        if _FakeConnectedBLE.fail_stream_time:
+            raise RuntimeError("simulated failure mid-pass")
 
     async def write_blank(self):
         pass
+
+    async def request_process_stop(self):
+        self.stop_requests += 1
+        if _FakeConnectedBLE.fail_process_stop:
+            # Mirrors PrintheadBLE.request_process_stop's own contract: it
+            # swallows failures and returns False, never raises -- this fake
+            # does the same, so a test opting into "the write fails" still
+            # exercises _run_ble()'s tolerance of that, not a crash here.
+            return False
+        return True
 
 
 def _mode_calls_for(mode):
@@ -179,6 +198,70 @@ def test_run_ble_selects_line_mode_best_effort_for_time_mode_too():
     # time mode also drives the column FIFO (via stream_time), so it needs
     # the same firmware mode as line mode, selected the same tolerant way.
     assert _mode_calls_for("time") == [(NOZZLE_MODE_LINE, False)]
+
+
+# =============================================== PrintController._run_ble: process stop
+def _run_once(mode):
+    """
+    Same setup as _mode_calls_for() above, but returns the whole
+    _FakeConnectedBLE instance (not just its mode_calls) so a test can also
+    inspect stop_requests. Resets the class-level fail_stream_time/
+    fail_process_stop flags afterwards regardless of outcome, so one test's
+    opt-in never leaks into the next.
+    """
+    render = RenderSettings(text="stop test")
+    ble_settings = BleSettings(auto_start=True, once=True, period=0.001)
+    trk = TrackingSettings(mode=mode, enabled=False, timeout_s=0.2)
+    if mode == "page":
+        ink = np.ones((10, 3), dtype=bool)
+    else:
+        ink = np.zeros((IMAGE_HEIGHT, 3), dtype=bool)
+    ctrl = PrintController(render, ble_settings, trk, ink=ink)
+
+    _FakeConnectedBLE.instances.clear()
+    original = controller_mod.PrintheadBLE
+    controller_mod.PrintheadBLE = _FakeConnectedBLE
+    try:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(ctrl._run_ble())
+    finally:
+        controller_mod.PrintheadBLE = original
+        _FakeConnectedBLE.fail_stream_time = False
+        _FakeConnectedBLE.fail_process_stop = False
+
+    assert len(_FakeConnectedBLE.instances) == 1
+    return _FakeConnectedBLE.instances[0]
+
+
+def test_run_ble_requests_a_process_stop_after_every_pass():
+    # line/page mode: tracking.enabled=False makes the pass itself raise
+    # (no tracker), exercising the except-branch's route into the shared
+    # finally. time mode: stream_time succeeds cleanly, exercising the
+    # normal-completion route into the SAME finally. Both must still
+    # request a stop -- the whole point is that this runs regardless of
+    # how the pass ended.
+    for mode in ("line", "page", "time"):
+        inst = _run_once(mode)
+        assert inst.stop_requests == 1, f"mode={mode}: {inst.stop_requests}"
+
+
+def test_run_ble_requests_a_process_stop_even_when_the_pass_raises():
+    # Explicit, not just incidental: line/page above already go through the
+    # except-branch, but naming it directly documents the guarantee rather
+    # than relying on a reader noticing tracking.enabled=False's side effect.
+    inst = _run_once("line")
+    assert inst.stop_requests == 1
+
+
+def test_run_ble_process_stop_failure_does_not_crash_the_loop():
+    # request_process_stop() itself never raises (see its docstring) -- this
+    # confirms _run_ble() does not additionally wrap it in a way that would
+    # turn "the write failed" into an uncaught exception that kills the
+    # whole BLE session over a best-effort cleanup step.
+    _FakeConnectedBLE.fail_process_stop = True
+    inst = _run_once("time")
+    assert inst.stop_requests == 1, "the attempt must still be made"
 
 
 if __name__ == "__main__":
