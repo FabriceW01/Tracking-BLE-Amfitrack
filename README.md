@@ -1211,6 +1211,79 @@ python main.py --scan-ble
 python main.py --nozzle-test
 ```
 
+### `--straightness`: Tracking-Präzision am Lineal messen (offline)
+
+Auswertung eines mit `--mode page --profile-csv` aufgezeichneten Laufs, bei
+dem der Wagen an einer **geraden Kante (Lineal)** entlanggefahren wurde. Alle
+geloggten `(u_mm, v_mm)` müssten dann auf einer Geraden liegen — wie weit sie
+davon abweichen, ist das Maß für die Präzision.
+
+```bash
+# 1) Lauf aufzeichnen (Wagen am Lineal entlangfahren)
+python main.py --mode page --page-calibration page_calibration.json \
+    --pattern solid --profile --profile-csv lineal.csv
+
+# 2) Offline auswerten -- braucht keine Hardware
+python main.py --straightness lineal.csv
+python main.py --straightness lineal.csv --straightness-bins 20
+```
+
+Ausgegeben wird:
+
+- **Linienwinkel** und Streckenlänge (Plausibilitätscheck, ob überhaupt genug
+  gefahren wurde — unter 50 mm gibt es bewusst kein Urteil, weil über so
+  wenig Weg fast alles gerade ist),
+- **Abweichung** senkrecht zur Ausgleichsgeraden: RMS / p95 / max, jeweils
+  zusätzlich **in Düsenreihen** (0,0868 mm) — das ist die Einheit, die
+  entscheidet, ob eine Abweichung im Druck überhaupt sichtbar werden kann,
+- **Aufteilung systematisch ↔ zufällig**: ein glatter Bogen (quadratischer
+  Fit) gegen den Rest. 0,3 mm gleichmäßiger Verzug ist ein völlig anderes
+  Problem als 0,3 mm Zittern — Ersteres mittelt sich nicht weg und ist
+  typisch für Feldverzerrung, Letzteres dämpft `--smooth-ms`,
+- **Abweichung nach Position** entlang der Linie (Bins mit Mittelwert / RMS /
+  max) — beantwortet direkt „wo genau ist es krumm",
+- **Wagen-Drehung und ihr Hebelarm-Effekt** (siehe Warnung unten).
+
+**Warum die Gerade per Total-Least-Squares gefittet wird, nicht per
+`v = m·u + c`:** Zum einen ist der Fehler zweidimensional — der Tracker ist
+in beide Seitenachsen gleichermaßen ungenau —, also muss der **senkrechte**
+Abstand minimiert werden, nicht der vertikale. Zum anderen läuft die
+gewöhnliche Regression bei einer senkrechten Linie (unendliche Steigung) ins
+Leere; ein Lauf überwiegend entlang `v` ist aber völlig normal und darf
+keinen Sonderfall brauchen. TLS hat gar keine bevorzugte Achse.
+
+⚠️ **Der mit Abstand größte Störterm ist die Wagen-Drehung, nicht der
+Tracker.** Die geloggten `u_mm`/`v_mm` sind **düsenleisten-bezogen**:
+`PageMapper` addiert den festen Sensor→Düsenleisten-Versatz
+(`SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM`, 62,36 mm) *gedreht um den aktuellen
+Gierwinkel*. Eine Drehung um **1° verschiebt den geloggten Punkt damit um
+1,09 mm**, während der Sensor völlig stillsteht. Eine Hand, die beim
+Entlangfahren leicht mitdreht, erzeugt also Millimeter an scheinbarer
+Abweichung, die kein Tracking-Fehler sind. Genau dafür loggt
+`PassProfiler.record_page_sample` das rohe Quaternion mit — dieses Tool ist
+der Offline-Leser, der diese Spalten endlich auswertet: es meldet die
+Drehspanne, die daraus rechnerisch folgende scheinbare Abweichung und die
+Korrelation zwischen beiden. Ist die Korrelation hoch, ist die Drehung die
+Ursache, nicht das Tracking.
+
+Die Drehung wird als **3D-Gesamtwinkel** gegen das erste Sample gemessen, ist
+also eine **Obergrenze**: Roll und Pitch stecken mit drin, schwenken die
+Düsenleiste aber nicht so über die Seite wie der Gierwinkel. Für die saubere
+Zerlegung bräuchte es `e_col`/`e_row`/Boresight aus der Kalibrierung, die ein
+CSV allein nicht enthält.
+
+⚠️ **Der Zahlenwert ist grundsätzlich eine OBERGRENZE für den
+Tracking-Fehler.** Vier Dinge addieren sich darin und lassen sich aus dem CSV
+allein nicht trennen: echter Tracker-Fehler (Rauschen + Feldverzerrung), die
+Handführung (Wagen nicht durchgehend bündig am Lineal), die Geradheit des
+Lineals selbst, und die eben beschriebene Wagen-Drehung. Ein guter Wert
+beweist also gutes Tracking; ein schlechter Wert beweist noch nicht, dass der
+Tracker schuld ist.
+
+Ein `--mode line`-CSV wird bewusst mit klarer Meldung abgewiesen: es enthält
+nur einen 1D-Spaltenindex und eine Vorschubstrecke, also gar keine zweite
+Seitenachse, gegen die sich Geradheit prüfen ließe.
+
 ### `--calibration-check`: Gierwinkel-Drift bei reiner Verschiebung messen
 
 Das gemeldete Symptom war ein driftender Gierwinkel, obwohl der Wagen nur
@@ -1524,6 +1597,7 @@ Der Zugriff erfolgt über die USB-Pakete `amfiprot` und `amfiprot_amfitrack`
 ```bash
 python tests/test_frames.py          # Protokoll-Äquivalenz der Frame-Erzeugung
 python tests/test_batching.py        # Spalten-Batching (Bytestrom bleibt identisch)
+python tests/test_straightness.py    # Geradheits-/Präzisionsauswertung (--straightness)
 python main.py "Hi" --simulate --mode line --dry-run   # Positions-Loop
 python -m printhead --help
 ```

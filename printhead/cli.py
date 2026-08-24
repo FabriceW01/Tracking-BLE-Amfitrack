@@ -403,6 +403,23 @@ def parse_args(argv=None) -> argparse.Namespace:
     mx.add_argument("--ble-benchmark", action="store_true",
                     help="Measure BLE column throughput + round-trip latency "
                          "(the ceiling that makes printing speed-dependent) and exit")
+    mx.add_argument("--straightness", metavar="PROFILE_CSV",
+                    help="Offline: analyse a --mode page --profile-csv file "
+                         "from a pass run along a straight edge (a ruler). "
+                         "Fits a total-least-squares line through the logged "
+                         "u/v path and reports how far the points deviate "
+                         "from it -- overall (RMS/p95/max, also in nozzle "
+                         "rows), split into a systematic bend vs random "
+                         "jitter, and binned by position along the line. "
+                         "Also reports how far the cart ROTATED and how much "
+                         "apparent deviation that alone explains through the "
+                         "62mm sensor->nozzle-bar lever arm (1 deg ~ 1.1 mm), "
+                         "which is usually the largest term. No hardware "
+                         "needed; reads the file and exits")
+    g.add_argument("--straightness-bins", type=int, default=10, metavar="N",
+                   help="With --straightness: how many equal-width bins to "
+                        "split the travelled line into for the "
+                        "deviation-by-position table (default 10)")
 
     args = ap.parse_args(argv)
     if not _debug_mode(args):
@@ -477,8 +494,13 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def _debug_mode(args: argparse.Namespace) -> bool:
+    # --straightness is included here for the same reason as every other
+    # entry: these all run a standalone check and exit, so none of them
+    # needs the text/--calibrate/--pattern content that a real print does.
+    # Unlike the others it touches no hardware at all -- it only reads a
+    # CSV written by an earlier pass.
     return bool(args.pos or args.calibration_check or args.list_nodes or args.scan_ble
-                or args.nozzle_test or args.ble_benchmark)
+                or args.nozzle_test or args.ble_benchmark or args.straightness)
 
 
 def _content_mode_count(args: argparse.Namespace) -> int:
@@ -673,6 +695,14 @@ def _run_debug(args: argparse.Namespace) -> None:
         asyncio.run(diagnostics.nozzle_test(build_ble(args), build_nozzle_map(args)))
     elif args.ble_benchmark:
         asyncio.run(diagnostics.ble_benchmark(build_ble(args), build_tracking(args)))
+    elif args.straightness:
+        # Imported here, not at module scope: this is the only code path
+        # that needs it, and keeping it local matches how the other
+        # offline/optional analyses in this file stay out of the import
+        # cost of a plain print run.
+        from . import straightness
+        print(straightness.analyze_csv(args.straightness,
+                                       n_bins=args.straightness_bins))
 
 
 def main(argv=None) -> None:
