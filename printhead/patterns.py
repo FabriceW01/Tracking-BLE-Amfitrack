@@ -125,6 +125,106 @@ def solid_pattern(length_mm: float, mm_per_column: float,
     return np.ones((rows, width), dtype=bool)
 
 
+def precision_check_layout(rows: int, line_rows: int = 1,
+                           gap_start: int = 1) -> "list[dict]":
+    """
+    Row layout for :func:`precision_check_pattern` -- where each horizontal
+    line sits and how big the gap before it is.
+
+    The gap DOUBLES after every line, so ``gap_start`` selects the whole
+    progression: 1 -> 1,2,4,8,16..., 2 -> 2,4,8,16..., 4 -> 4,8,16,32...
+    Lines are laid down from row 0 until the next one would no longer fit
+    in ``rows``; a line is never half-drawn.
+
+    Kept separate from the ink generation on purpose: the printed result is
+    only readable if you know which gap is which, so the CLI prints this
+    layout as a table (in mm) alongside the pattern. Being a pure function
+    of three ints it is also directly unit-testable, unlike a mask you
+    would have to reverse-engineer the geometry back out of.
+
+    Returns one dict per line, in top-to-bottom order:
+      * ``index``      -- 0-based line number.
+      * ``start``      -- first row of the line.
+      * ``rows``       -- its thickness (always ``line_rows``).
+      * ``gap_before`` -- unprinted rows between the previous line and this
+        one; 0 for the first line, which has nothing above it.
+    """
+    line_rows = max(1, int(line_rows))
+    gap = max(1, int(gap_start))
+
+    bands = []
+    row = 0
+    gap_before = 0
+    while row + line_rows <= rows:
+        bands.append({"index": len(bands), "start": row,
+                      "rows": line_rows, "gap_before": gap_before})
+        gap_before = gap
+        row += line_rows + gap
+        gap *= 2
+    return bands
+
+
+def precision_check_pattern(length_mm: float, mm_per_column: float,
+                            line_rows: int = 1, gap_start: int = 1,
+                            rows: int = IMAGE_HEIGHT, **_) -> np.ndarray:
+    """
+    Full-width horizontal lines separated by DOUBLING gaps -- a resolution
+    target for "how close can two lines get before they smear into one".
+
+    Each line spans the whole travelled length, so one line is one nozzle
+    row firing continuously; the gaps above them grow 1,2,4,8,... rows (see
+    :func:`precision_check_layout` and ``gap_start``). Reading the print is
+    then a single question: scan from the tight end upward and find the
+    first gap that still shows white. That gap is the practical vertical
+    resolution of the WHOLE system at the speed you drove -- tracking
+    accuracy, dose timing and ink spread combined -- which no single
+    measurement in isolation gives you.
+
+    ``line_rows`` sets how thick each printed line is (adjacent nozzle rows
+    fired together). 1 is the sharpest test but also the most sensitive to
+    a single weak nozzle; raise it if you want to measure gap resolution
+    without a dead nozzle confusing the result.
+
+    Both parameters count NOZZLE ROWS, not millimetres -- this is a
+    nozzle-resolution test, and a row (``NOZZLE_PITCH_MM``, ~0.087mm) is
+    the unit the answer is actually quantised to. The CLI prints the mm
+    equivalents so the printed result can still be read with a ruler.
+    """
+    width = _columns(length_mm, mm_per_column)
+    ink = np.zeros((rows, width), dtype=bool)
+    for band in precision_check_layout(rows, line_rows, gap_start):
+        ink[band["start"]:band["start"] + band["rows"], :] = True
+    return ink
+
+
+def format_precision_check_layout(bands: "list[dict]",
+                                  nozzle_pitch_mm: float) -> str:
+    """
+    Render :func:`precision_check_layout`'s output as a readable table.
+
+    Printed by the CLI when this pattern is selected: a precision target
+    whose gap sizes you cannot look up is unreadable on paper, since every
+    gap looks like "some white space" once printed.
+    """
+    if not bands:
+        return ("[precision-check] no line fits in the requested height -- "
+                "reduce --pattern-line-rows/--pattern-gap-start or raise "
+                "--pattern-height-mm.")
+    out = [f"[precision-check] {len(bands)} lines, "
+           f"{bands[0]['rows']} row(s) thick "
+           f"({bands[0]['rows'] * nozzle_pitch_mm:.3f} mm):",
+           "  line   gap before (rows)   gap before (mm)   at row"]
+    for b in bands:
+        if b["gap_before"] == 0:
+            gap_rows, gap_mm = "-", "-"
+        else:
+            gap_rows = f"{b['gap_before']}"
+            gap_mm = f"{b['gap_before'] * nozzle_pitch_mm:.3f}"
+        out.append(f"  {b['index']:>4}   {gap_rows:>17}   {gap_mm:>15}   "
+                   f"{b['start']:>6}")
+    return "\n".join(out)
+
+
 def drill_pattern(length_mm: float, mm_per_column: float,
                   rows: int = IMAGE_HEIGHT, pattern_image: "str | None" = None,
                   **_) -> np.ndarray:
@@ -172,5 +272,6 @@ PATTERNS = {
     "v-stripes": v_stripes_pattern,
     "diagonal": diagonal_pattern,
     "solid": solid_pattern,
+    "precision-check": precision_check_pattern,
     "drill_pattern": drill_pattern,
 }

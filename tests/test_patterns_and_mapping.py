@@ -104,6 +104,144 @@ def test_solid_and_stripes_are_nonempty():
 
 
 # ============================================================================
+# precision-check -- horizontal lines with doubling gaps (resolution target)
+# ============================================================================
+def _gaps_from_ink(ink):
+    """Measure the actual unprinted runs between inked bands in column 0 --
+    reads the geometry back OUT of the mask, so it checks what really gets
+    printed rather than trusting precision_check_layout's own bookkeeping."""
+    col = ink[:, 0]
+    gaps, run, seen_ink = [], 0, False
+    for on in col:
+        if on:
+            if run and seen_ink:
+                gaps.append(run)
+            run = 0
+            seen_ink = True
+        elif seen_ink:
+            run += 1
+    return gaps
+
+
+def test_precision_check_gaps_double_from_gap_start():
+    # The headline contract: gaps are gap_start * 2^n. Checked against the
+    # rendered MASK, not the layout dict, so a layout/ink mismatch fails.
+    for gap_start, expected in ((1, [1, 2, 4, 8, 16]),
+                                (2, [2, 4, 8, 16]),
+                                (4, [4, 8, 16, 32])):
+        ink = patterns.precision_check_pattern(
+            5.0, 0.2, line_rows=1, gap_start=gap_start, rows=70)
+        gaps = _gaps_from_ink(ink)
+        assert gaps[:len(expected)] == expected, (gap_start, gaps)
+
+
+def test_precision_check_layout_matches_the_rendered_ink():
+    # The CLI prints the layout as the table the operator reads the print
+    # against; if it disagreed with the mask, every result would be
+    # misattributed to the wrong gap. Pin them together.
+    for line_rows, gap_start, rows in ((1, 1, 152), (3, 2, 152), (2, 4, 80)):
+        bands = patterns.precision_check_layout(rows, line_rows, gap_start)
+        ink = patterns.precision_check_pattern(
+            5.0, 0.2, line_rows=line_rows, gap_start=gap_start, rows=rows)
+        inked = set(np.nonzero(ink[:, 0])[0].tolist())
+        expected = set()
+        for b in bands:
+            expected.update(range(b["start"], b["start"] + b["rows"]))
+        assert inked == expected, (line_rows, gap_start, rows)
+
+
+def test_precision_check_line_rows_sets_thickness():
+    for line_rows in (1, 2, 5):
+        ink = patterns.precision_check_pattern(
+            5.0, 0.2, line_rows=line_rows, gap_start=4, rows=120)
+        # The first band starts at row 0 and is exactly line_rows tall.
+        assert ink[:line_rows, 0].all(), line_rows
+        assert not ink[line_rows, 0], line_rows
+
+
+def test_precision_check_lines_span_the_full_width():
+    # A line is one nozzle firing continuously along travel -- a line that
+    # did not span the width would be measuring something else entirely.
+    ink = patterns.precision_check_pattern(20.0, 0.2, line_rows=1, gap_start=1)
+    row0 = ink[0, :]
+    assert row0.all() and row0.size == 100
+
+
+def test_precision_check_never_draws_a_partial_line():
+    # A clipped last line would look like a thinner line and be misread as
+    # a resolution result. Every inked band must be exactly line_rows tall.
+    for rows in range(10, 60):
+        ink = patterns.precision_check_pattern(
+            5.0, 0.2, line_rows=3, gap_start=1, rows=rows)
+        col = ink[:, 0]
+        run = 0
+        for on in list(col) + [False]:
+            if on:
+                run += 1
+            else:
+                assert run in (0, 3), (rows, run)
+                run = 0
+
+
+def test_precision_check_clamps_nonpositive_parameters():
+    # 0/negative would otherwise mean an infinite loop (gap 0 never advances)
+    # or a zero-height band -- clamped to 1 rather than trusted.
+    for bad in (0, -3):
+        bands = patterns.precision_check_layout(50, line_rows=bad, gap_start=bad)
+        assert bands, bad
+        assert all(b["rows"] == 1 for b in bands), bad
+        assert bands[1]["gap_before"] == 1, bad
+
+
+def test_precision_check_first_line_has_no_gap_before_it():
+    bands = patterns.precision_check_layout(152, 1, 1)
+    assert bands[0]["gap_before"] == 0
+    assert bands[0]["start"] == 0
+    # ... and every later one carries the doubling sequence.
+    assert [b["gap_before"] for b in bands[1:4]] == [1, 2, 4]
+
+
+def test_precision_check_layout_is_empty_when_nothing_fits():
+    assert patterns.precision_check_layout(2, line_rows=5, gap_start=1) == []
+    msg = patterns.format_precision_check_layout([], NOZZLE_PITCH_MM)
+    assert "no line fits" in msg
+
+
+def test_precision_check_format_reports_gaps_in_rows_and_mm():
+    bands = patterns.precision_check_layout(152, 1, 2)
+    out = patterns.format_precision_check_layout(bands, NOZZLE_PITCH_MM)
+    assert "gap before (rows)" in out and "gap before (mm)" in out
+    # 2 rows at 0.0868mm/row == 0.174mm -- the operator reads the print
+    # against these numbers, so the conversion itself is pinned.
+    assert f"{2 * NOZZLE_PITCH_MM:.3f}" in out
+    assert len(out.splitlines()) == len(bands) + 2      # header + title
+
+
+def test_precision_check_is_registered_and_cli_flags_parse():
+    assert "precision-check" in patterns.PATTERNS
+    args = cli.parse_args(["--mode", "line", "--pattern", "precision-check",
+                           "--pattern-line-rows", "3", "--pattern-gap-start", "4"])
+    assert args.pattern_line_rows == 3
+    assert args.pattern_gap_start == 4
+
+
+def test_precision_check_cli_flag_defaults():
+    args = cli.parse_args(["--mode", "line", "--pattern", "precision-check"])
+    assert args.pattern_line_rows == 1
+    assert args.pattern_gap_start == 1
+
+
+def test_precision_check_cli_build_ink_honours_the_flags():
+    args = cli.parse_args(["--mode", "line", "--pattern", "precision-check",
+                           "--pattern-line-rows", "2", "--pattern-gap-start", "4",
+                           "--pattern-length-mm", "10"])
+    ink, label = cli.build_ink(args, 0.2)
+    assert "precision-check" in label
+    assert ink[:2, 0].all() and not ink[2, 0]        # 2-row line, then a gap
+    assert _gaps_from_ink(ink)[:3] == [4, 8, 16]
+
+
+# ============================================================================
 # drill_pattern -- rasterises an external image (no image ships with this
 # repo; every test below supplies its own throwaway one via --pattern-image,
 # see README)

@@ -93,6 +93,20 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "frames_from_ink(), which requires exactly IMAGE_HEIGHT "
                         "rows, so this is rejected outside --mode page. Without "
                         "it the pattern is capped at IMAGE_HEIGHT rows (13.2mm).")
+    g.add_argument("--pattern-line-rows", type=int, default=1,
+                   help="--pattern precision-check only: how many nozzle rows "
+                        "thick each printed line is (default 1 = a single "
+                        "nozzle row, ~0.087mm -- the sharpest test). Raise it "
+                        "to measure gap resolution without a single weak "
+                        "nozzle confusing the result")
+    g.add_argument("--pattern-gap-start", type=int, default=1,
+                   help="--pattern precision-check only: the FIRST gap between "
+                        "lines, in nozzle rows; it doubles after every line. "
+                        "1 gives gaps 1,2,4,8,16..., 2 gives 2,4,8,16..., "
+                        "4 gives 4,8,16,32... (default 1). Counted in rows, "
+                        "not mm, because that is the unit the answer is "
+                        "quantised to -- the mm equivalents are printed as a "
+                        "table when the pattern is generated")
     g.add_argument("--pattern-square-height-mm", type=float, default=None,
                    help="Row period in mm for checkerboard/h-stripes; overrides "
                         "--pattern-square-rows (square_rows = max(1, round(v / "
@@ -569,7 +583,19 @@ def build_ink(args: argparse.Namespace, mm_per_column: float):
         ink = patterns.PATTERNS[args.pattern](
             args.pattern_length_mm, mm_per_column,
             square_mm=args.pattern_square_mm, square_rows=square_rows,
+            line_rows=args.pattern_line_rows, gap_start=args.pattern_gap_start,
             rows=rows, pattern_image=args.pattern_image)
+        if args.pattern == "precision-check":
+            # A resolution target is unreadable on paper without knowing
+            # which gap is which -- every gap just looks like "some white
+            # space" once printed. Printed here rather than folded into the
+            # one-line label below because it is a table, and because it is
+            # exactly as useful under --dry-run/--preview (where you check
+            # the target before burning ink) as during a real pass.
+            print(patterns.format_precision_check_layout(
+                patterns.precision_check_layout(
+                    rows, args.pattern_line_rows, args.pattern_gap_start),
+                NOZZLE_PITCH_MM))
         return ink, f"[pattern {args.pattern} {args.pattern_length_mm:.0f}mm x {height_mm:.0f}mm]"
     render = RenderSettings(
         text=args.text, font=args.font, render_size=args.render_size,

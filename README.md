@@ -1081,6 +1081,7 @@ python main.py --calibrate --pattern-length-mm 200 --mm-per-column 0.2 --preview
 | `v-stripes` | Volle Spaltenbänder – prüft Spalten-/Trackingtiming; ungleiche Streifenbreite = ungleichmäßiger Vorschub |
 | `diagonal` | Wiederkehrende Diagonale – eine vertauschte Düsenzeile zeigt sich sofort als Knick (siehe Düsen-Mapping unten) |
 | `solid` | Vollfläche – prüft Ink-Deckung/Banding |
+| `precision-check` | Waagerechte Linien mit **verdoppelnden** Abständen – Auflösungstest: ab welchem Abstand verschmieren zwei Linien zu einer? Siehe eigenen Abschnitt unten |
 | `drill_pattern` | Rastert eine externe Bilddatei (z. B. ein Bohr-/Fadenkreuz-Justiermuster) auf die gewünschte physische Größe, statt ein Muster zu berechnen – siehe `--pattern-image` unten |
 
 ```bash
@@ -1093,7 +1094,62 @@ python main.py --pattern diagonal --mode line --preview diag.png
 | `--pattern-length-mm` | Physische Länge des Musters in mm (Default 200) |
 | `--pattern-square-mm` | Kachel-/Streifenbreite in mm (checkerboard, v-stripes, diagonal-Periode) |
 | `--pattern-square-rows` | Kachel-/Streifenhöhe in Zeilen (checkerboard, h-stripes) — Achtung Seitenverhältnis, siehe `--pattern-square-height-mm` im `--mode page`-Abschnitt oben |
+| `--pattern-line-rows` | Liniendicke in Düsenreihen (`precision-check`, Default 1) |
+| `--pattern-gap-start` | Erster Abstand in Düsenreihen, verdoppelt sich danach (`precision-check`, Default 1) |
 | `--pattern-image PATH` | Bilddatei für `--pattern drill_pattern` (jedes von PIL lesbare Format: PNG, JPG, BMP, …) |
+
+#### `precision-check`: ab welchem Abstand trennen sich zwei Linien noch?
+
+Druckt waagerechte Linien über die volle Länge, deren Abstände sich von Linie
+zu Linie **verdoppeln**. Eine Linie ist dabei eine Düsenreihe, die durchgängig
+feuert.
+
+```bash
+# Abstände 1,2,4,8,16,32,64 Reihen, Linien 1 Reihe dick
+python main.py --pattern precision-check --mode line
+
+# Abstände 4,8,16,32,64 -- gröber, falls 1-2 Reihen ohnehin verschmieren
+python main.py --pattern precision-check --pattern-gap-start 4
+
+# Linien 3 Reihen dick: unempfindlich gegen eine einzelne schwache Düse
+python main.py --pattern precision-check --pattern-line-rows 3 --pattern-gap-start 2
+```
+
+`--pattern-gap-start` wählt die ganze Reihe: `1` → 1,2,4,8,16…, `2` →
+2,4,8,16…, `4` → 4,8,16,32…
+
+**Auswertung:** Vom engen Ende her hochschauen und den ersten Abstand suchen,
+der noch als Weiß durchkommt. Dieser Abstand ist die praktische vertikale
+Auflösung des **gesamten** Systems bei der gefahrenen Geschwindigkeit —
+Tracking-Genauigkeit, Dosier-Timing und Tintenausbreitung zusammen. Diese
+Kombination liefert keine Einzelmessung; deshalb ist das Muster ein
+Ergänzungswerkzeug zu `--straightness` (das nur die Tracking-Seite isoliert
+betrachtet) und nicht dessen Ersatz.
+
+Beide Parameter zählen **Düsenreihen, nicht Millimeter** — eine Reihe ist
+`NOZZLE_PITCH_MM` ≈ 0,087 mm, und darauf ist das Ergebnis ohnehin quantisiert.
+Damit sich das Gedruckte trotzdem mit einem Lineal nachmessen lässt, gibt die
+CLI beim Erzeugen eine Tabelle mit beiden Einheiten aus:
+
+```
+[precision-check] 8 lines, 1 row(s) thick (0.087 mm):
+  line   gap before (rows)   gap before (mm)   at row
+     0                   -                 -        0
+     1                   1             0.087        2
+     2                   2             0.174        5
+     3                   4             0.347       10
+     4                   8             0.695       19
+     5                  16             1.389       36
+     6                  32             2.779       69
+     7                  64             5.558      134
+```
+
+Die Tabelle erscheint auch bei `--dry-run`/`--preview`, also bevor Tinte
+fließt. Passt bei der gewählten Höhe keine einzige Linie mehr, sagt sie das
+ausdrücklich, statt still ein leeres Muster zu drucken. Eine Linie wird nie
+angeschnitten: passt die letzte nicht mehr vollständig, entfällt sie — eine
+halb gedruckte Linie sähe wie eine dünnere aus und würde als Auflösungs-
+ergebnis fehlgedeutet.
 
 ⚠️ **`drill_pattern` liefert kein Bild mit.** Anders als die übrigen Presets
 berechnet `drill_pattern` nichts selbst, sondern liest eine Bilddatei ein.
