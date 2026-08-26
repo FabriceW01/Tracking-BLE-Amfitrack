@@ -226,6 +226,49 @@ Dieselben 100 mm bei **gleichem** Abstand, aber an verschiedenen Stellen des
 Feldes (links/rechts/vorn/hinten). Trennt „Fehler wächst mit Entfernung" von
 „Fehler hängt vom Ort ab" — Letzteres deutet auf Metall in der Nähe.
 
+### 2d) Geradheit entlang einer Führung (mehrere Fahrten)
+
+**Frage:** Wie stark weicht die gemessene Bahn quer zur Fahrtrichtung ab — und
+wiederholt sich diese Abweichung?
+
+Der Sensor wird an einem **geraden Balken** entlang der x-Achse geführt.
+Ideal bliebe y konstant; jede Änderung ist Abweichung.
+
+```bash
+# Drei Fahrten über denselben Balken, Balken dazwischen NICHT bewegen
+python main.py --pos --pos-json > fahrt1.jsonl
+python main.py --pos --pos-json > fahrt2.jsonl
+python main.py --pos --pos-json > fahrt3.jsonl
+
+python funktionen/geradheit_messreihe.py fahrt1.jsonl fahrt2.jsonl fahrt3.jsonl \
+    --png geradheit.png
+```
+
+Das Werkzeug legt eine **gemeinsame** Ausgleichsgerade durch alle Fahrten
+(rechnet damit die Schiefstellung des Balkens heraus, die kein Trackerfehler
+ist) und trennt:
+
+| Größe | Bedeutung | gemessen |
+|---|---|---|
+| systematisch (RMS der Mittelwertkurve) | wiederholt sich → Feldverzerrung **oder** krummer Balken | |
+| zufällig (Rauschen je Messwert) | Sensorrauschen | |
+| Versatz je Fahrt | Wiederholbarkeit der Führung | |
+
+**Warum mehrere Fahrten:** Eine einzelne Fahrt kann nicht unterscheiden, ob der
+Tracker an einer Stelle dauerhaft schief misst oder ob es Rauschen war. Erst
+der Vergleich mehrerer Fahrten über denselben Balken trennt das.
+
+**Wenn „überwiegend systematisch" herauskommt:** Balken um **180° drehen** und
+erneut messen. Wandert die Kurve mit, war es der Balken; bleibt sie liegen, der
+Tracker. Das ist die entscheidende Gegenprobe — ohne sie ist nicht entschieden,
+welches von beiden es war.
+
+> ⚠️ **Nicht die Profil-CSV benutzen.** Deren `u_mm`/`v_mm` sind
+> Seitenebenen-Koordinaten: Kalibrierung, Sensor-zu-Düsenleisten-Versatz und
+> Gierwinkel-Drehung sind bereits eingerechnet, und geschrieben wird nur bei
+> Musterwechseln. Für die reine Sensor-Präzision `--pos --pos-json` nehmen. Das
+> Werkzeug liest eine Profil-CSV zwar, warnt dann aber ausdrücklich.
+
 ---
 
 ## Test 3: Auflösung/Präzision
