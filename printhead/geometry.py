@@ -130,10 +130,13 @@ NOZZLE_BAR_SPAN_MM = (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM
 # reference point unambiguous: tracking.PageMapper is the one place that
 # converts this centre-referenced measurement into the nozzle-0-referenced
 # offset CoverageEngine actually needs (see its docstring for that math).
-SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = -62.36
+
+#SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = -62.36
+SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = -45.5
+
 
 # Column-axis (travel direction) counterpart. Believed to be 0 -- no
 # measurement has shown otherwise -- but kept as a named, overridable
 # constant rather than assumed silently, in case a future measurement finds
 # a real offset here too.
-SENSOR_TO_NOZZLE_COL_MM = 0.0
+SENSOR_TO_NOZZLE_COL_MM = 5.5

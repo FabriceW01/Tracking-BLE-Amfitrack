@@ -138,7 +138,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable tracking (forces time mode)")
     g.add_argument("--period", type=float, default=0.03,
                    help="Seconds per column in time mode (default 0.03)")
-    g.add_argument("--dose-hold-s", type=float, default=None,
+    g.add_argument("--dose-hold-s", type=float, default=0.001,
                    help="Page mode: seconds a nozzle must continuously hold a "
                         "pixel before it counts as printed (default: "
                         "coverage.DEFAULT_DOSE_HOLD_S = 0.00405, measured "
@@ -152,7 +152,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "consecutive samples cannot complete a dose and "
                         "coverage collapses -- PrintController warns at "
                         "runtime if this holds)")
-    g.add_argument("--spray-radius-mm", type=float, default=None,
+    g.add_argument("--spray-radius-mm", type=float, default=0.15,
                    help="Page mode ink-spread model: physical radius (mm) "
                         "around a completed pixel that also receives a "
                         "partial dose, since a real drop wets more than its "
@@ -164,7 +164,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "--spray-strength, both must be > 0 to take effect. "
                         "Reduces re-printing when a return pass lands a "
                         "fraction of a mm off the outbound one")
-    g.add_argument("--spray-strength", type=float, default=None,
+    g.add_argument("--spray-strength", type=float, default=0.5,
                    help="Page mode ink-spread model: how much dose a "
                         "neighbour just next to a completed pixel picks up, "
                         "0.0..1.0, falling off linearly to 0 at "
@@ -224,7 +224,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--calib-distance", type=float, default=5.0,
                    help="mm of motion before auto-calibration locks (default 5)")
     scale = g.add_mutually_exclusive_group()
-    scale.add_argument("--mm-per-column", type=float, default=0.2,
+    scale.add_argument("--mm-per-column", type=float, default=0.087,
                        help="Physical width of one printed column in mm "
                             "(default 0.2)")
     scale.add_argument("--dpi", type=float,
@@ -232,7 +232,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--origin", choices=("button", "startpoint"), default="button",
                    help="What zeroes the position: START press or the startpoint "
                         "characteristic (default button)")
-    g.add_argument("--smooth-ms", type=float, default=12.0,
+    g.add_argument("--smooth-ms", type=float, default=0.0,
                    help="Low-pass time constant (ms) for the noisy Amfitrack "
                         "position; 0 = off, larger = smoother but more lag "
                         "(default 12)")
@@ -244,7 +244,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "noticed once per poll, so this bounds how precisely a "
                         "column is placed: at 500 Hz and 20 mm/s that is 0.04 mm "
                         "= a fifth of a column (default 500)")
-    g.add_argument("--timeout", type=float, default=30.0,
+    g.add_argument("--timeout", type=float, default=180.0,
                    help="Abort a position pass after this many seconds (default 30)")
     g.add_argument("--vendor-id", type=_auto_int, default=0x0C17,
                    help="Amfitrack USB vendor id (default 0x0C17)")
