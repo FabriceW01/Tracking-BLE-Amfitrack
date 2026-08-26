@@ -336,9 +336,27 @@ def test_simple_frame_pass_records_sensor_and_nozzle_paths_for_record():
     assert all(abs(d - expected_row_diff) <= 1 for d in row_diffs), (
         row_diffs[:5], expected_row_diff)
     assert len(set(row_diffs)) == 1, "row_diff must be CONSTANT across a zero-yaw pass"
-    # u (column) must match between the two paths at zero yaw -- the offset
-    # is purely along the row/v axis.
-    assert all(s[1] == n[1] for s, n in zip(sensor_path, nozzle_path))
+    # u (column): the two paths differ by exactly the column-axis offset
+    # (geometry.SENSOR_TO_NOZZLE_COL_MM). That constant used to be 0, which
+    # made this an equality check; it is a measured value like the row one
+    # and has since moved off zero, so this now checks the SHIFT rather
+    # than assuming the axis is offset-free. Same +-1 tolerance and same
+    # reasoning as the row check above: each path rounds its own mm to a
+    # column independently, so they can land a column apart without
+    # anything being wrong.
+    col_diffs = [n[1] - s[1] for s, n in zip(sensor_path, nozzle_path)]
+    expected_col_diff = round(SENSOR_TO_NOZZLE_COL_MM / trk.mm_per_column)
+    assert all(abs(d - expected_col_diff) <= 1 for d in col_diffs), (
+        col_diffs[:5], expected_col_diff)
+    # Deliberately NOT the row check's "exactly one distinct value": this
+    # sweep moves along u, so the fractional part of u/mm_per_column walks
+    # across a rounding boundary during the pass and the two independently
+    # rounded paths legitimately land 1 column apart part of the time. v is
+    # constant here, which is why the row diff above can be stricter. Two
+    # adjacent values is the most a pure offset can produce -- more than
+    # that would mean the shift is not constant in mm.
+    assert len(set(col_diffs)) <= 2, col_diffs[:10]
+    assert max(col_diffs) - min(col_diffs) <= 1, col_diffs[:10]
 
 
 def test_freehand_pass_actually_covers_every_ink_pixel():

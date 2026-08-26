@@ -104,6 +104,169 @@ def test_solid_and_stripes_are_nonempty():
 
 
 # ============================================================================
+# precision-check -- horizontal lines with doubling gaps (resolution target)
+# ============================================================================
+def _gaps_from_ink(ink):
+    """Measure the actual unprinted runs between inked bands along row 0 --
+    reads the geometry back OUT of the mask, so it checks what really gets
+    printed rather than trusting precision_check_layout's own bookkeeping.
+    Scans ALONG TRAVEL (a row), since the lines run parallel to the bar."""
+    row = ink[0, :]
+    gaps, run, seen_ink = [], 0, False
+    for on in row:
+        if on:
+            if run and seen_ink:
+                gaps.append(run)
+            run = 0
+            seen_ink = True
+        elif seen_ink:
+            run += 1
+    return gaps
+
+
+def test_precision_check_lines_are_parallel_to_the_nozzle_bar():
+    # The defining property: a line is a full-HEIGHT column band (every
+    # nozzle firing at once), not a full-width row band (one nozzle firing
+    # continuously). Rotating this pattern back would make it measure the
+    # bar's own row spacing instead of the tracking along travel.
+    ink = patterns.precision_check_pattern(5.0, 0.2, line_cols=1, gap_start=1,
+                                           rows=40)
+    assert ink[:, 0].all()                  # first line spans every nozzle
+    assert not ink[:, 1].any()              # the gap after it is fully clear
+    # Every row must see the identical along-travel pattern.
+    for r in range(1, ink.shape[0]):
+        assert np.array_equal(ink[r, :], ink[0, :]), r
+
+
+def test_precision_check_gaps_double_from_gap_start():
+    # The headline contract: gaps are gap_start * 2^n. Checked against the
+    # rendered MASK, not the layout dict, so a layout/ink mismatch fails.
+    for gap_start, expected in ((1, [1, 2, 4, 8, 16]),
+                                (2, [2, 4, 8, 16]),
+                                (4, [4, 8, 16, 32])):
+        ink = patterns.precision_check_pattern(
+            14.0, 0.2, line_cols=1, gap_start=gap_start)
+        gaps = _gaps_from_ink(ink)
+        assert gaps[:len(expected)] == expected, (gap_start, gaps)
+
+
+def test_precision_check_layout_matches_the_rendered_ink():
+    # The CLI prints the layout as the table the operator reads the print
+    # against; if it disagreed with the mask, every result would be
+    # misattributed to the wrong gap. Pin them together.
+    for line_cols, gap_start, length_mm in ((1, 1, 30.0), (3, 2, 30.0),
+                                            (2, 4, 16.0)):
+        ink = patterns.precision_check_pattern(
+            length_mm, 0.2, line_cols=line_cols, gap_start=gap_start)
+        bands = patterns.precision_check_layout(ink.shape[1], line_cols,
+                                                gap_start)
+        inked = set(np.nonzero(ink[0, :])[0].tolist())
+        expected = set()
+        for b in bands:
+            expected.update(range(b["start"], b["start"] + b["cols"]))
+        assert inked == expected, (line_cols, gap_start, length_mm)
+
+
+def test_precision_check_line_cols_sets_thickness():
+    for line_cols in (1, 2, 5):
+        ink = patterns.precision_check_pattern(
+            24.0, 0.2, line_cols=line_cols, gap_start=4)
+        # The first band starts at column 0 and is exactly line_cols wide.
+        assert ink[0, :line_cols].all(), line_cols
+        assert not ink[0, line_cols], line_cols
+
+
+def test_precision_check_lines_span_the_full_height():
+    # Every nozzle must fire on a line -- a line that did not span the bar
+    # would be measuring something else entirely.
+    ink = patterns.precision_check_pattern(20.0, 0.2, line_cols=1, gap_start=1)
+    assert ink[:, 0].all() and ink.shape[0] == IMAGE_HEIGHT
+
+
+def test_precision_check_never_draws_a_partial_line():
+    # A clipped last line would look like a thinner line and be misread as
+    # a resolution result. Every inked band must be exactly line_cols wide.
+    for length_mm in [x * 0.2 for x in range(10, 60)]:
+        ink = patterns.precision_check_pattern(
+            length_mm, 0.2, line_cols=3, gap_start=1)
+        run = 0
+        for on in list(ink[0, :]) + [False]:
+            if on:
+                run += 1
+            else:
+                assert run in (0, 3), (length_mm, run)
+                run = 0
+
+
+def test_precision_check_clamps_nonpositive_parameters():
+    # 0/negative would otherwise mean an infinite loop (gap 0 never advances)
+    # or a zero-width band -- clamped to 1 rather than trusted.
+    for bad in (0, -3):
+        bands = patterns.precision_check_layout(50, line_cols=bad, gap_start=bad)
+        assert bands, bad
+        assert all(b["cols"] == 1 for b in bands), bad
+        assert bands[1]["gap_before"] == 1, bad
+
+
+def test_precision_check_first_line_has_no_gap_before_it():
+    bands = patterns.precision_check_layout(1000, 1, 1)
+    assert bands[0]["gap_before"] == 0
+    assert bands[0]["start"] == 0
+    # ... and every later one carries the doubling sequence.
+    assert [b["gap_before"] for b in bands[1:4]] == [1, 2, 4]
+
+
+def test_precision_check_layout_is_empty_when_nothing_fits():
+    assert patterns.precision_check_layout(2, line_cols=5, gap_start=1) == []
+    msg = patterns.format_precision_check_layout([], 0.2)
+    assert "no line fits" in msg
+
+
+def test_precision_check_format_reports_gaps_in_columns_and_mm():
+    bands = patterns.precision_check_layout(1000, 1, 2)
+    out = patterns.format_precision_check_layout(bands, 0.2)
+    assert "gap before (cols)" in out and "gap before (mm)" in out
+    # Gaps convert through mm_per_column, NOT the nozzle pitch: 2 columns
+    # at 0.2mm == 0.400mm. The operator reads the print against these
+    # numbers, so the conversion itself is pinned.
+    assert "0.400" in out
+    assert f"{2 * NOZZLE_PITCH_MM:.3f}" not in out
+    assert len(out.splitlines()) == len(bands) + 2      # header + title
+
+
+def test_precision_check_format_scales_with_mm_per_column():
+    # Halving mm_per_column must halve every printed mm figure -- catches
+    # a hard-coded pitch sneaking back in.
+    bands = patterns.precision_check_layout(1000, 1, 4)
+    assert "0.800" in patterns.format_precision_check_layout(bands, 0.2)
+    assert "0.400" in patterns.format_precision_check_layout(bands, 0.1)
+
+
+def test_precision_check_is_registered_and_cli_flags_parse():
+    assert "precision-check" in patterns.PATTERNS
+    args = cli.parse_args(["--mode", "line", "--pattern", "precision-check",
+                           "--pattern-line-cols", "3", "--pattern-gap-start", "4"])
+    assert args.pattern_line_cols == 3
+    assert args.pattern_gap_start == 4
+
+
+def test_precision_check_cli_flag_defaults():
+    args = cli.parse_args(["--mode", "line", "--pattern", "precision-check"])
+    assert args.pattern_line_cols == 1
+    assert args.pattern_gap_start == 1
+
+
+def test_precision_check_cli_build_ink_honours_the_flags():
+    args = cli.parse_args(["--mode", "line", "--pattern", "precision-check",
+                           "--pattern-line-cols", "2", "--pattern-gap-start", "4",
+                           "--pattern-length-mm", "20"])
+    ink, label = cli.build_ink(args, 0.2)
+    assert "precision-check" in label
+    assert ink[0, :2].all() and not ink[0, 2]        # 2-col line, then a gap
+    assert _gaps_from_ink(ink)[:3] == [4, 8, 16]
+
+
+# ============================================================================
 # drill_pattern -- rasterises an external image (no image ships with this
 # repo; every test below supplies its own throwaway one via --pattern-image,
 # see README)
@@ -307,12 +470,15 @@ def test_cli_mm_per_column_reaches_build_tracking():
 
 
 def test_cli_mm_per_column_default_still_matches_the_dataclass_default():
-    # Counter-check: with no override, build_tracking must still resolve to
-    # the documented 0.2 default -- proves the fix threads the CLI value
-    # through rather than just hardcoding some other number.
+    # Counter-check: with no override, build_tracking must resolve to the
+    # SAME default the argparse option declares -- proves the value is
+    # threaded through rather than hardcoded somewhere else along the way.
+    # Read back off the parser instead of pinning a literal: this default
+    # is a tuning value that has already been re-measured once (0.2 ->
+    # 0.087), and a hard-coded copy makes every retune look like a bug.
     args = cli.parse_args(["--pos", "--simulate"])
     tracking = cli.build_tracking(args)
-    assert tracking.mm_per_column == 0.2
+    assert tracking.mm_per_column == args.mm_per_column
 
 
 def test_cli_dpi_still_overrides_mm_per_column():
@@ -431,10 +597,24 @@ def test_cli_page_frame_reaches_tracking_settings():
     assert cli.build_tracking(args).page_frame == "simple"
 
 
-def test_cli_spray_defaults_to_off():
+def test_cli_spray_defaults_reach_the_controller():
+    # RENAMED from test_cli_spray_defaults_to_off: --spray-radius-mm and
+    # --spray-strength used to default to None (spray disabled, controller
+    # kept its own 0.0). They now carry real measured defaults, so spray is
+    # ON out of the box and this pins the wiring instead of the old
+    # off-by-default invariant.
     args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
-    assert args.spray_radius_mm is None and args.spray_strength is None
-    # None -> the controller keeps its own 0.0 defaults, i.e. spray disabled
+    ctrl = cli.build_controller(args)
+    assert ctrl.spray_radius_mm == args.spray_radius_mm
+    assert ctrl.spray_strength == args.spray_strength
+
+
+def test_cli_spray_can_still_be_turned_off_explicitly():
+    # The off path still has to work now that it is no longer the default:
+    # 0/0 must reach the controller as a genuine "no spray", not be
+    # confused with "unset, use the default".
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                           "--spray-radius-mm", "0", "--spray-strength", "0"])
     ctrl = cli.build_controller(args)
     assert ctrl.spray_radius_mm == 0.0 and ctrl.spray_strength == 0.0
 

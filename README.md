@@ -101,6 +101,49 @@ beim START-Druck).
 Der Line-Modus (`--mode line`) behält seine bisherige, andere Taster-Bedeutung
 (Nullpunkt-Reset mitten im Druck, Neubeginn bei Spalte 0) unverändert.
 
+### START-Taster: manchmal zweimal drücken nötig behoben (Process-Stop-Fix)
+
+**Symptom:** Der START-Taster wurde immer korrekt erkannt und angezeigt, der
+Pässe-Zähler (`../..  gedruckt`) stieg beim ersten Druck normal hoch — aber es
+floss weder Strom noch Tinte. Erst ein zweiter Tastendruck brachte den Druck
+wirklich in Gang.
+
+**Ursache:** Der physische START-Taster auf der Firmware ist ein reiner
+Hardware-Toggle (`mainloop()` in `main.c`): Druck = Start, wenn gerade gestoppt;
+Druck = Stop, wenn gerade am Laufen. Die Firmware hat aber keine andere
+Möglichkeit zu erfahren, dass ein vom Client gesteuerter Pass **von selbst**
+zu Ende gegangen ist (Timeout, volle Coverage, oder ein per Startpoint-Taster
+ausgelöster Abbruch) — sie bleibt intern "running", obwohl der Client den Pass
+bereits als beendet betrachtet. Der **nächste** physische Tastendruck des
+Bedieners ist damit aus Firmware-Sicht bereits der **zweite** Druck seit dem
+letzten Start und wird als STOP gelesen, während der Client denselben
+Tastendruck als Beginn eines **neuen** Passes interpretiert: der Coverage-
+Zähler springt normal hoch, aber der Druckkopf schaltet währenddessen ab —
+kein Fehler, keine Tinte, kein Strom. Erst der Druck danach startet wieder
+wirklich. Ein reiner Zwei-Repo-Bug: keine der beiden Seiten allein sieht
+genug, um den Zustand des jeweils anderen zu rekonstruieren.
+
+**Fix:** Neue GATT-Characteristic `PROCESS_STOP_UUID` (write-only, 1 Byte),
+die der Client nach **jedem** Pass schreibt — unabhängig vom Modus
+(`line`/`page`/`time`) und unabhängig davon, ob der Pass normal zu Ende ging
+oder mit einem Fehler abbrach (`_run_ble()`'s `finally`-Block, läuft auf jedem
+Ausstiegspfad). Die Firmware konsumiert das Signal genau einmal und beendet
+I2S-Ausgabe/`process_running` selbst, statt auf einen zweiten physischen
+Tastendruck zu warten. Der Schreibversuch selbst wirft nie eine Exception
+(`request_process_stop()` fängt jeden Fehler ab und gibt nur `False` zurück) —
+ein Fehlschlag hier darf niemals den Rücksprung zu
+`Waiting for next START press ...` verhindern. Firmware ohne diese
+Characteristic (älterer Flash-Stand) verhält sich wie bisher — kein neuer
+Fehler, nur der alte Bug bleibt für diesen Fall bestehen.
+
+Betrifft beide Repos: die Firmware-Seite (`ble_server.c`/`main.c`/
+`README_BLE_INTERFACE.md`, siehe „6) Process Stop Characteristic" dort) und
+diese Client-Seite (`geometry.py`, `ble_client.py`, `controller.py`). Beide
+Seiten müssen den passenden Firmware-/Client-Stand tragen, damit der Fix
+greift — mit alter Firmware bei neuem Client (oder umgekehrt) bleibt das
+ursprüngliche Verhalten (Taster funktioniert, Characteristic wird ignoriert
+bzw. nie geschrieben).
+
 ### Einfacher Modus: `--page-frame simple` (ohne Kalibrierung)
 
 `--page-frame simple` überspringt die Seiten-Kalibrierung komplett und nimmt
@@ -1038,6 +1081,7 @@ python main.py --calibrate --pattern-length-mm 200 --mm-per-column 0.2 --preview
 | `v-stripes` | Volle Spaltenbänder – prüft Spalten-/Trackingtiming; ungleiche Streifenbreite = ungleichmäßiger Vorschub |
 | `diagonal` | Wiederkehrende Diagonale – eine vertauschte Düsenzeile zeigt sich sofort als Knick (siehe Düsen-Mapping unten) |
 | `solid` | Vollfläche – prüft Ink-Deckung/Banding |
+| `precision-check` | Linien **parallel zur Düsenleiste** mit **verdoppelnden** Abständen entlang der Fahrtrichtung – Auflösungstest: ab welchem Abstand verschmieren zwei Linien zu einer? Siehe eigenen Abschnitt unten |
 | `drill_pattern` | Rastert eine externe Bilddatei (z. B. ein Bohr-/Fadenkreuz-Justiermuster) auf die gewünschte physische Größe, statt ein Muster zu berechnen – siehe `--pattern-image` unten |
 
 ```bash
@@ -1050,7 +1094,72 @@ python main.py --pattern diagonal --mode line --preview diag.png
 | `--pattern-length-mm` | Physische Länge des Musters in mm (Default 200) |
 | `--pattern-square-mm` | Kachel-/Streifenbreite in mm (checkerboard, v-stripes, diagonal-Periode) |
 | `--pattern-square-rows` | Kachel-/Streifenhöhe in Zeilen (checkerboard, h-stripes) — Achtung Seitenverhältnis, siehe `--pattern-square-height-mm` im `--mode page`-Abschnitt oben |
+| `--pattern-line-cols` | Liniendicke in Spalten (`precision-check`, Default 1) |
+| `--pattern-gap-start` | Erster Abstand in Spalten, verdoppelt sich danach (`precision-check`, Default 1) |
 | `--pattern-image PATH` | Bilddatei für `--pattern drill_pattern` (jedes von PIL lesbare Format: PNG, JPG, BMP, …) |
+
+#### `precision-check`: ab welchem Abstand trennen sich zwei Linien noch?
+
+Druckt Linien **parallel zur Düsenleiste** über die volle Leistenhöhe, deren
+Abstände **entlang der Fahrtrichtung** von Linie zu Linie **verdoppeln**. Eine
+Linie ist dabei ein kurzer Moment, in dem alle 152 Düsen gleichzeitig feuern,
+während der Wagen diese Spalte passiert.
+
+```bash
+# Abstände 1,2,4,8,16,32,64 Spalten, Linien 1 Spalte dick
+python main.py --pattern precision-check --mode line
+
+# Abstände 4,8,16,32,64 -- gröber, falls 1-2 Spalten ohnehin verschmieren
+python main.py --pattern precision-check --pattern-gap-start 4
+
+# Linien 3 Spalten dick: kräftiger, falls die dünnsten zu blass werden
+python main.py --pattern precision-check --pattern-line-cols 3 --pattern-gap-start 2
+```
+
+`--pattern-gap-start` wählt die ganze Reihe: `1` → 1,2,4,8,16…, `2` →
+2,4,8,16…, `4` → 4,8,16,32…
+
+**Warum quer zur Fahrtrichtung und nicht längs:** Eine Linie *längs* der
+Fahrtrichtung wäre eine einzelne durchgehend feuernde Düse — das misst den
+Reihenabstand der Leiste selbst und sagt wenig über die bewegten Teile. *Quer*
+dazu ist jede Linie ein Timing-/Positionsereignis, also genau die Achse, auf
+der Positions-Nachlauf und Dosier-Intervall wirken. Erst diese Ausrichtung
+belastet das Tracking wirklich.
+
+**Auswertung:** Vom engen Ende her schauen und den ersten Abstand suchen, der
+noch als Weiß durchkommt. Dieser Abstand ist die praktische Auflösung des
+**gesamten** Systems **entlang der Fahrtrichtung** bei der gefahrenen
+Geschwindigkeit — Tracking-Genauigkeit, Dosier-Timing und Tintenausbreitung
+zusammen. Diese Kombination liefert keine Einzelmessung; deshalb ist das
+Muster ein Ergänzungswerkzeug zu `--straightness` (das nur die Tracking-Seite
+isoliert betrachtet) und nicht dessen Ersatz.
+
+Beide Parameter zählen **Spalten, nicht Millimeter** — entlang der
+Fahrtrichtung ist das Raster auf `--mm-per-column` quantisiert (Default
+0,2 mm), und darauf landet das Ergebnis. Damit sich das Gedruckte trotzdem mit
+einem Lineal nachmessen lässt, gibt die CLI beim Erzeugen eine Tabelle mit
+beiden Einheiten aus (hier `--pattern-length-mm 60`):
+
+```
+[precision-check] 9 lines parallel to the nozzle bar, 1 column(s) thick (0.200 mm):
+  line   gap before (cols)   gap before (mm)   at col
+     0                   -                 -        0
+     1                   1             0.200        2
+     2                   2             0.400        5
+     3                   4             0.800       10
+     4                   8             1.600       19
+     5                  16             3.200       36
+     6                  32             6.400       69
+     7                  64            12.800      134
+     8                 128            25.600      263
+```
+
+Die mm-Spalte skaliert mit `--mm-per-column`/`--dpi` mit. Die Tabelle
+erscheint auch bei `--dry-run`/`--preview`, also bevor Tinte fließt. Passt bei
+der gewählten Länge keine einzige Linie mehr, sagt sie das ausdrücklich, statt
+still ein leeres Muster zu drucken. Eine Linie wird nie angeschnitten: passt
+die letzte nicht mehr vollständig, entfällt sie — eine halb gedruckte Linie
+sähe wie eine dünnere aus und würde als Auflösungsergebnis fehlgedeutet.
 
 ⚠️ **`drill_pattern` liefert kein Bild mit.** Anders als die übrigen Presets
 berechnet `drill_pattern` nichts selbst, sondern liest eine Bilddatei ein.
@@ -1167,6 +1276,79 @@ python main.py --scan-ble
 # Düsen der Patrone testen:
 python main.py --nozzle-test
 ```
+
+### `--straightness`: Tracking-Präzision am Lineal messen (offline)
+
+Auswertung eines mit `--mode page --profile-csv` aufgezeichneten Laufs, bei
+dem der Wagen an einer **geraden Kante (Lineal)** entlanggefahren wurde. Alle
+geloggten `(u_mm, v_mm)` müssten dann auf einer Geraden liegen — wie weit sie
+davon abweichen, ist das Maß für die Präzision.
+
+```bash
+# 1) Lauf aufzeichnen (Wagen am Lineal entlangfahren)
+python main.py --mode page --page-calibration page_calibration.json \
+    --pattern solid --profile --profile-csv lineal.csv
+
+# 2) Offline auswerten -- braucht keine Hardware
+python main.py --straightness lineal.csv
+python main.py --straightness lineal.csv --straightness-bins 20
+```
+
+Ausgegeben wird:
+
+- **Linienwinkel** und Streckenlänge (Plausibilitätscheck, ob überhaupt genug
+  gefahren wurde — unter 50 mm gibt es bewusst kein Urteil, weil über so
+  wenig Weg fast alles gerade ist),
+- **Abweichung** senkrecht zur Ausgleichsgeraden: RMS / p95 / max, jeweils
+  zusätzlich **in Düsenreihen** (0,0868 mm) — das ist die Einheit, die
+  entscheidet, ob eine Abweichung im Druck überhaupt sichtbar werden kann,
+- **Aufteilung systematisch ↔ zufällig**: ein glatter Bogen (quadratischer
+  Fit) gegen den Rest. 0,3 mm gleichmäßiger Verzug ist ein völlig anderes
+  Problem als 0,3 mm Zittern — Ersteres mittelt sich nicht weg und ist
+  typisch für Feldverzerrung, Letzteres dämpft `--smooth-ms`,
+- **Abweichung nach Position** entlang der Linie (Bins mit Mittelwert / RMS /
+  max) — beantwortet direkt „wo genau ist es krumm",
+- **Wagen-Drehung und ihr Hebelarm-Effekt** (siehe Warnung unten).
+
+**Warum die Gerade per Total-Least-Squares gefittet wird, nicht per
+`v = m·u + c`:** Zum einen ist der Fehler zweidimensional — der Tracker ist
+in beide Seitenachsen gleichermaßen ungenau —, also muss der **senkrechte**
+Abstand minimiert werden, nicht der vertikale. Zum anderen läuft die
+gewöhnliche Regression bei einer senkrechten Linie (unendliche Steigung) ins
+Leere; ein Lauf überwiegend entlang `v` ist aber völlig normal und darf
+keinen Sonderfall brauchen. TLS hat gar keine bevorzugte Achse.
+
+⚠️ **Der mit Abstand größte Störterm ist die Wagen-Drehung, nicht der
+Tracker.** Die geloggten `u_mm`/`v_mm` sind **düsenleisten-bezogen**:
+`PageMapper` addiert den festen Sensor→Düsenleisten-Versatz
+(`SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM`, 62,36 mm) *gedreht um den aktuellen
+Gierwinkel*. Eine Drehung um **1° verschiebt den geloggten Punkt damit um
+1,09 mm**, während der Sensor völlig stillsteht. Eine Hand, die beim
+Entlangfahren leicht mitdreht, erzeugt also Millimeter an scheinbarer
+Abweichung, die kein Tracking-Fehler sind. Genau dafür loggt
+`PassProfiler.record_page_sample` das rohe Quaternion mit — dieses Tool ist
+der Offline-Leser, der diese Spalten endlich auswertet: es meldet die
+Drehspanne, die daraus rechnerisch folgende scheinbare Abweichung und die
+Korrelation zwischen beiden. Ist die Korrelation hoch, ist die Drehung die
+Ursache, nicht das Tracking.
+
+Die Drehung wird als **3D-Gesamtwinkel** gegen das erste Sample gemessen, ist
+also eine **Obergrenze**: Roll und Pitch stecken mit drin, schwenken die
+Düsenleiste aber nicht so über die Seite wie der Gierwinkel. Für die saubere
+Zerlegung bräuchte es `e_col`/`e_row`/Boresight aus der Kalibrierung, die ein
+CSV allein nicht enthält.
+
+⚠️ **Der Zahlenwert ist grundsätzlich eine OBERGRENZE für den
+Tracking-Fehler.** Vier Dinge addieren sich darin und lassen sich aus dem CSV
+allein nicht trennen: echter Tracker-Fehler (Rauschen + Feldverzerrung), die
+Handführung (Wagen nicht durchgehend bündig am Lineal), die Geradheit des
+Lineals selbst, und die eben beschriebene Wagen-Drehung. Ein guter Wert
+beweist also gutes Tracking; ein schlechter Wert beweist noch nicht, dass der
+Tracker schuld ist.
+
+Ein `--mode line`-CSV wird bewusst mit klarer Meldung abgewiesen: es enthält
+nur einen 1D-Spaltenindex und eine Vorschubstrecke, also gar keine zweite
+Seitenachse, gegen die sich Geradheit prüfen ließe.
 
 ### `--calibration-check`: Gierwinkel-Drift bei reiner Verschiebung messen
 
@@ -1444,6 +1626,9 @@ sobald `--mode page` aktiv ist — keine zusätzliche Option nötig.
 | Nozzle char | `41a9348e-2f6b-8db1-934d-743c6f17649a` (Write/WriteNoRsp, Vielfaches von 19 Bytes) |
 | Start btn | `b473a21f-6e58-6380-2647-abd7cd4a904e` (Read/Notify, 1 Byte 0/1) |
 | Startpoint | `cc1087f5-1d92-6ca4-b84f-3e5880e6713d` (Read/Notify, 1 Byte 0/1) |
+| Mode | `f5ad7c1f-f6e1-4dd7-bbb7-d8b9286a88c6` (Read/Write, 1 Byte 0=line/1=page) |
+| Speed warning | `58c05253-945f-48fc-a26c-989c785d6678` (Read/Write, 1 Byte 0/1) |
+| Process stop | `a2e1c9d4-7f3b-4a8e-9c1d-5b6f8e2a0d47` (Write, 1 Byte, nur `1` gültig) — siehe „START-Taster: manchmal zweimal drücken nötig behoben" oben |
 
 Eine Spalte = 19 Bytes = 152 Nozzle-Bits, LSB-first: Bit `j` (Byte `j//8`, Bit `j%8`).
 Die Firmware paddt oben und unten je ein Nullbyte auf das alte 21-Byte-Layout, d. h.
@@ -1478,6 +1663,7 @@ Der Zugriff erfolgt über die USB-Pakete `amfiprot` und `amfiprot_amfitrack`
 ```bash
 python tests/test_frames.py          # Protokoll-Äquivalenz der Frame-Erzeugung
 python tests/test_batching.py        # Spalten-Batching (Bytestrom bleibt identisch)
+python tests/test_straightness.py    # Geradheits-/Präzisionsauswertung (--straightness)
 python main.py "Hi" --simulate --mode line --dry-run   # Positions-Loop
 python -m printhead --help
 ```

@@ -85,7 +85,7 @@ class TrackingSettings:
     calib_distance_mm: float = 5.0  # motion needed before auto-calibration locks
 
     # --- horizontal scale --------------------------------------------------
-    mm_per_column: float = 0.2      # physical width of one printed column (mm)
+    mm_per_column: float = 0.087    # physical width of one printed column (mm)
 
     # --- run behaviour -----------------------------------------------------
     origin: str = "button"          # "button" | "startpoint" (what zeroes pos.)

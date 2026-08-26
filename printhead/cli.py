@@ -93,6 +93,20 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "frames_from_ink(), which requires exactly IMAGE_HEIGHT "
                         "rows, so this is rejected outside --mode page. Without "
                         "it the pattern is capped at IMAGE_HEIGHT rows (13.2mm).")
+    g.add_argument("--pattern-line-cols", type=int, default=1,
+                   help="--pattern precision-check only: how many columns "
+                        "thick each line is (default 1 = a single column, "
+                        "0.2mm at the default --mm-per-column -- the "
+                        "sharpest test). Raise it if the thinnest lines come "
+                        "out too faint to judge")
+    g.add_argument("--pattern-gap-start", type=int, default=1,
+                   help="--pattern precision-check only: the FIRST gap between "
+                        "lines, in columns; it doubles after every line. "
+                        "1 gives gaps 1,2,4,8,16..., 2 gives 2,4,8,16..., "
+                        "4 gives 4,8,16,32... (default 1). Counted in columns, "
+                        "not mm, because along travel the grid is quantised to "
+                        "--mm-per-column -- the mm equivalents are printed as "
+                        "a table when the pattern is generated")
     g.add_argument("--pattern-square-height-mm", type=float, default=None,
                    help="Row period in mm for checkerboard/h-stripes; overrides "
                         "--pattern-square-rows (square_rows = max(1, round(v / "
@@ -403,6 +417,23 @@ def parse_args(argv=None) -> argparse.Namespace:
     mx.add_argument("--ble-benchmark", action="store_true",
                     help="Measure BLE column throughput + round-trip latency "
                          "(the ceiling that makes printing speed-dependent) and exit")
+    mx.add_argument("--straightness", metavar="PROFILE_CSV",
+                    help="Offline: analyse a --mode page --profile-csv file "
+                         "from a pass run along a straight edge (a ruler). "
+                         "Fits a total-least-squares line through the logged "
+                         "u/v path and reports how far the points deviate "
+                         "from it -- overall (RMS/p95/max, also in nozzle "
+                         "rows), split into a systematic bend vs random "
+                         "jitter, and binned by position along the line. "
+                         "Also reports how far the cart ROTATED and how much "
+                         "apparent deviation that alone explains through the "
+                         "62mm sensor->nozzle-bar lever arm (1 deg ~ 1.1 mm), "
+                         "which is usually the largest term. No hardware "
+                         "needed; reads the file and exits")
+    g.add_argument("--straightness-bins", type=int, default=10, metavar="N",
+                   help="With --straightness: how many equal-width bins to "
+                        "split the travelled line into for the "
+                        "deviation-by-position table (default 10)")
 
     args = ap.parse_args(argv)
     if not _debug_mode(args):
@@ -477,8 +508,13 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def _debug_mode(args: argparse.Namespace) -> bool:
+    # --straightness is included here for the same reason as every other
+    # entry: these all run a standalone check and exit, so none of them
+    # needs the text/--calibrate/--pattern content that a real print does.
+    # Unlike the others it touches no hardware at all -- it only reads a
+    # CSV written by an earlier pass.
     return bool(args.pos or args.calibration_check or args.list_nodes or args.scan_ble
-                or args.nozzle_test or args.ble_benchmark)
+                or args.nozzle_test or args.ble_benchmark or args.straightness)
 
 
 def _content_mode_count(args: argparse.Namespace) -> int:
@@ -547,7 +583,24 @@ def build_ink(args: argparse.Namespace, mm_per_column: float):
         ink = patterns.PATTERNS[args.pattern](
             args.pattern_length_mm, mm_per_column,
             square_mm=args.pattern_square_mm, square_rows=square_rows,
+            line_cols=args.pattern_line_cols, gap_start=args.pattern_gap_start,
             rows=rows, pattern_image=args.pattern_image)
+        if args.pattern == "precision-check":
+            # A resolution target is unreadable on paper without knowing
+            # which gap is which -- every gap just looks like "some white
+            # space" once printed. Printed here rather than folded into the
+            # one-line label below because it is a table, and because it is
+            # exactly as useful under --dry-run/--preview (where you check
+            # the target before burning ink) as during a real pass.
+            #
+            # Widths/gaps go through mm_per_column, not NOZZLE_PITCH_MM:
+            # these lines run parallel to the nozzle bar and are spaced
+            # along TRAVEL, where one grid step is one column.
+            print(patterns.format_precision_check_layout(
+                patterns.precision_check_layout(
+                    ink.shape[1], args.pattern_line_cols,
+                    args.pattern_gap_start),
+                mm_per_column))
         return ink, f"[pattern {args.pattern} {args.pattern_length_mm:.0f}mm x {height_mm:.0f}mm]"
     render = RenderSettings(
         text=args.text, font=args.font, render_size=args.render_size,
@@ -673,6 +726,14 @@ def _run_debug(args: argparse.Namespace) -> None:
         asyncio.run(diagnostics.nozzle_test(build_ble(args), build_nozzle_map(args)))
     elif args.ble_benchmark:
         asyncio.run(diagnostics.ble_benchmark(build_ble(args), build_tracking(args)))
+    elif args.straightness:
+        # Imported here, not at module scope: this is the only code path
+        # that needs it, and keeping it local matches how the other
+        # offline/optional analyses in this file stay out of the import
+        # cost of a plain print run.
+        from . import straightness
+        print(straightness.analyze_csv(args.straightness,
+                                       n_bins=args.straightness_bins))
 
 
 def main(argv=None) -> None:

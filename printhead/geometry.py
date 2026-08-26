@@ -25,6 +25,16 @@ NOZZLE_MODE_PAGE = 1
 # HEALTH LED, has no effect on dosing (see README_BLE_INTERFACE.md "3) Speed
 # Warning Characteristic" in the firmware repo). Must match the firmware.
 SPEED_WARN_UUID = "58c05253-945f-48fc-a26c-989c785d6678"   # Read / Write, 1 byte
+# Process stop: client writes 1 once a print pass has ended (any mode, any
+# reason -- success, timeout, or an exception), so the firmware can stop I2S
+# output without needing a second physical START press. The firmware's own
+# START button is a hard toggle with no other way to learn a pass ended on
+# its own; without this write, the toggle desyncs from the client's pass
+# lifecycle -- see README_BLE_INTERFACE.md "6) Process Stop Characteristic"
+# in the firmware repo, and PrintController._run_ble()'s per-pass cleanup
+# (the one call site) for the full symptom this fixes. Must match the
+# firmware.
+PROCESS_STOP_UUID = "a2e1c9d4-7f3b-4a8e-9c1d-5b6f8e2a0d47"   # Write, 1 byte
 
 # ----------------------------------------------------------------------------
 # Printhead geometry (must match the firmware)
