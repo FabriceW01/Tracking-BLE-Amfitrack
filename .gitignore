@@ -9,3 +9,6 @@ venv/
 # Generated previews / output
 *.png
 !docs/**/*.png
+*.tex
+*assets/
+*.json
