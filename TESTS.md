@@ -199,10 +199,26 @@ heraus — deshalb ist der Vergleich aussagekräftiger als jede Einzelmessung.
 | 50 | | | | |
 | 60 | | | | |
 
+**Auswertung**
+
+```bash
+python funktionen/rauschen_entfernung.py rausch_d*.jsonl --png rauschen.png
+```
+
+Der Abstand wird aus dem Dateinamen gelesen (erste Zahl darin), sonst
+`--abstaende 10,20,30,...` angeben. Ausgegeben werden die Tabelle oben, eine
+Grafik Rauschen gegen Entfernung und der **interpolierte Grenzabstand**.
+
 **Kriterium:** Ab wo überschreitet das Rauschen **eine Düsenreihe (0,087 mm)**?
 Jenseits dieses Abstands begrenzt der Sensor die Druckqualität, unabhängig von
 allem anderen. Das ist die härteste Zahl der ganzen Reihe — sie legt den
 nutzbaren Arbeitsbereich fest.
+
+> Das Werkzeug meldet zusätzlich **Drift**: liegt die Streuung innerhalb kurzer
+> Fenster deutlich unter der Gesamtstreuung, läuft der Sensor langsam weg statt
+> nur zu rauschen. Das ist ein anderer Fehler mit anderen Folgen — Rauschen
+> mittelt sich über eine Dosis teilweise heraus, Drift nicht. Tritt Drift auf,
+> zuerst prüfen, ob der Wagen wirklich fest saß.
 
 ### 2b) Maßstabsfehler über Entfernung (mit Referenzmaß)
 
@@ -215,6 +231,13 @@ nutzbaren Arbeitsbereich fest.
 |---|---|---|---|
 | 10 | | | |
 | … | | | |
+
+Auswertbar im selben Werkzeug:
+
+```bash
+python funktionen/rauschen_entfernung.py rausch_d*.jsonl \
+    --massstab 10=99.4,20=99.1,30=98.2 --referenz 100
+```
 
 **Kriterium:** Nutzbarer Arbeitsbereich = Rauschen < 0,087 mm **und**
 Maßstabsfehler < 1 %. Wächst der Fehler mit `d`, ist es Feldverzerrung — die
@@ -466,7 +489,16 @@ kriechen, nach rechts hin immer schneller.
 **Auswertung**
 
 1. Auf dem Papier die Stelle `u` suchen, ab der die Deckung sichtbar einbricht.
-2. In `geschw.csv` die Zeile mit diesem `u_mm` suchen und `speed_mm_s` ablesen.
+2. Diese Stelle dem Werkzeug geben:
+
+```bash
+python funktionen/geschwindigkeit_profil.py geschw.csv --bei-u 137 --png profil.png
+```
+
+Es mittelt über ein Fenster um `u` (ein einzelner Messwert wäre zufälliger als
+die gesuchte Größe, weil `speed_mm_s` selbst eine verrauschte Differenz ist) und
+zeigt im Plot das ganze Geschwindigkeitsprofil samt der 25-mm/s-Warnschwelle —
+damit siehst du auch, ob du überhaupt den nötigen Bereich abgedeckt hast.
 
 Das ist die Grenzgeschwindigkeit — direkt abgelesen, ohne die Geschwindigkeit von
 Hand konstant halten zu müssen (was ohnehin kaum gelingt).
@@ -487,6 +519,14 @@ Hand konstant halten zu müssen (was ohnehin kaum gelingt).
 | mittel | | | |
 | schnell | | | |
 | sehr schnell | | | |
+
+```bash
+python funktionen/geschwindigkeit_profil.py lauf*.csv --deckung 99,96,73,44
+```
+
+Die mittlere Geschwindigkeit je Lauf holt sich das Werkzeug aus der CSV; die
+Deckung in Prozent gibst du in Reihenfolge der Dateien dazu. Ausgegeben wird die
+interpolierte Geschwindigkeit, bei der die Deckung unter die Schwelle fällt.
 
 **Kriterium:** Geschwindigkeit, bei der die Deckung unter ~95 % fällt.
 
