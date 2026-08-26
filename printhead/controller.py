@@ -1128,8 +1128,31 @@ class PrintController:
                     if pj:
                         col = int(round(u_mm / t.mm_per_column)) if t.mm_per_column else 0
                         row = int(round(v_mm / NOZZLE_PITCH_MM))
+                        # Carries the same quantities --verbose prints (raw
+                        # x/y/z, page u/v, row/col, yaw/roll/pitch, covered/
+                        # total) so a consumer can show a live readout that
+                        # stays complete DURING a pass. --verbose itself is
+                        # useless for that: it ends every line with `\r`
+                        # instead of `\n` so it can overwrite itself in the
+                        # terminal, which means a line-oriented reader never
+                        # sees a line until the pass ends. Added as extra keys
+                        # on the existing event rather than a new event type,
+                        # so a consumer that ignores them is unaffected.
                         print(json.dumps({"event": "coverage", "u": round(u_mm, 3),
                                           "v": round(v_mm, 3), "row": row, "col": col,
+                                          "x": round(float(pos[0]), 3),
+                                          "y": round(float(pos[1]), 3),
+                                          "z": round(float(pos[2]), 3),
+                                          "yaw_deg": round(math.degrees(yaw_rad), 3),
+                                          "roll_deg": round(
+                                              math.degrees(mapper.last_roll_rad), 3),
+                                          "pitch_deg": round(
+                                              math.degrees(mapper.last_pitch_rad), 3),
+                                          "covered": int((coverage.ink
+                                                          & coverage.fired).sum()),
+                                          "total": int(coverage.ink.sum()),
+                                          "speed_mm_s": (round(speed, 2)
+                                                         if speed is not None else None),
                                           "new_cells": new_cells}), flush=True)
 
                 if coverage.done:
