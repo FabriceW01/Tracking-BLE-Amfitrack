@@ -1658,6 +1658,16 @@ Der Zugriff erfolgt über die USB-Pakete `amfiprot` und `amfiprot_amfitrack`
   (`.position.x/y/z`, flach `.x/.y/.z`, `position_x_in_m`) bleiben als Fallback für
   abweichende SDK-Versionen. Falls deine SDK die Position anders liefert, dort anpassen.
 
+## Messreihe an der Hardware
+
+Ausführbare Testprotokolle für die acht Eigenschaften der Anlage (Kantenqualität,
+Tracker-Genauigkeit über die Entfernung, Auflösung, Bildqualität,
+Wiederholbarkeit, Rechtwinkligkeit, Geschwindigkeitslimit, Blattausrichtung)
+stehen in **[`TESTS.md`](TESTS.md)** — jeweils mit Durchführung, auszufüllenden
+Messtabellen und Bewertungskriterium. Vorangestellt ist ein Vorflug-Check (tote
+Düsen, BLE-Grenzwerte, Versatz-Vorzeichen, Kalibrierungsgesundheit), ohne den
+mehrere Tests etwas anderes messen als gedacht.
+
 ## Tests / Verifikation ohne Hardware
 
 ```bash
