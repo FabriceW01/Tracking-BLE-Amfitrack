@@ -470,12 +470,15 @@ def test_cli_mm_per_column_reaches_build_tracking():
 
 
 def test_cli_mm_per_column_default_still_matches_the_dataclass_default():
-    # Counter-check: with no override, build_tracking must still resolve to
-    # the documented 0.2 default -- proves the fix threads the CLI value
-    # through rather than just hardcoding some other number.
+    # Counter-check: with no override, build_tracking must resolve to the
+    # SAME default the argparse option declares -- proves the value is
+    # threaded through rather than hardcoded somewhere else along the way.
+    # Read back off the parser instead of pinning a literal: this default
+    # is a tuning value that has already been re-measured once (0.2 ->
+    # 0.087), and a hard-coded copy makes every retune look like a bug.
     args = cli.parse_args(["--pos", "--simulate"])
     tracking = cli.build_tracking(args)
-    assert tracking.mm_per_column == 0.2
+    assert tracking.mm_per_column == args.mm_per_column
 
 
 def test_cli_dpi_still_overrides_mm_per_column():
@@ -594,10 +597,24 @@ def test_cli_page_frame_reaches_tracking_settings():
     assert cli.build_tracking(args).page_frame == "simple"
 
 
-def test_cli_spray_defaults_to_off():
+def test_cli_spray_defaults_reach_the_controller():
+    # RENAMED from test_cli_spray_defaults_to_off: --spray-radius-mm and
+    # --spray-strength used to default to None (spray disabled, controller
+    # kept its own 0.0). They now carry real measured defaults, so spray is
+    # ON out of the box and this pins the wiring instead of the old
+    # off-by-default invariant.
     args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple"])
-    assert args.spray_radius_mm is None and args.spray_strength is None
-    # None -> the controller keeps its own 0.0 defaults, i.e. spray disabled
+    ctrl = cli.build_controller(args)
+    assert ctrl.spray_radius_mm == args.spray_radius_mm
+    assert ctrl.spray_strength == args.spray_strength
+
+
+def test_cli_spray_can_still_be_turned_off_explicitly():
+    # The off path still has to work now that it is no longer the default:
+    # 0/0 must reach the controller as a genuine "no spray", not be
+    # confused with "unset, use the default".
+    args = cli.parse_args(["Hi", "--dry-run", "--page-frame", "simple",
+                           "--spray-radius-mm", "0", "--spray-strength", "0"])
     ctrl = cli.build_controller(args)
     assert ctrl.spray_radius_mm == 0.0 and ctrl.spray_strength == 0.0
 

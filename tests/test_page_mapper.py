@@ -27,6 +27,8 @@ from printhead.calibration import PageCalibration           # noqa: E402
 from printhead.config import TrackingSettings                # noqa: E402
 from printhead.geometry import (                              # noqa: E402
     NOZZLE_BAR_SPAN_MM,
+    NOZZLE_PITCH_MM,
+    NUM_NOZZLES,
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
@@ -109,10 +111,18 @@ def test_page_mapper_default_offset_shifts_uv_by_the_exact_measured_amount():
     u, v, z = mapper.project(pos)
 
     expected_row_shift = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM - NOZZLE_BAR_SPAN_MM / 2.0
-    # -62.36 - (151 * 13.2/152)/2 = -68.9165789... (NOZZLE_BAR_SPAN_MM itself
-    # tracks the measured NOZZLE_PITCH_MM, see geometry.py)
-    assert abs(expected_row_shift - (-62.36 - (151 * 13.2 / 152) / 2.0)) < 1e-9
-    expected_col_shift = SENSOR_TO_NOZZLE_COL_MM      # 0.0, no bar-width term
+    # The SHAPE of the row shift is what matters here, not today's numeric
+    # value: the sensor->bar-centre offset minus half the nozzle-0-to-last
+    # SPAN (not the outer bar WIDTH -- see geometry.NOZZLE_BAR_SPAN_MM).
+    # Deliberately re-derived from the constants rather than compared
+    # against a literal: both offsets are re-measured on the rig from time
+    # to time (they have already moved once), and a hard-coded copy turns
+    # every such re-measurement into a spurious test failure that says
+    # nothing about the mapping being wrong.
+    assert abs(expected_row_shift
+               - (SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM
+                  - (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM / 2.0)) < 1e-9
+    expected_col_shift = SENSOR_TO_NOZZLE_COL_MM      # no bar-span term on u
 
     assert abs(u - (u_raw + expected_col_shift)) < 1e-9
     assert abs(v - (v_raw + expected_row_shift)) < 1e-9

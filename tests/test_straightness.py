@@ -206,15 +206,21 @@ def test_relative_rotation_returns_none_when_nothing_is_usable():
     assert S.relative_rotation_deg(nan4, nan4, nan4, nan4) is None
 
 
-def test_lever_arm_converts_one_degree_to_about_1_1_mm():
-    # The headline number from the module docstring: 62.36mm lever,
-    # 1 degree -> ~1.09mm. Pinning it here means a change to
-    # SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM cannot silently invalidate the
-    # report's central warning.
+def test_lever_arm_is_the_arc_length_of_the_measured_offset():
+    # The report's central warning rests on this conversion: rotating the
+    # cart by an angle swings the nozzle-referenced point by the arc length
+    # r * theta of the sensor->bar offset. Derived from the constant rather
+    # than pinned to today's millimetres -- that offset is a measured value
+    # and has already been re-measured once (62.36 -> 45.5mm), which must
+    # flow through to the report instead of failing this test.
     got = S.lever_arm_mm(1.0)
     expected = abs(SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM) * math.radians(1.0)
     assert abs(got - expected) < 1e-12
-    assert 1.08 < got < 1.10, got
+    # Still a real magnitude check, just expressed relative to the offset:
+    # one degree is always ~1.75% of the lever arm, whatever it measures.
+    assert abs(got / abs(SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM) - 0.017453) < 1e-5
+    # Doubling the angle doubles the swing (linear, not trigonometric).
+    assert abs(S.lever_arm_mm(2.0) - 2 * got) < 1e-12
 
 
 # ============================================================ CSV reading
@@ -371,7 +377,13 @@ def test_analyze_reports_rotation_and_its_lever_arm_cost():
         rot = res["rotation"]
         assert rot is not None
         assert abs(rot["span_deg"] - 2.0) < 0.01, rot["span_deg"]
-        assert rot["lever_arm_mm"] > 2.0, rot["lever_arm_mm"]
+        # Derived from the measured offset, not pinned to a millimetre
+        # figure: the point is that the reported lever-arm cost matches the
+        # rotation actually found, whatever the offset currently measures.
+        assert abs(rot["lever_arm_mm"] - S.lever_arm_mm(2.0)) < 0.01, rot
+        # ... and that it is large enough to matter -- many nozzle rows of
+        # apparent deviation from 2 degrees of hand twist.
+        assert rot["lever_arm_mm"] / NOZZLE_PITCH_MM > 5.0, rot["lever_arm_mm"]
         report = S.format_report(res)
         assert "Wagen-Drehung" in report
         assert "gedreht" in report      # the verdict's rotation warning fired
