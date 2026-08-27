@@ -89,7 +89,7 @@ def _identity_calibration():
 def _controller(ink, drops_per_pixel=2, poll_hz=500.0, timeout_s=2.0,
                 profile=False, profile_csv=None, record=None, progress_json=False,
                 speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S, verbose=False,
-                latency_compensate_s=0.0):
+                latency_compensate_s=0.0, startpoint_anchor="center"):
     render = RenderSettings(text="freehand test")
     ble = BleSettings(verbose=verbose)
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
@@ -115,7 +115,8 @@ def _controller(ink, drops_per_pixel=2, poll_hz=500.0, timeout_s=2.0,
                            speed_warning_mm_s=speed_warning_mm_s,
                            sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                            sensor_offset_col_mm=0.0,
-                           latency_compensate_s=latency_compensate_s)
+                           latency_compensate_s=latency_compensate_s,
+                           startpoint_anchor=startpoint_anchor)
 
 
 def _sweep_positions(n_cols, samples_per_col=12):
@@ -1510,6 +1511,90 @@ def test_set_page_origin_moves_only_the_origin_and_zeroes_the_held_pose():
     expected_v = (ctrl.height - 1) / 2.0 * NOZZLE_PITCH_MM
     assert abs(u - expected_u) < 1e-9 and abs(v - expected_v) < 1e-9, \
         (u, v, expected_u, expected_v)
+
+
+# --------------------------------------------------- --startpoint-anchor
+def _placed_uv(ctrl, held=(12.0, 34.0, 0.0)):
+    """Run _set_page_origin() and return the (u, v) the held pose now
+    projects to -- i.e. where the STARTPOINT press actually landed."""
+    cal = ctrl.page_calibration
+    with redirect_stdout(io.StringIO()):
+        asyncio.run(ctrl._set_page_origin(ScriptedTracker([held])))
+    mapper = PageMapper(cal, sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
+                        sensor_offset_col_mm=0.0)
+    return mapper.project(np.array(held, dtype=float))[:2]
+
+
+def test_startpoint_anchor_left_middle_places_the_left_edge_not_the_centre():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, startpoint_anchor="left-middle")
+    u, v = _placed_uv(ctrl)
+    expected_v = (ctrl.height - 1) / 2.0 * NOZZLE_PITCH_MM
+    assert abs(u - 0.0) < 1e-9, u                # left edge, not centred
+    assert abs(v - expected_v) < 1e-9, (v, expected_v)   # still vertically centred
+
+
+def test_startpoint_anchor_top_left_places_the_literal_corner():
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, startpoint_anchor="top-left")
+    u, v = _placed_uv(ctrl)
+    assert abs(u - 0.0) < 1e-9 and abs(v - 0.0) < 1e-9, (u, v)
+
+
+def test_startpoint_anchor_default_is_center():
+    # Omitting the option must reproduce today's only behaviour exactly --
+    # existing calibration workflows must not change under them.
+    from printhead.controller import DEFAULT_STARTPOINT_ANCHOR
+    assert DEFAULT_STARTPOINT_ANCHOR == "center"
+    ink = np.ones((30, 5), dtype=bool)
+    assert _controller(ink).startpoint_anchor == "center"
+
+
+def test_startpoint_anchor_message_names_the_anchor_used():
+    # The operator has to be able to tell, from the printed confirmation
+    # alone, which point of the pattern just landed under the nozzle bar.
+    ink = np.ones((30, 5), dtype=bool)
+    for anchor, phrase in (("center", "CENTRE"),
+                          ("left-middle", "LEFT EDGE"),
+                          ("top-left", "TOP-LEFT CORNER")):
+        ctrl = _controller(ink, startpoint_anchor=anchor)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(ctrl._set_page_origin(ScriptedTracker([(1.0, 2.0, 0.0)])))
+        assert phrase in out.getvalue(), (anchor, out.getvalue())
+
+
+def test_startpoint_anchor_rejects_an_unknown_value():
+    ink = np.ones((30, 5), dtype=bool)
+    try:
+        _controller(ink, startpoint_anchor="bottom-right")
+    except ValueError as exc:
+        assert "bottom-right" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for an unknown anchor")
+
+
+def test_cli_startpoint_anchor_defaults_to_none_and_parses():
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "page",
+                           "--page-frame", "simple"])
+    assert args.startpoint_anchor is None      # unset -> the controller's default
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "page",
+                           "--page-frame", "simple",
+                           "--startpoint-anchor", "top-left"])
+    assert args.startpoint_anchor == "top-left"
+    ctrl = cli.build_controller(args)
+    assert ctrl.startpoint_anchor == "top-left"
+
+
+def test_cli_startpoint_anchor_rejects_an_unknown_choice():
+    try:
+        cli.parse_args(["Hi", "--dry-run", "--mode", "page",
+                        "--page-frame", "simple",
+                        "--startpoint-anchor", "bottom-right"])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("argparse must reject an unknown --startpoint-anchor")
 
 
 def test_set_page_origin_survives_a_tracker_that_never_yields_a_pose():

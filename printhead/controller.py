@@ -77,6 +77,16 @@ _STALL_GRACE_S = 0.2
 # warning to the operator and the firmware's LED, not a cutoff.
 DEFAULT_SPEED_WARNING_MM_S = 25.0
 
+# Where in the target image a page-mode STARTPOINT press (idle, before START)
+# lands -- see PrintController._set_page_origin. Each maps to a (u, v) point
+# in the image's own axes: u runs left->right along columns (--mm-per-column
+# apart), v runs top->bottom along rows (NOZZLE_PITCH_MM apart) -- "top" and
+# "left" here mean row 0 / col 0 as the ink array itself is indexed, the same
+# sense --flip-y / --mirror-x correct if the physical print comes out
+# reversed on this rig's calibration.
+STARTPOINT_ANCHORS = ("center", "left-middle", "top-left")
+DEFAULT_STARTPOINT_ANCHOR = "center"
+
 # Throttle for --verbose's live status line during a print pass (see
 # _print_line_pass/_print_freehand_pass below): matches --pos's own default
 # hz=15 in diagnostics.monitor_position, so the two read at the same rate
@@ -209,7 +219,12 @@ class PrintController:
                  sensor_offset_row_mm: float = SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
                  sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
                  boresight_deg: float = 0.0,
-                 latency_compensate_s: float = 0.0):
+                 latency_compensate_s: float = 0.0,
+                 startpoint_anchor: str = DEFAULT_STARTPOINT_ANCHOR):
+        if startpoint_anchor not in STARTPOINT_ANCHORS:
+            raise ValueError(
+                f"startpoint_anchor must be one of {STARTPOINT_ANCHORS}, "
+                f"got {startpoint_anchor!r}")
         self.render = render
         self.ble = ble
         self.tracking = tracking
@@ -243,6 +258,10 @@ class PrintController:
         # full rationale/caveats. 0.0 (default) = today's behaviour, no
         # extrapolation.
         self.latency_compensate_s = latency_compensate_s
+        # Which point of the target image a page-mode STARTPOINT press (idle,
+        # before START) parks under the nozzle bar -- see STARTPOINT_ANCHORS
+        # above and _set_page_origin below.
+        self.startpoint_anchor = startpoint_anchor
         # True once a STARTPOINT button press between passes has re-zeroed
         # page_calibration.origin (see _set_page_origin). Read by
         # _print_freehand_pass, which then does NOT re-zero the simple frame
@@ -449,19 +468,43 @@ class PrintController:
                     w.cancel()
                 await asyncio.gather(*waiters, return_exceptions=True)
 
-    async def _set_page_origin(self, tracker) -> None:
-        """Re-zero the page origin so the target image's CENTRE lands under
-        the nozzle bar at the cart's current position (page mode, STARTPOINT
-        button while idle).
+    def _startpoint_target_uv(self) -> "Tuple[float, float]":
+        """
+        The image-space ``(u, v)`` point that ``self.startpoint_anchor``
+        parks under the nozzle bar -- see ``_set_page_origin``.
 
-        Deliberately the image's centre, not its top-left corner (which is
-        what ``target_uv``'s default ``(0, 0)`` would place here): the
+        Middle coordinates use the middle INDEX of ``0 .. width-1`` /
+        ``0 .. height-1``, in mm along each axis, as a continuous value, not
+        rounded to a pixel -- so it lands exactly between the two centre
+        pixels on an even width/height rather than being pulled a half-pixel
+        toward one side.
+        """
+        center_u_mm = (self.width - 1) / 2.0 * self.tracking.mm_per_column
+        center_v_mm = (self.height - 1) / 2.0 * NOZZLE_PITCH_MM
+        if self.startpoint_anchor == "center":
+            return (center_u_mm, center_v_mm)
+        if self.startpoint_anchor == "left-middle":
+            return (0.0, center_v_mm)
+        if self.startpoint_anchor == "top-left":
+            return (0.0, 0.0)
+        raise AssertionError(  # pragma: no cover -- __init__ already validates
+            f"unreachable: unknown startpoint_anchor {self.startpoint_anchor!r}")
+
+    async def _set_page_origin(self, tracker) -> None:
+        """Re-zero the page origin so ``self.startpoint_anchor``'s point of
+        the target image lands under the nozzle bar at the cart's current
+        position (page mode, STARTPOINT button while idle).
+
+        Default is the image's CENTRE, not its top-left corner (which is
+        what ``target_uv``'s own default ``(0, 0)`` would place here): the
         operator points at the spot they want the PATTERN centred on, not at
         a corner they'd otherwise have to estimate by eye and by the
         pattern's own width/height, which nothing about the physical paper
-        tells them. Corner placement is still available -- it's just
-        ``zero_at_nozzle``'s own default -- but centring is what this button
-        is for.
+        tells them. ``--startpoint-anchor`` (CLI) / ``startpoint_anchor``
+        picks a different point instead -- ``"left-middle"`` for a pattern
+        whose left edge should sit at the press, ``"top-left"`` for its
+        literal top-left corner -- see ``_startpoint_target_uv`` and
+        ``STARTPOINT_ANCHORS``.
 
         Only ``PageCalibration.origin`` moves. The traced axes/scales from a
         ``--page-calibration`` file -- the plane definition itself -- are
@@ -502,15 +545,11 @@ class PrintController:
         if (self.tracking.page_frame == "simple"
                 and self.page_calibration.boresight_quat is None):
             mapper.capture_boresight(quat)
-        # Middle INDEX of 0..width-1 / 0..height-1, in mm along each axis --
-        # a continuous mm value, not rounded to a pixel, so it lands exactly
-        # between the two centre pixels on an even width/height rather than
-        # being pulled a half-pixel toward one side.
-        center_u_mm = (self.width - 1) / 2.0 * self.tracking.mm_per_column
-        center_v_mm = (self.height - 1) / 2.0 * NOZZLE_PITCH_MM
-        mapper.zero_at_nozzle(pos, quat, target_uv=(center_u_mm, center_v_mm))
+        mapper.zero_at_nozzle(pos, quat, target_uv=self._startpoint_target_uv())
         self._page_origin_pinned = True
-        print(f"[startpoint] page origin placed -- pattern CENTRE now at the "
+        label = {"center": "CENTRE", "left-middle": "LEFT EDGE, vertically "
+                 "centred", "top-left": "TOP-LEFT CORNER"}[self.startpoint_anchor]
+        print(f"[startpoint] page origin placed -- pattern {label} now at the "
               f"nozzle bar's current position (sensor at {pos[0]:.1f}, "
               f"{pos[1]:.1f}, {pos[2]:.1f} mm). Press START to print from here.")
 

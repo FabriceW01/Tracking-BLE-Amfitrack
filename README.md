@@ -83,8 +83,23 @@ gerade gedruckt wird:
 
 | Situation | Tastendruck bewirkt |
 |---|---|
-| **Kein Druck aktiv** (`Waiting for next START press ...`) | Setzt den **Startpunkt**: die **Mitte** des zu druckenden Musters landet dort, wo die **Düsenleiste** gerade steht (nicht die obere linke Ecke des Bildes). Ausgabe: `[startpoint] page origin placed -- pattern CENTRE now at the nozzle bar's current position ...` Beliebig oft wiederholbar — der zuletzt gesetzte Punkt gilt. Danach START drücken. |
+| **Kein Druck aktiv** (`Waiting for next START press ...`) | Setzt den **Startpunkt**: ein bestimmter Punkt des zu druckenden Musters (per `--startpoint-anchor`, Default die **Mitte**) landet dort, wo die **Düsenleiste** gerade steht. Ausgabe: `[startpoint] page origin placed -- pattern CENTRE now at the nozzle bar's current position ...` Beliebig oft wiederholbar — der zuletzt gesetzte Punkt gilt. Danach START drücken. |
 | **Druck läuft** | **STOP**: der Pass endet sofort, es wird ein Blank-Frame gesendet, `--record`/`--profile-csv` werden noch sauber geschrieben, und die Ausgabe kehrt zu `Waiting for next START press ...` zurück. Ausgabe: `[startpoint] pass stopped by button press.` |
+
+**Welcher Punkt des Musters gesetzt wird (`--startpoint-anchor`):**
+
+| Wert | Punkt des Musters am Taster-Druck | Wann sinnvoll |
+|---|---|---|
+| `center` (Default) | Mitte des Musters | Normalfall — man zeigt auf die Stelle, wo das Bild mittig sitzen soll, ohne eine Ecke abschätzen zu müssen. |
+| `left-middle` | linke Kante, vertikal mittig | Druck soll bündig an einer bekannten linken Kante starten (Lineal, Blattkante). |
+| `top-left` | die tatsächliche obere linke Ecke | Exakte Ecken-Platzierung, z. B. gegen eine Ecke des Papiers. |
+
+`top`/`left` beziehen sich auf Zeile 0 / Spalte 0 des Zielbild-Arrays selbst —
+dieselbe Richtung, die `--flip-y`/`--mirror-x` korrigieren, falls der reale
+Druck auf dieser Kalibrierung gespiegelt herauskommt. Nur der Ursprung ändert
+sich mit der Wahl; die Zuordnung „Ausgabe nennt den Anker beim Namen"
+(`CENTRE` / `LEFT EDGE, vertically centred` / `TOP-LEFT CORNER`) macht den
+gesetzten Punkt auch ohne Blick in den Code nachvollziehbar.
 
 Wichtig: Nur der **Ursprung** wird verschoben. Die abgefahrene Ebene aus
 `page_calibration.json` (Achsen `e_col`/`e_row`, Skalen) bleibt komplett

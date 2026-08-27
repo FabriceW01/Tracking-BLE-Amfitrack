@@ -15,7 +15,12 @@ from typing import Optional
 
 from . import patterns
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
-from .controller import DEFAULT_SPEED_WARNING_MM_S, PrintController
+from .controller import (
+    DEFAULT_SPEED_WARNING_MM_S,
+    DEFAULT_STARTPOINT_ANCHOR,
+    STARTPOINT_ANCHORS,
+    PrintController,
+)
 from .geometry import (
     DEVICE_NAME,
     IMAGE_HEIGHT,
@@ -209,6 +214,23 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "threshold, to avoid chattering the characteristic "
                         "right at the boundary. Advisory only -- drives a "
                         "status LED on the firmware, never affects dosing")
+    g.add_argument("--startpoint-anchor", choices=STARTPOINT_ANCHORS,
+                   default=None,
+                   help="Page mode: which point of the target image a "
+                        "STARTPOINT press (while idle, before START) parks "
+                        "under the nozzle bar (default: "
+                        f"controller.DEFAULT_STARTPOINT_ANCHOR = "
+                        f"{DEFAULT_STARTPOINT_ANCHOR!r}). 'center' places "
+                        "the pattern's middle at the press -- point at where "
+                        "you want it centred, no corner to estimate by eye. "
+                        "'left-middle' puts its left edge there, vertically "
+                        "centred -- for starting flush against a known left "
+                        "edge (a ruler, a sheet edge). 'top-left' puts its "
+                        "literal top-left corner there. 'top'/'left' follow "
+                        "the target image's own row-0/col-0 indexing -- the "
+                        "same sense --flip-y/--mirror-x correct if the "
+                        "physical print comes out flipped on this rig's "
+                        "calibration")
 
     # --- Amfitrack ---------------------------------------------------------
     g = ap.add_argument_group("Amfitrack positioning")
@@ -673,6 +695,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         kwargs["boresight_deg"] = args.boresight_deg
     if args.latency_compensate_s is not None:
         kwargs["latency_compensate_s"] = args.latency_compensate_s
+    if args.startpoint_anchor is not None:
+        kwargs["startpoint_anchor"] = args.startpoint_anchor
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,
