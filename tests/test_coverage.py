@@ -64,18 +64,63 @@ def _sweep(eng, speed_mm_s, mm_per_column, poll_hz=500.0, columns=None,
     return geliefert, n
 
 
-def test_default_drops_per_pixel_matches_line_modes_validated_dose():
-    # The page-mode dose is inherited from line mode's BLE_DROPS_PER_COLUMN,
-    # the one drop count on this rig that has been through real prints. It is
-    # no longer paired with any firmware constant -- the firmware fires each
-    # column it receives exactly once, so the whole dose decision lives on
-    # this side -- but it must not drift away from that starting point
-    # silently either.
-    ble_drops_per_column = 3       # line mode's dose target
-    assert DEFAULT_DROPS_PER_PIXEL == ble_drops_per_column, (
-        f"DEFAULT_DROPS_PER_PIXEL={DEFAULT_DROPS_PER_PIXEL} no longer matches "
-        f"line mode's BLE_DROPS_PER_COLUMN={ble_drops_per_column} -- if that "
-        "is deliberate, say so here with the print it was measured from")
+def test_default_dose_reproduces_the_ink_density_validated_on_paper():
+    # REGRESSION, reported from hardware after the fire-once conversion:
+    # "jetzt kommt zu viel raus" -- the print came out heavier and less sharp
+    # than the pre-conversion one. The default had been copied from line
+    # mode's firmware constant BLE_DROPS_PER_COLUMN = 3 without noticing that
+    # 3 describes a 0.2 mm column, not this rig's 0.087 mm one.
+    #
+    # What the paper sees is drops per MILLIMETRE, which is the dose divided
+    # by the column width. Pinned as that density, not as the raw number, so
+    # a future change to either one has to face the product:
+    #
+    #     3 / 0.200 = 15.0   line mode's validated column
+    #     3 / 0.087 = 34.5   the same 3 at today's column   <- 3x over-inked
+    #     1 / 0.087 = 11.5   this default
+    #
+    # 11.5/mm is exactly what the pre-conversion client delivered at low
+    # speed (simulated on the fire-once firmware: 120 columns of ink over
+    # 120 columns of travel), i.e. the density that was judged acceptable on
+    # real paper.
+    rig_mm_per_column = 0.087
+    dichte = DEFAULT_DROPS_PER_PIXEL / rig_mm_per_column
+    assert abs(dichte - 11.5) < 0.1, (
+        f"the default lays down {dichte:.1f} drops/mm at "
+        f"{rig_mm_per_column} mm/column, not the ~11.5 that the "
+        f"pre-conversion client delivered and the operator accepted on "
+        f"paper -- if this is a deliberate re-calibration, say which print "
+        f"it came from")
+
+
+def test_the_dose_is_a_density_so_it_scales_with_the_column_width():
+    # The trap the wrong default fell into, pinned directly: the same
+    # `drops_per_pixel` means different amounts of ink at different column
+    # widths, because a column of travel is what the dose is per. Anyone
+    # changing --mm-per-column has to move the dose with it.
+    mm_pro_spalte = 0.087
+    for dose in (0.5, 1.0, 3.0):
+        eng = CoverageEngine(np.ones((20, 60), dtype=bool),
+                             mm_per_column=mm_pro_spalte,
+                             drops_per_pixel=dose)
+        geliefert, _ = _sweep(eng, 17.3, mm_pro_spalte)
+        pro_mm = geliefert / (60 * mm_pro_spalte)
+        assert abs(pro_mm - dose / mm_pro_spalte) <= 0.05 * dose / mm_pro_spalte, (
+            f"drops_per_pixel={dose} delivered {pro_mm:.1f} drops/mm, "
+            f"expected {dose / mm_pro_spalte:.1f}")
+
+
+def test_a_fractional_dose_is_honoured_rather_than_rounded_up():
+    # Whole drops are too coarse a dial below the default: the next step down
+    # from 1 would be "no ink at all". A half dose must halve the ink.
+    mm_pro_spalte = 0.087
+    voll = CoverageEngine(np.ones((20, 60), dtype=bool),
+                          mm_per_column=mm_pro_spalte, drops_per_pixel=1.0)
+    halb = CoverageEngine(np.ones((20, 60), dtype=bool),
+                          mm_per_column=mm_pro_spalte, drops_per_pixel=0.5)
+    v, _ = _sweep(voll, 17.3, mm_pro_spalte)
+    h, _ = _sweep(halb, 17.3, mm_pro_spalte)
+    assert abs(h - v / 2) <= 0.1 * v / 2, (v, h)
 
 
 def test_coverage_is_speed_independent_up_to_the_poll_rate_limit():
