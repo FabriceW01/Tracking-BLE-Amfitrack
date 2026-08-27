@@ -25,7 +25,7 @@ def main() -> None:
                          "pip install -r requirements-ui.txt")
 
     url = f"http://{args.host}:{args.port}"
-    print(f"Printhead Control UI -> {url}")
+    print(f"Printhead UI -> {url}")
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 

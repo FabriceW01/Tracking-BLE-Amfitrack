@@ -1,866 +1,699 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Printhead Control</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Printhead</title>
 <style>
   :root{
-    --bg:#0d1117; --panel:#161b22; --panel2:#1c2230; --line:#2a3240;
-    --txt:#e6edf3; --muted:#8b98a9; --accent:#2dd4bf; --accent2:#38bdf8;
-    --warn:#f59e0b; --bad:#f87171; --good:#34d399; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --bg:#12151a; --panel:#1a1f27; --panel2:#212832; --line:#2c3542;
+    --fg:#e6ebf2; --dim:#96a3b4; --accent:#4a9eff; --ok:#3ec97a;
+    --warn:#f0b429; --bad:#ff5c5c; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#12303044,transparent),var(--bg);
-    color:var(--txt);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  a{color:var(--accent2)}
-  .wrap{max-width:1240px;margin:0 auto;padding:18px 20px 60px}
-  header.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px}
-  .brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:18px}
-  .brand .dot{width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 14px var(--accent)}
-  .spacer{flex:1}
-  .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;
-    background:var(--panel);border:1px solid var(--line);font-size:12px;color:var(--muted)}
-  .pill .status-dot{width:9px;height:9px;border-radius:50%;background:var(--bad)}
-  .pill.on .status-dot{background:var(--good);box-shadow:0 0 10px var(--good)}
-  .toggle{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:10px;
-    background:var(--panel);border:1px solid var(--line);cursor:pointer;user-select:none;font-size:13px}
-  .toggle input{accent-color:var(--accent)}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  button{font:inherit;cursor:pointer;border:1px solid var(--line);
+         background:var(--panel2);color:var(--fg);padding:7px 13px;border-radius:6px}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#06121f;font-weight:600}
+  button.danger{background:#3a1d1d;border-color:#5c2b2b;color:#ffb4b4}
+  button.danger:hover:not(:disabled){border-color:var(--bad)}
+  input,select{font:inherit;background:#0e1116;color:var(--fg);
+               border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  label{display:block;font-size:12px;color:var(--dim);margin-bottom:3px}
+  .field{margin-bottom:10px}
+  .row{display:grid;gap:10px}
+  .row.c2{grid-template-columns:1fr 1fr}
+  .row.c3{grid-template-columns:1fr 1fr 1fr}
 
-  .grid{display:grid;grid-template-columns:1.15fr .85fr;gap:16px}
-  @media(max-width:980px){.grid{grid-template-columns:1fr}}
-  .card{background:linear-gradient(180deg,var(--panel),#12161d);border:1px solid var(--line);
-    border-radius:14px;padding:16px;box-shadow:0 8px 30px #0006}
-  .card h2{margin:0 0 12px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  header{display:flex;align-items:center;gap:14px;padding:10px 16px;
+         background:var(--panel);border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .spacer{flex:1}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+  .dot.on{background:var(--ok)} .dot.off{background:#55606f}
+  .pill{font-size:12px;color:var(--dim);display:flex;align-items:center}
 
-  /* hero position */
-  .hero{margin-bottom:16px}
-  .hero-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-  .hero-head h2{margin:0}
-  .live-badge{font-size:11px;color:var(--muted)}
-  .live-badge b{color:var(--good)}
-  .readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px}
-  @media(max-width:760px){.readout{grid-template-columns:repeat(2,1fr)}}
-  .metric{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
-  .metric .k{font-size:11px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase}
-  .metric .v{font-family:var(--mono);font-size:26px;font-weight:600;margin-top:4px}
-  .metric .v.small{font-size:16px}
-  .metric .u{font-size:12px;color:var(--muted);margin-left:4px}
-  .metric.accent .v{color:var(--accent)}
-  .spark{margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px}
-  canvas{width:100%;height:90px;display:block}
-  /* Coverage canvases must keep their own pixel aspect ratio (image
-     width:height), unlike the sparkline above which fills its box freely. */
-  #coverageBase,#coverageCursor{width:auto;height:auto;max-width:100%;display:block}
-  .sensor-ctl{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-top:14px}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:12px;padding:12px;
+       align-items:start}
+  @media(max-width:1100px){main{grid-template-columns:1fr}}
 
-  /* tabs + forms */
-  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
-  .tab{padding:8px 14px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);
-    color:var(--muted);cursor:pointer;font-size:13px}
-  .tab.active{color:var(--txt);border-color:var(--accent);background:#12332f}
-  .panel{display:none}
-  .panel.active{display:block}
-  .row{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
-  @media(max-width:560px){.row{grid-template-columns:1fr}}
-  .field{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
-  .field label{font-size:12px;color:var(--muted)}
-  input,select{background:#0e131a;border:1px solid var(--line);color:var(--txt);border-radius:9px;
-    padding:9px 10px;font-size:13px;font-family:inherit;width:100%}
-  input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px #2dd4bf22}
-  .check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);cursor:pointer}
-  .check input{width:auto;accent-color:var(--accent)}
-  .seg{display:flex;gap:6px;flex-wrap:wrap}
-  .seg label{flex:1;text-align:center;min-width:80px}
-  .seg label span{display:block;padding:8px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);cursor:pointer;font-size:13px}
-  .seg input{display:none}
-  .seg input:checked + span{border-color:var(--accent);background:#12332f;color:var(--txt)}
-  .hint{font-size:11px;color:var(--muted);margin-top:-6px;margin-bottom:10px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+         margin-bottom:12px}
+  .panel > h2{font-size:12px;text-transform:uppercase;letter-spacing:.7px;
+              color:var(--dim);margin:0;padding:10px 14px;border-bottom:1px solid var(--line)}
+  .panel .body{padding:14px}
 
-  .btn{display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border-radius:10px;border:1px solid var(--line);
-    background:var(--panel2);color:var(--txt);cursor:pointer;font-size:13px;font-weight:600}
-  .btn:hover{border-color:var(--accent)}
-  .btn.primary{background:linear-gradient(180deg,#2dd4bf,#14b8a6);color:#04201c;border:none}
-  .btn.primary:hover{filter:brightness(1.08)}
-  .btn.danger{border-color:#7f1d1d;color:#fca5a5}
-  .btn.ghost{background:transparent}
-  .btn:disabled{opacity:.45;cursor:not-allowed}
-  .btnrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  nav{display:flex;gap:4px;padding:10px 14px 0}
+  nav button{border-radius:6px 6px 0 0;border-bottom-color:transparent;background:transparent}
+  nav button.active{background:var(--panel2);border-color:var(--line);
+                    border-bottom-color:var(--panel2);color:var(--fg)}
+  .tab{display:none} .tab.active{display:block}
 
-  .cmd{font-family:var(--mono);font-size:12.5px;background:#0a0e14;border:1px solid var(--line);
-    border-radius:10px;padding:11px 12px;color:var(--accent);white-space:pre-wrap;word-break:break-all;margin-bottom:12px}
-  .diag{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  /* live position */
+  .pos{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line)}
+  .pos div{background:var(--panel);padding:8px 10px}
+  .pos .k{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .pos .v{font:600 15px/1.3 var(--mono);margin-top:2px}
+  .pos .v.stale{color:#5c6672}
+  .cover{padding:10px 14px;border-top:1px solid var(--line)}
+  .bar{height:6px;background:#0e1116;border-radius:3px;overflow:hidden;margin-top:5px}
+  .bar i{display:block;height:100%;background:var(--ok);width:0;transition:width .2s}
 
-  .console{background:#080b10;border:1px solid var(--line);border-radius:12px;height:340px;overflow:auto;
-    padding:12px;font-family:var(--mono);font-size:12.5px;line-height:1.5}
-  .console .l{white-space:pre-wrap;word-break:break-word}
-  .console .l.cmd{color:var(--accent)}
-  .console .l.sensor{color:var(--muted)}
-  .console .l.err{color:var(--bad)}
-  .console .l.done{color:var(--warn)}
-  .conhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-  .preview-box{background:#f6f7f9;border:1px solid var(--line);border-radius:12px;padding:10px;
-    overflow:auto;max-height:360px}
-  .preview-box img{display:block;height:auto;width:auto;max-width:none;image-rendering:pixelated;
-    image-rendering:crisp-edges}
+  /* preview */
+  .imgwrap{background:#fff;border-radius:6px;padding:6px;min-height:90px;
+           display:flex;align-items:center;justify-content:center}
+  .imgwrap img{max-width:100%;display:block;image-rendering:pixelated}
+  .imgwrap.empty{background:#0e1116;color:var(--dim);font-size:12px;min-height:90px}
+  #rec-wrap{max-height:340px;overflow:auto;align-items:flex-start}
+
+  /* tests */
+  .test{border:1px solid var(--line);border-radius:7px;padding:11px 12px;margin-bottom:9px;
+        background:var(--panel2)}
+  .test h3{margin:0 0 3px;font-size:14px;display:flex;align-items:center;gap:8px}
+  .test .tag{font:600 10px var(--mono);background:#2a3340;color:var(--accent);
+             padding:2px 6px;border-radius:4px}
+  .test p{margin:0 0 9px;font-size:12.5px;color:var(--dim)}
+
+  #log{font:12px/1.55 var(--mono);background:#0b0e12;border-radius:6px;padding:10px;
+       height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+  #log .err{color:var(--bad)} #log .cmd{color:var(--accent)}
+  #log .sensor{color:#6f7b8a}
+  .cmdline{font:12px var(--mono);color:var(--dim);background:#0b0e12;padding:8px 10px;
+           border-radius:6px;margin-top:10px;word-break:break-all}
+  .hint{font-size:12px;color:var(--dim);margin:8px 0 0}
+  .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header class="top">
-    <div class="brand"><span class="dot"></span> Printhead Control</div>
-    <div class="spacer"></div>
-    <div id="sensorPill" class="pill"><span class="status-dot"></span><span id="sensorPillText">sensor offline</span></div>
-    <button class="btn danger" id="btnShutdown" title="Stop the running action/sensor and terminate the whole printhead.ui server process">⏻ Shutdown server</button>
-  </header>
 
-  <!-- LIVE POSITION -->
-  <section class="card hero">
-    <div class="hero-head">
-      <h2>Live sensor position</h2>
-      <span class="live-badge" id="liveBadge">not connected</span>
-      <div class="spacer"></div>
-      <div class="sensor-ctl">
-        <button class="btn" id="btnRefresh" title="Reload the stream with the current axis / scale settings">↻ Refresh</button>
-        <button class="btn primary" id="btnSensor">Connect sensor</button>
+<header>
+  <h1>Printhead</h1>
+  <span class="pill"><span id="d-ws" class="dot off"></span>Server</span>
+  <span class="pill"><span id="d-sensor" class="dot off"></span>Sensor</span>
+  <span class="pill"><span id="d-action" class="dot off"></span>Aktion</span>
+  <span class="spacer"></span>
+  <button id="b-stop" disabled>Aktion stoppen</button>
+  <button id="b-shutdown" class="danger">Herunterfahren</button>
+</header>
+
+<main>
+<div>
+  <div class="panel">
+    <nav>
+      <button data-tab="print" class="active">Drucken</button>
+      <button data-tab="tests">Tests</button>
+      <button data-tab="cal">Kalibrierung</button>
+      <button data-tab="settings">Einstellungen</button>
+    </nav>
+
+    <!-- ============================================== Drucken -->
+    <div class="tab active" id="tab-print"><div class="body">
+      <div class="row c2">
+        <div class="field">
+          <label>Was drucken</label>
+          <select id="src">
+            <option value="image">Bild (--pattern drill_pattern)</option>
+            <option value="pattern">Testmuster</option>
+            <option value="text">Text</option>
+          </select>
+        </div>
+        <div class="field" id="w-pattern" style="display:none">
+          <label>Muster</label>
+          <select id="pattern">
+            <option>checkerboard</option><option>h-stripes</option>
+            <option>v-stripes</option><option>diagonal</option>
+            <option>solid</option><option>precision-check</option>
+          </select>
+        </div>
+        <div class="field" id="w-image">
+          <label>Bilddatei (Pfad auf diesem Rechner)</label>
+          <input id="image" placeholder="C:\\pfad\\testbild.png">
+        </div>
+        <div class="field" id="w-text" style="display:none">
+          <label>Text</label><input id="text" value="Hallo">
+        </div>
       </div>
+
+      <div class="row c3">
+        <div class="field"><label>Länge (mm)</label>
+          <input id="len" type="number" value="100" step="1"></div>
+        <div class="field"><label>Höhe (mm, nur Seiten-Modus)</label>
+          <input id="height" type="number" value="100" step="1"></div>
+        <div class="field"><label>mm pro Spalte</label>
+          <input id="mmcol" type="number" value="0.087" step="0.001"></div>
+      </div>
+
+      <div class="row c3" id="w-square">
+        <div class="field"><label>Kachel breit (mm)</label>
+          <input id="sq_mm" type="number" value="10" step="1"></div>
+        <div class="field"><label>Kachel hoch (mm)</label>
+          <input id="sq_h" type="number" value="10" step="1"></div>
+        <div class="field"><label>&nbsp;</label>
+          <button id="b-square" style="width:100%">quadratisch machen</button></div>
+      </div>
+
+      <div class="row c3" id="w-pc" style="display:none">
+        <div class="field"><label>Linienbreite (Spalten)</label>
+          <input id="pc_cols" type="number" value="1" step="1"></div>
+        <div class="field"><label>Erster Abstand (Spalten)</label>
+          <input id="pc_gap" type="number" value="1" step="1"></div>
+        <div></div>
+      </div>
+
+      <div class="row c3" style="margin-top:4px">
+        <label style="display:flex;gap:7px;align-items:center;color:var(--fg);font-size:13px">
+          <input type="checkbox" id="autostart" style="width:auto"> sofort starten
+        </label>
+        <label style="display:flex;gap:7px;align-items:center;color:var(--fg);font-size:13px">
+          <input type="checkbox" id="once" style="width:auto"> nur ein Durchgang
+        </label>
+        <label style="display:flex;gap:7px;align-items:center;color:var(--fg);font-size:13px">
+          <input type="checkbox" id="dryrun" style="width:auto"> Trockenlauf (kein BLE)
+        </label>
+      </div>
+
+      <div class="btns">
+        <button id="b-print" class="primary">Drucken</button>
+        <button id="b-preview">Vorschau neu</button>
+      </div>
+      <div class="cmdline" id="cmdline">–</div>
+      <p class="hint">Der Druck läuft immer mit <code>--progress-json</code> und
+        <code>--record</code>: davon leben die Live-Position und die
+        Deckungsansicht rechts.</p>
+    </div></div>
+
+    <!-- ============================================== Tests -->
+    <div class="tab" id="tab-tests"><div class="body">
+      <p class="hint" style="margin-top:0">Die Messreihe aus <code>TESTS.md</code>
+        als Ein-Klick-Aktionen. Reihenfolge und Auswertung stehen dort.</p>
+      <div id="testlist"></div>
+    </div></div>
+
+    <!-- ============================================== Kalibrierung -->
+    <div class="tab" id="tab-cal"><div class="body">
+      <p class="hint" style="margin-top:0">Zwei angrenzende Blattkanten mit dem
+        Sensor abfahren. Der Sensorstrom muss dafür laufen.</p>
+      <div class="row c2">
+        <div class="field"><label>Blattbreite (mm, optional)</label>
+          <input id="cal_w" type="number" placeholder="210"></div>
+        <div class="field"><label>Blatthöhe (mm, optional)</label>
+          <input id="cal_h" type="number" placeholder="297"></div>
+      </div>
+      <div class="btns">
+        <button id="cal_col">Spaltenkante aufnehmen</button>
+        <button id="cal_row">Zeilenkante aufnehmen</button>
+        <button id="cal_bore">Boresight erfassen</button>
+        <button id="cal_reset">Zurücksetzen</button>
+      </div>
+      <div class="cmdline" id="cal_state">nichts aufgenommen</div>
+      <div class="btns">
+        <button id="cal_compute" class="primary">Berechnen</button>
+      </div>
+      <div class="cmdline" id="cal_result" style="display:none"></div>
+      <div class="row c2" style="margin-top:12px">
+        <div class="field"><label>Speichern unter</label>
+          <input id="cal_save_path" value="page_calibration.json"></div>
+        <div class="field"><label>&nbsp;</label>
+          <button id="cal_save" style="width:100%">Speichern</button></div>
+      </div>
+    </div></div>
+
+    <!-- ============================================== Einstellungen -->
+    <div class="tab" id="tab-settings"><div class="body">
+      <div class="row c2">
+        <div class="field"><label>Modus</label>
+          <select id="mode"><option>page</option><option>line</option>
+            <option>time</option></select></div>
+        <div class="field"><label>Seitenrahmen</label>
+          <select id="frame"><option value="calibrated">kalibriert</option>
+            <option value="simple">simple (ohne Kalibrierung)</option></select></div>
+        <div class="field"><label>Kalibrierdatei</label>
+          <input id="cal_path" value="page_calibration.json"></div>
+        <div class="field"><label>Abtastrate (--poll-hz)</label>
+          <input id="poll" type="number" value="500"></div>
+        <div class="field"><label>Dosierzeit (--dose-hold-s)</label>
+          <input id="dose" type="number" value="0.001" step="0.0001"></div>
+        <div class="field"><label>Glättung (--smooth-ms)</label>
+          <input id="smooth" type="number" value="0" step="1"></div>
+        <div class="field"><label>Spray-Radius (mm)</label>
+          <input id="spray_r" type="number" value="0.15" step="0.01"></div>
+        <div class="field"><label>Spray-Stärke</label>
+          <input id="spray_s" type="number" value="0.5" step="0.1"></div>
+        <div class="field"><label>Timeout (s)</label>
+          <input id="timeout" type="number" value="180"></div>
+        <div class="field"><label>Latenz-Kompensation (s)</label>
+          <input id="lat" type="number" value="0" step="0.001"></div>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <input type="checkbox" id="simulate" style="width:auto">
+        <span style="color:var(--fg);font-size:13px">Simulieren (kein Tracker, keine Hardware)</span>
+      </label>
+      <div class="btns">
+        <button id="b-sensor">Sensorstrom starten</button>
+      </div>
+    </div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Konsole</h2>
+    <div class="body" style="padding:10px">
+      <div id="log"></div>
     </div>
-    <div class="readout">
-      <div class="metric"><div class="k">X</div><div class="v"><span id="posX">–</span><span class="u">mm</span></div></div>
-      <div class="metric"><div class="k">Y</div><div class="v"><span id="posY">–</span><span class="u">mm</span></div></div>
-      <div class="metric"><div class="k">Z</div><div class="v"><span id="posZ">–</span><span class="u">mm</span></div></div>
-      <div class="metric accent"><div class="k">Advance</div><div class="v"><span id="posAdv">–</span><span class="u">mm</span></div></div>
-      <div class="metric accent"><div class="k">Column · speed</div><div class="v"><span id="posCol">–</span><span class="u" id="posVel"></span></div></div>
-      <div class="metric"><div class="k">Quat [x y z w]</div><div class="v small"><span id="posQuat">–</span></div></div>
-      <div class="metric page-only" style="display:none"><div class="k">Page U</div><div class="v"><span id="posPageU">–</span><span class="u">mm</span></div></div>
-      <div class="metric page-only" style="display:none"><div class="k">Page V</div><div class="v"><span id="posPageV">–</span><span class="u">mm</span></div></div>
-      <div class="metric page-only" style="display:none"><div class="k">Page Z</div><div class="v"><span id="posPageZ">–</span><span class="u">mm</span></div></div>
-      <div class="metric page-only" style="display:none"><div class="k">Yaw</div><div class="v"><span id="posYaw">–</span><span class="u">deg</span></div></div>
-      <div class="metric page-only" style="display:none"><div class="k">Roll</div><div class="v"><span id="posRoll">–</span><span class="u">deg</span></div></div>
-      <div class="metric page-only" style="display:none"><div class="k">Pitch</div><div class="v"><span id="posPitch">–</span><span class="u">deg</span></div></div>
-    </div>
-    <div class="spark" id="sparkWrap"><canvas id="spark" width="1100" height="90"></canvas></div>
-    <div class="spark" id="coverageWrap" style="display:none">
-      <div style="position:relative;display:inline-block">
-        <canvas id="coverageBase"></canvas>
-        <canvas id="coverageCursor" style="position:absolute;left:0;top:0"></canvas>
-      </div>
-      <div class="live-badge" id="coverageInfo" style="margin-top:8px">–</div>
-    </div>
-  </section>
-
-  <div class="grid">
-    <!-- CONFIG -->
-    <section class="card">
-      <div class="tabs" id="tabs">
-        <div class="tab active" data-t="print">Print</div>
-        <div class="tab" data-t="tracking">Tracking &amp; scale</div>
-        <div class="tab" data-t="calibration">Calibration</div>
-        <div class="tab" data-t="nozzle">Nozzle map</div>
-        <div class="tab" data-t="ble">BLE &amp; profiling</div>
-        <div class="tab" data-t="diag">Diagnostics</div>
-      </div>
-
-      <!-- PRINT -->
-      <div class="panel active" data-p="print">
-        <div class="seg" style="margin-bottom:12px">
-          <label><input type="radio" name="src" value="text" checked><span>Text</span></label>
-          <label><input type="radio" name="src" value="calibrate"><span>Calibration ruler</span></label>
-          <label><input type="radio" name="src" value="pattern"><span>Test pattern</span></label>
-        </div>
-        <div class="field" id="f_text"><label>Text to print</label><input id="text" value="Hallo"></div>
-        <div class="field" id="f_pattern" style="display:none"><label>Pattern</label>
-          <select id="pattern"><option>checkerboard</option><option>h-stripes</option><option>v-stripes</option><option selected>diagonal</option><option>solid</option></select></div>
-        <div class="row">
-          <div class="field"><label>Render size (px)</label><input id="render_size" type="number" value="220"></div>
-        </div>
-        <div class="row">
-          <label class="check"><input type="checkbox" id="invert"> Invert</label>
-          <label class="check"><input type="checkbox" id="flip_y"> Flip Y</label>
-          <label class="check"><input type="checkbox" id="mirror_x"> Mirror X</label>
-          <div class="field"><label>Margin (px)</label><input id="margin" type="number" value="0"></div>
-        </div>
-        <div class="row" id="patternKnobs">
-          <div class="field"><label>Length (mm)</label><input id="pattern_length_mm" type="number" value="200"></div>
-          <div class="field page-only" style="display:none"><label>Height (mm)</label><input id="pattern_height_mm" type="number" placeholder="13.2 (default, = IMAGE_HEIGHT rows)" title="Page mode only: total physical height of the pattern; line/time mode packs fixed frames that need exactly IMAGE_HEIGHT rows."></div>
-          <div class="field"><label>Square (mm)</label><input id="pattern_square_mm" type="number" value="10"></div>
-          <div class="field"><label>Square (rows)</label><input id="pattern_square_rows" type="number" value="20"></div>
-          <div class="field"><label>Square height (mm)</label><input id="pattern_square_height_mm" type="number" placeholder="overrides Square (rows)" title="Row period in mm for checkerboard/h-stripes; a raw row is only ~0.087mm, so this is usually what you want for actually-square tiles."></div>
-          <div class="field"><label>Ruler major / minor (mm)</label>
-            <div style="display:flex;gap:8px"><input id="calib_major_mm" type="number" value="10"><input id="calib_minor_mm" type="number" value="1"></div></div>
-        </div>
-      </div>
-
-      <!-- TRACKING -->
-      <div class="panel" data-p="tracking">
-        <div class="row">
-          <div class="field"><label>Mode</label><select id="mode"><option value="line">line (1D closed loop)</option><option value="page" selected>page (freehand 2D)</option><option value="time">time</option></select></div>
-          <div class="field"><label>Period (s, time mode)</label><input id="period" type="number" step="0.005" value="0.03"></div>
-        </div>
-        <div class="row page-only" style="display:none">
-          <div class="field"><label>Page frame</label><select id="page_frame" title="How page mode gets its 2D frame. Advanced uses a traced calibration; Simple takes the tracker's own x/y axes and needs no calibration at all."><option value="calibrated" selected>advanced (traced calibration)</option><option value="simple">simple (no calibration)</option></select></div>
-          <div class="field"><label>Dose hold (s, optional)</label><input id="dose_hold_s" type="number" step="0.005" placeholder="0.05 (default)" title="Seconds a nozzle must continuously hold a pixel before it counts as printed. Untuned first guess -- see the Calibration tab hint."></div>
-        </div>
-        <div class="row page-only calibrated-only" style="display:none">
-          <div class="field"><label>Page calibration (path)</label><input id="page_calibration" placeholder="page_calibration.json"></div>
-        </div>
-        <div class="hint page-only calibrated-only" style="display:none">Build a page calibration on the <b>Calibration</b> tab first, or point this at a previously saved one.</div>
-        <div class="row page-only simple-only" style="display:none">
-          <div class="btnrow"><button class="btn" id="btnCaptureSimpleBoresight">Capture yaw reference</button>
-            <span class="live-badge" id="simpleBoresightStatus">not captured -- START will auto-capture whatever pose the cart is in</span></div>
-        </div>
-        <div class="hint page-only simple-only" style="display:none">No calibration needed: the page axes are the tracker's own <b>x</b> (columns) and <b>y</b> (rows),
-          and the page origin is zeroed wherever the cart sits when you press <b>START</b>. Cart yaw is measured relative to a
-          reference pose -- lay the cart flat with 0&deg; yaw in the <b>Live sensor position</b> panel above, then click
-          <b>Capture yaw reference</b> here. Skipping this lets START auto-capture instead, but that grabs whatever pose the cart
-          happens to be in at that exact instant with no way to verify it -- a bad grab (BLE still settling, hand not yet
-          still) silently corrupts every angle for the rest of the pass. Capturing here first lets you check Yaw/Roll/Pitch
-          read ~0&deg; while genuinely flat before you trust it.</div>
-        <div class="row line-only">
-          <div class="field"><label>Advance axis</label><select id="advance_axis"><option selected>x</option><option>y</option><option>z</option></select></div>
-          <div class="field"><label>Axis sign</label><select id="axis_sign"><option value="1">+1</option><option value="-1">−1</option></select></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>mm per column</label><input id="mm_per_column" type="number" step="0.01" value="0.2"></div>
-          <div class="field"><label>DPI (overrides mm/col)</label><input id="dpi" type="number" placeholder="–"></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Origin</label><select id="origin"><option>button</option><option>startpoint</option></select></div>
-          <div class="field"><label>Min move (mm)</label><input id="min_move" type="number" step="0.01" value="0.05"></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Timeout (s)</label><input id="timeout" type="number" value="30"></div>
-          <div class="field"><label>Smoothing (ms)</label><input id="smooth_ms" type="number" step="1" value="12" title="Low-pass time constant for the Amfitrack position. 0 disables it."></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Poll rate (Hz)</label><input id="poll_hz" type="number" step="50" value="500" title="Position polling rate. A column crossing is only noticed once per poll, so this bounds how precisely a column is placed."></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Sensor tx_id (optional)</label><input id="sensor_id" placeholder="all"></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>USB vendor id</label><input id="vendor_id" value="0x0C17"></div>
-          <div class="field"><label>USB product id</label><input id="product_id" value="0x0D12"></div>
-        </div>
-        <label class="check"><input type="checkbox" id="no_track"> Disable tracking (force time mode)</label>
-      </div>
-
-      <!-- CALIBRATION -->
-      <div class="panel" data-p="calibration">
-        <div class="hint">Trace two adjacent page edges with the tracked cart to build a page
-          calibration for freehand (<b>page</b> mode) printing. Connect the sensor above first,
-          then trace each edge in one continuous motion -- the fit uses the whole trace (robust
-          against hand tremor), not just the endpoints.</div>
-        <div class="row">
-          <div class="field"><label>Sheet width (mm, optional)</label><input id="cal_sheet_w" type="number" placeholder="e.g. 210 for A4"></div>
-          <div class="field"><label>Sheet height (mm, optional)</label><input id="cal_sheet_h" type="number" placeholder="e.g. 297 for A4"></div>
-        </div>
-        <div class="row">
-          <div class="field">
-            <label>Edge 1 (column / width direction)</label>
-            <div class="btnrow"><button class="btn" id="btnTraceCol">● Trace edge 1</button>
-              <span class="live-badge" id="colSampleCount">0 samples</span></div>
-          </div>
-          <div class="field">
-            <label>Edge 2 (row / height direction)</label>
-            <div class="btnrow"><button class="btn" id="btnTraceRow">● Trace edge 2</button>
-              <span class="live-badge" id="rowSampleCount">0 samples</span></div>
-          </div>
-        </div>
-        <div class="row">
-          <div class="field">
-            <label>Boresight (cart-rotation reference pose)</label>
-            <div class="btnrow"><button class="btn" id="btnCaptureBoresight">Capture boresight</button>
-              <span class="live-badge" id="boresightStatus">not captured -- rotation correction will be disabled</span></div>
-          </div>
-        </div>
-        <div class="hint">Lay the cart <b>flat on the page</b> with the nozzle bar aligned along
-          the <b>edge 2</b> trace (the row edge) above, hold still, then press "Capture boresight".
-          This becomes the reference pose cart yaw is measured against while printing (fine-tune
-          afterwards with <code>--boresight-deg</code> instead of re-capturing). Skipping this is
-          fine -- printing then stays exactly as before, uncorrected, with a warning at print
-          start rather than a silent wrong rotation.</div>
-        <div class="btnrow" style="margin:4px 0 16px">
-          <button class="btn primary" id="btnCalCompute">Compute calibration</button>
-          <button class="btn ghost" id="btnCalReset">Reset traces</button>
-        </div>
-        <div id="calResult" style="display:none;margin-bottom:16px">
-          <div class="cmd" id="calSummary" style="white-space:pre-wrap"></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Save to path</label><input id="cal_save_path" value="page_calibration.json"></div>
-          <div class="field"><label>&nbsp;</label><button class="btn" id="btnCalSave" disabled>💾 Save calibration</button></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Load existing (path)</label><input id="cal_load_path" placeholder="page_calibration.json"></div>
-          <div class="field"><label>&nbsp;</label><button class="btn" id="btnCalLoad">Load &amp; preview</button></div>
-        </div>
-      </div>
-
-      <!-- NOZZLE MAP -->
-      <div class="panel" data-p="nozzle">
-        <div class="hint">Correct scrambled nozzle wiring. Give the block size and a 1-indexed permutation, e.g. block 5 → <code>2,3,4,1,5</code>. Leave empty to disable.</div>
-        <div class="row">
-          <div class="field"><label>Block size</label><input id="nozzle_block_size" type="number" placeholder="off"></div>
-          <div class="field"><label>New order (comma list)</label><input id="nozzle_order" placeholder="2,3,4,1,5"></div>
-        </div>
-      </div>
-
-      <!-- BLE + PROFILING -->
-      <div class="panel" data-p="ble">
-        <div class="row">
-          <div class="field"><label>Device name</label><input id="device_name" value="PrintheadBLE"></div>
-          <div class="field"><label>Address (skip scan)</label><input id="address" placeholder="optional MAC/UUID"></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>Scan timeout (s)</label><input id="scan_timeout" type="number" value="10"></div>
-          <div class="field line-only"><label>Columns per write</label><input id="batch_cols" type="number" min="0" value="0" title="0 = derive from the negotiated MTU. Use 1 for firmware without column batching."></div>
-        </div>
-        <div class="row">
-          <label class="check"><input type="checkbox" id="auto_start"> Auto-start (skip button)</label>
-          <label class="check"><input type="checkbox" id="once"> Once (single pass)</label>
-        </div>
-        <div class="row">
-          <label class="check"><input type="checkbox" id="profile"> Profile timing</label>
-          <div class="field"><label>Profile CSV path (optional)</label><input id="profile_csv" placeholder="timing.csv"></div>
-        </div>
-        <div class="row page-only" style="display:none">
-          <div class="field"><label>BLE write ceiling (writes/s, optional)</label><input id="ble_write_ceiling" type="number" placeholder="270 (default)" title="Known BLE write-without-response throughput ceiling to compare the page-mode pattern-update rate against. Measure the real number for your hardware with --ble-benchmark."></div>
-        </div>
-      </div>
-
-      <!-- DIAGNOSTICS -->
-      <div class="panel" data-p="diag">
-        <div class="hint">Each runs a standalone check and exits. Output appears in the console.</div>
-        <div class="diag">
-          <button class="btn" onclick="runDiag('--list-nodes')">List Amfitrack nodes</button>
-          <button class="btn" onclick="runDiag('--scan-ble')">Scan BLE devices</button>
-          <button class="btn" onclick="runDiag('--nozzle-test')">Nozzle test</button>
-          <button class="btn" onclick="runDiag('--ble-benchmark')">BLE benchmark</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- RUN + CONSOLE -->
-    <section class="card">
-      <h2>Command</h2>
-      <div class="cmd" id="cmdPreview">python main.py …</div>
-      <div class="btnrow" style="margin-bottom:16px">
-        <button class="btn primary" id="btnRun">▶ Run</button>
-        <button class="btn" id="btnPreview">👁 Preview</button>
-        <button class="btn" id="btnRecord" title="Print and reconstruct what was actually sent over BLE, mapped to head position">🎞 Record</button>
-        <button class="btn danger" id="btnStop" disabled>■ Stop</button>
-        <span class="spacer"></span>
-        <span class="pill" id="runPill"><span class="status-dot"></span><span id="runPillText">idle</span></span>
-      </div>
-      <div class="field" style="margin-bottom:16px">
-        <label>Custom command (raw CLI args, as on the command line)</label>
-        <div class="btnrow">
-          <input id="customCmd" placeholder="--pattern checkerboard --mode page --page-calibration page_calibration.json --record coverage.png" style="flex:1;min-width:220px">
-          <button class="btn" id="btnCustomRun">▶ Run custom</button>
-        </div>
-      </div>
-      <div id="previewWrap" style="display:none;margin-bottom:16px">
-        <div class="conhead"><h2 style="margin:0">Preview <span id="previewDim" class="live-badge"></span></h2>
-          <button class="btn ghost" onclick="$('previewWrap').style.display='none'">hide</button></div>
-        <div class="preview-box"><img id="previewImg" alt="print preview"></div>
-      </div>
-      <div class="conhead">
-        <h2 style="margin:0">Console</h2>
-        <button class="btn ghost" onclick="clearLog()">clear</button>
-      </div>
-      <div class="console" id="console"></div>
-    </section>
   </div>
 </div>
 
+<!-- ============================================== rechte Spalte -->
+<div>
+  <div class="panel">
+    <h2>Live-Position</h2>
+    <div class="pos">
+      <div><div class="k">x mm</div><div class="v stale" id="p-x">–</div></div>
+      <div><div class="k">y mm</div><div class="v stale" id="p-y">–</div></div>
+      <div><div class="k">z mm</div><div class="v stale" id="p-z">–</div></div>
+      <div><div class="k">Seite u</div><div class="v stale" id="p-u">–</div></div>
+      <div><div class="k">Seite v</div><div class="v stale" id="p-v">–</div></div>
+      <div><div class="k">Spalte</div><div class="v stale" id="p-col">–</div></div>
+      <div><div class="k">Zeile</div><div class="v stale" id="p-row">–</div></div>
+      <div><div class="k">Gier °</div><div class="v stale" id="p-yaw">–</div></div>
+      <div><div class="k">v mm/s</div><div class="v stale" id="p-spd">–</div></div>
+      <div><div class="k">Roll °</div><div class="v stale" id="p-roll">–</div></div>
+      <div><div class="k">Nick °</div><div class="v stale" id="p-pitch">–</div></div>
+      <div><div class="k">Quelle</div><div class="v stale" id="p-src">–</div></div>
+    </div>
+    <div class="cover">
+      <div style="display:flex;justify-content:space-between;font-size:12px">
+        <span style="color:var(--dim)">Deckung</span>
+        <span class="v" style="font-size:12px" id="p-cov">–</span>
+      </div>
+      <div class="bar"><i id="p-bar"></i></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Druckvorschau</h2>
+    <div class="body">
+      <div class="imgwrap empty" id="pv-wrap">noch keine Vorschau</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Deckung (letzter Durchgang)</h2>
+    <div class="body">
+      <div class="imgwrap empty" id="rec-wrap">noch kein Durchgang</div>
+    </div>
+  </div>
+</div>
+</main>
+
 <script>
 const $ = id => document.getElementById(id);
-const val = id => ($(id) ? String($(id).value).trim() : "");
-const chk = id => ($(id) ? $(id).checked : false);
+/* Muss zu printhead.geometry.NOZZLE_PITCH_MM passen -- nur zur Anzeige der
+   Zeile im Leerlauf, wo --pos-json selbst kein row liefert. */
+const NOZZLE_PITCH_MM = 13.2 / 152;
+const post = (url, body) => fetch(url, {method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body: JSON.stringify(body || {})}).then(r => r.json());
 
-/* ---------- tabs ---------- */
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
-  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
-  t.classList.add('active');
-  document.querySelector(`.panel[data-p="${t.dataset.t}"]`).classList.add('active');
+/* ------------------------------------------------------------ Tabs */
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  $("tab-" + b.dataset.tab).classList.add("active");
 });
 
-/* ---------- content-source switching ---------- */
-function src(){return document.querySelector('input[name=src]:checked').value;}
-function updateSrc(){
-  $('f_text').style.display = src()==='text' ? '' : 'none';
-  $('f_pattern').style.display = src()==='pattern' ? '' : 'none';
-  $('patternKnobs').style.display = src()==='text' ? 'none' : '';
-  buildPreview();
+/* ------------------------------------------------------------ Log */
+function log(line, cls){
+  const el = $("log");
+  const near = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = line;
+  el.appendChild(d);
+  while (el.childNodes.length > 800) el.removeChild(el.firstChild);
+  if (near) el.scrollTop = el.scrollHeight;
 }
-document.querySelectorAll('input[name=src]').forEach(r=>r.onchange=updateSrc);
 
-/* ---------- mode switching (line/page/time) ---------- */
-function isPageMode(){ return val('mode')==='page'; }
-function isSimpleFrame(){ return val('page_frame')==='simple'; }
-// --simple-boresight takes 4 SEPARATE numeric argv entries, not one
-// comma-joined value: argparse's negative-number heuristic rejects a
-// comma-joined "-0.5,-0.5,-0.51,0.49" (the commas break the match), which a
-// captured quaternion hits constantly since components are routinely
-// negative. Shared by trackingArgs() (the real print) and sensorArgs() (the
-// --pos verify stream), so a captured reference is honoured in both.
-function pushSimpleBoresight(a){
-  if(isSimpleFrame() && simpleBoresightQuat){
-    a.push('--simple-boresight', ...simpleBoresightQuat.map(v=>String(v)));
+/* ------------------------------------------------------------ Befehl bauen */
+function num(id){ const v = parseFloat($(id).value); return isNaN(v) ? null : v; }
+
+function baseArgs(){
+  const a = [], mode = $("mode").value;
+  a.push("--mode", mode);
+  if ($("simulate").checked) a.push("--simulate");
+  if (mode === "page"){
+    if ($("frame").value === "simple") a.push("--page-frame", "simple");
+    else if ($("cal_path").value.trim())
+      a.push("--page-calibration", $("cal_path").value.trim());
   }
+  const m = num("mmcol"); if (m !== null) a.push("--mm-per-column", m);
+  const p = num("poll");  if (p !== null) a.push("--poll-hz", p);
+  const d = num("dose");  if (d !== null) a.push("--dose-hold-s", d);
+  const s = num("smooth");if (s !== null) a.push("--smooth-ms", s);
+  const sr= num("spray_r");if (sr!== null) a.push("--spray-radius-mm", sr);
+  const ss= num("spray_s");if (ss!== null) a.push("--spray-strength", ss);
+  const t = num("timeout");if (t !== null) a.push("--timeout", t);
+  const l = num("lat");   if (l)          a.push("--latency-compensate-s", l);
+  return a.map(String);
 }
-function updateMode(){
-  const page = isPageMode();
-  document.querySelectorAll('.line-only').forEach(el=>el.style.display = page ? 'none' : '');
-  document.querySelectorAll('.page-only').forEach(el=>el.style.display = page ? '' : 'none');
-  // Nested inside .page-only: only ever visible in page mode, and then only
-  // for the matching frame -- so re-hide them after the .page-only sweep
-  // above has just shown everything page-related.
-  const simple = isSimpleFrame();
-  document.querySelectorAll('.calibrated-only').forEach(el=>{
-    if(page && simple) el.style.display = 'none';
-  });
-  document.querySelectorAll('.simple-only').forEach(el=>{
-    if(page && !simple) el.style.display = 'none';
-  });
-  $('sparkWrap').style.display = page ? 'none' : '';
-  if(!page){ $('coverageWrap').style.display = 'none'; }
-  buildPreview();
+
+/* Ablauf-Schalter des Druck-Tabs. BEWUSST nicht in baseArgs(): das teilen
+   sich Druck und Tests, und ein hier gesetztes --once/--auto-start würde
+   sonst still verändern, was ein Test-Knopf tut. */
+function flowArgs(){
+  const a = [];
+  if ($("autostart").checked) a.push("--auto-start");
+  if ($("once").checked)      a.push("--once");
+  if ($("dryrun").checked)    a.push("--dry-run");
+  return a;
 }
-$('mode').addEventListener('change', updateMode);
-$('page_frame').addEventListener('change', updateMode);
 
-/* ---------- argv builders ---------- */
-function pushIf(a,cond,flag,v){ if(cond){ a.push(flag); if(v!==undefined && v!=="") a.push(String(v)); } }
-
-function trackingArgs(a){
-  if(chk('no_track')) a.push('--no-track');
-  else pushIf(a, val('mode')!=='page', '--mode', val('mode'));
-  if(isPageMode() && !chk('no_track')){
-    // --page-frame simple and --page-calibration are mutually exclusive in
-    // the CLI (see parse_args), so emit exactly one of the two.
-    if(isSimpleFrame()){ a.push('--page-frame','simple'); pushSimpleBoresight(a); }
-    else pushIf(a, !!val('page_calibration'), '--page-calibration', val('page_calibration'));
-    pushIf(a, !!val('dose_hold_s'), '--dose-hold-s', val('dose_hold_s'));
+function contentArgs(){
+  const a = [], src = $("src").value;
+  if (src === "text"){ a.push($("text").value || "Text"); }
+  else if (src === "image"){
+    a.push("--pattern", "drill_pattern");
+    if ($("image").value.trim()) a.push("--pattern-image", $("image").value.trim());
   } else {
-    pushIf(a, val('advance_axis')!=='x', '--advance-axis', val('advance_axis'));
-    pushIf(a, val('axis_sign')!=='1', '--axis-sign', val('axis_sign'));
+    a.push("--pattern", $("pattern").value);
   }
-  if(val('dpi')) { a.push('--dpi', val('dpi')); }
-  else pushIf(a, val('mm_per_column')!=='0.2', '--mm-per-column', val('mm_per_column'));
-  pushIf(a, val('origin')!=='button', '--origin', val('origin'));
-  pushIf(a, val('min_move')!=='0.05', '--min-move', val('min_move'));
-  pushIf(a, val('timeout')!=='30', '--timeout', val('timeout'));
-  pushIf(a, val('smooth_ms')!=='12', '--smooth-ms', val('smooth_ms'));
-  pushIf(a, val('poll_hz')!=='500', '--poll-hz', val('poll_hz'));
-  pushIf(a, val('vendor_id')!=='0x0C17', '--vendor-id', val('vendor_id'));
-  pushIf(a, val('product_id')!=='0x0D12', '--product-id', val('product_id'));
-  pushIf(a, !!val('sensor_id'), '--sensor-id', val('sensor_id'));
-}
-function nozzleArgs(a){
-  if(val('nozzle_block_size') && val('nozzle_order')){
-    a.push('--nozzle-block-size', val('nozzle_block_size'), '--nozzle-order', val('nozzle_order'));
+  if (src !== "text"){
+    const L = num("len"); if (L !== null) a.push("--pattern-length-mm", L);
+    if ($("mode").value === "page"){
+      const H = num("height"); if (H !== null) a.push("--pattern-height-mm", H);
+    }
+    const pat = $("pattern").value;
+    if (src === "pattern" && pat === "precision-check"){
+      const c = num("pc_cols"); if (c !== null) a.push("--pattern-line-cols", c);
+      const g = num("pc_gap");  if (g !== null) a.push("--pattern-gap-start", g);
+    } else if (src === "pattern" &&
+               ["checkerboard","h-stripes","v-stripes","diagonal"].includes(pat)){
+      const w = num("sq_mm"); if (w !== null) a.push("--pattern-square-mm", w);
+      const h = num("sq_h");  if (h !== null) a.push("--pattern-square-height-mm", h);
+    }
   }
+  return a.map(String);
 }
-function renderArgs(a){
-  if(src()==='calibrate'){ a.push('--calibrate');
-    pushIf(a, val('calib_major_mm')!=='10','--calib-major-mm',val('calib_major_mm'));
-    pushIf(a, val('calib_minor_mm')!=='1','--calib-minor-mm',val('calib_minor_mm'));
-    pushIf(a, val('pattern_length_mm')!=='200','--pattern-length-mm',val('pattern_length_mm'));
-    pushIf(a, isPageMode() && !!val('pattern_height_mm'),'--pattern-height-mm',val('pattern_height_mm'));
-  } else if(src()==='pattern'){ a.push('--pattern', val('pattern'));
-    pushIf(a, val('pattern_length_mm')!=='200','--pattern-length-mm',val('pattern_length_mm'));
-    pushIf(a, isPageMode() && !!val('pattern_height_mm'),'--pattern-height-mm',val('pattern_height_mm'));
-    pushIf(a, val('pattern_square_mm')!=='10','--pattern-square-mm',val('pattern_square_mm'));
-    pushIf(a, val('pattern_square_rows')!=='20','--pattern-square-rows',val('pattern_square_rows'));
-    pushIf(a, !!val('pattern_square_height_mm'),'--pattern-square-height-mm',val('pattern_square_height_mm'));
-  } else {
-    a.push(val('text') || 'Text');
-    pushIf(a, val('render_size')!=='220','--render-size',val('render_size'));
-    pushIf(a, val('margin')!=='0','--margin',val('margin'));
-    pushIf(a, chk('invert'),'--invert');
-    pushIf(a, chk('flip_y'),'--flip-y');
-    pushIf(a, chk('mirror_x'),'--mirror-x');
-  }
-}
-function bleArgs(a){
-  pushIf(a, val('device_name')!=='PrintheadBLE','--device-name',val('device_name'));
-  pushIf(a, !!val('address'),'--address',val('address'));
-  pushIf(a, val('scan_timeout')!=='10','--scan-timeout',val('scan_timeout'));
-  pushIf(a, !isPageMode() && val('batch_cols')!=='0','--batch-cols',val('batch_cols'));
-  pushIf(a, chk('auto_start'),'--auto-start');
-  pushIf(a, chk('once'),'--once');
-  pushIf(a, chk('profile'),'--profile');
-  pushIf(a, chk('profile') && !!val('profile_csv'),'--profile-csv',val('profile_csv'));
-  pushIf(a, isPageMode() && !!val('ble_write_ceiling'),'--ble-write-ceiling',val('ble_write_ceiling'));
-  // The live coverage canvas needs page mode's NDJSON progress events.
-  pushIf(a, isPageMode(),'--progress-json');
-  pushIf(a, val('period')!=='0.03' && (chk('no_track')||val('mode')==='time'),'--period',val('period'));
-}
-function printArgs(){
-  const a=[]; renderArgs(a); trackingArgs(a); nozzleArgs(a); bleArgs(a); return a;
-}
-function diagArgs(flag){
-  const a=[flag];
-  if(flag==='--list-nodes'||flag==='--ble-benchmark'){ trackingArgs(a); }
-  if(flag==='--scan-ble'){ pushIf(a, val('scan_timeout')!=='10','--scan-timeout',val('scan_timeout')); }
-  if(flag==='--nozzle-test'){ nozzleArgs(a); pushIf(a, val('device_name')!=='PrintheadBLE','--device-name',val('device_name')); pushIf(a, !!val('address'),'--address',val('address')); }
-  return a;
-}
-function sensorArgs(){
-  const a=[];
-  // Give the live --pos stream the same page frame the print would use, so
-  // the Page U/V/Z and Yaw/Roll/Pitch tiles actually read out (without a
-  // frame, diagnostics.monitor_position builds no PageMapper and reports
-  // neither). Mutually exclusive in the CLI -- emit exactly one.
-  if(isPageMode()){
-    if(isSimpleFrame()){ a.push('--page-frame','simple'); pushSimpleBoresight(a); }
-    else pushIf(a, !!val('page_calibration'),'--page-calibration',val('page_calibration'));
-  }
-  pushIf(a, val('advance_axis')!=='x','--advance-axis',val('advance_axis'));
-  pushIf(a, val('axis_sign')!=='1','--axis-sign',val('axis_sign'));
-  if(val('dpi')) a.push('--dpi', val('dpi')); else pushIf(a, val('mm_per_column')!=='0.2','--mm-per-column',val('mm_per_column'));
-  pushIf(a, val('vendor_id')!=='0x0C17','--vendor-id',val('vendor_id'));
-  pushIf(a, val('product_id')!=='0x0D12','--product-id',val('product_id'));
-  pushIf(a, !!val('sensor_id'),'--sensor-id',val('sensor_id'));
-  return a;
-}
-function previewArgs(){
-  const a=[]; renderArgs(a); nozzleArgs(a);
-  if(val('dpi')) a.push('--dpi',val('dpi'));
-  else pushIf(a, val('mm_per_column')!=='0.2','--mm-per-column',val('mm_per_column'));
-  return a;
-}
-function buildPreview(){ $('cmdPreview').textContent = 'python main.py ' + printArgs().join(' '); }
-document.querySelectorAll('input,select').forEach(el=>el.addEventListener('input',buildPreview));
 
-/* ---------- console ---------- */
-const con=$('console');
-function log(line, cls){ const d=document.createElement('div'); d.className='l'+(cls?' '+cls:''); d.textContent=line; con.appendChild(d); con.scrollTop=con.scrollHeight; }
-function clearLog(){ con.innerHTML=''; }
+/* Für den Druck: Inhalt + Grundeinstellungen + Ablauf-Schalter. */
+function fullArgs(){ return [...contentArgs(), ...baseArgs(), ...flowArgs()]; }
 
-/* ---------- run / stop ---------- */
-async function post(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
-async function runArgs(args){ const r=await post('/api/run',{args}); if(!r.ok) log('! '+r.error,'err'); }
+/* Für die Vorschau: ohne Ablauf-Schalter -- die Vorschau hängt --dry-run und
+   --preview selbst an, und --auto-start/--once haben dort keine Bedeutung. */
+function previewArgs(){ return [...contentArgs(), ...baseArgs()]; }
 
-/* ---------- custom command (typed CLI args, sent as-is via runArgs) ---------- */
-// Small hand-rolled tokenizer: whitespace-split with support for
-// double-quoted substrings (so paths with spaces work), not a full shell
-// parser (no escapes, no single quotes).
-function tokenizeArgs(str){
-  const out=[]; let cur=''; let inQuotes=false; let has=false;
-  for(let i=0;i<str.length;i++){
-    const c=str[i];
-    if(c==='"'){ inQuotes=!inQuotes; has=true; continue; }
-    if(!inQuotes && /\s/.test(c)){ if(has){ out.push(cur); cur=''; has=false; } continue; }
-    cur+=c; has=true;
-  }
-  if(has) out.push(cur);
-  return out;
+function refreshCmd(){
+  $("cmdline").textContent = "python main.py " + fullArgs().join(" ");
 }
-function runCustomCmd(){
-  const raw=val('customCmd');
-  if(!raw){ log('! type a command first (e.g. --pattern checkerboard --mode page)','err'); return; }
-  runArgs(tokenizeArgs(raw));
+
+/* Sichtbarkeit an die Quelle anpassen */
+function syncSource(){
+  const src = $("src").value, pat = $("pattern").value;
+  $("w-image").style.display   = src === "image"   ? "" : "none";
+  $("w-text").style.display    = src === "text"    ? "" : "none";
+  $("w-pattern").style.display = src === "pattern" ? "" : "none";
+  const isPc = src === "pattern" && pat === "precision-check";
+  const isSq = src === "pattern" &&
+               ["checkerboard","h-stripes","v-stripes","diagonal"].includes(pat);
+  $("w-pc").style.display = isPc ? "" : "none";
+  $("w-square").style.display = isSq ? "" : "none";
+  refreshCmd();
 }
-$('btnCustomRun').onclick=runCustomCmd;
-$('customCmd').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); runCustomCmd(); } });
-$('btnRun').onclick=()=>{
-  if(isPageMode() && !chk('no_track') && !isSimpleFrame() && !val('page_calibration')){
-    log('! page mode needs a page calibration -- build one on the Calibration tab, enter a path (Tracking & scale tab), or switch Page frame to "simple"','err');
+
+/* ------------------------------------------------------------ Vorschau */
+let pvTimer = null, pvBusy = false;
+async function renderPreview(){
+  /* Bildquelle ohne Pfad kann nicht rendern -- drill_pattern bricht dann mit
+     einer Fehlermeldung ab. Statt beim Laden einen aussichtslosen
+     Unterprozess zu starten, sagen wir direkt, was fehlt. */
+  if ($("src").value === "image" && !$("image").value.trim()){
+    const w = $("pv-wrap");
+    w.classList.add("empty");
+    w.textContent = "Bildpfad eingeben, dann erscheint hier die Vorschau";
     return;
   }
-  runArgs(printArgs());
-};
-$('btnStop').onclick=()=>post('/api/stop');
-
-/* ---------- shutdown (stop server + web UI, not just the current action) ---------- */
-let shutdownRequested=false;
-$('btnShutdown').onclick=async()=>{
-  if(!confirm('Shut down the printhead server?')) return;
-  shutdownRequested=true;
-  $('btnShutdown').disabled=true;
-  await post('/api/shutdown');
-  con.innerHTML='';
-  const d=document.createElement('div');
-  d.className='l done';
-  d.style.cssText='font-size:16px;font-weight:700;padding:24px 0;text-align:center';
-  d.textContent='⏻ Server shut down — you can close this tab.';
-  con.appendChild(d);
-  document.querySelectorAll('.btn,input,select').forEach(el=>{ if(el.id!=='btnShutdown') el.disabled=true; });
-};
-function runDiag(flag){ runArgs(diagArgs(flag)); }
-$('btnPreview').onclick=async()=>{
-  const btn=$('btnPreview'); btn.disabled=true; btn.textContent='… rendering';
-  const r=await post('/api/preview',{args:previewArgs()});
-  btn.disabled=false; btn.textContent='👁 Preview';
-  if(r && r.ok){
-    showImage('/api/preview.png','preview');
-  } else { log('! preview failed (see console)','err'); }
-};
-let pendingRecord=false;
-$('btnRecord').onclick=async()=>{
-  const r=await post('/api/record',{args:printArgs()});
-  if(r && r.ok){ pendingRecord=true; log('recording… run the pass (press START, or use Auto-start)','done'); }
-  else { log('! '+(r&&r.error||'record failed'),'err'); }
-};
-function showImage(url,kind){
-  const img=$('previewImg');
-  img.onload=()=>{ $('previewDim').textContent = kind==='record'
-    ? 'reconstruction · '+img.naturalWidth+'×'+img.naturalHeight+' px'
-    : img.naturalWidth+'×'+img.naturalHeight+' px'; };
-  img.src=url+'?t='+Date.now();
-  $('previewWrap').style.display='';
+  if (pvBusy){ schedulePreview(); return; }
+  pvBusy = true;
+  try{
+    const r = await post("/api/preview", {args: previewArgs()});
+    const w = $("pv-wrap");
+    if (r.ok){
+      w.classList.remove("empty");
+      w.innerHTML = '<img src="/api/preview.png?t=' + Date.now() + '">';
+    } else {
+      w.classList.add("empty");
+      w.textContent = r.error || "Vorschau fehlgeschlagen";
+    }
+  } catch(e){ /* Server weg -- der ws-Handler meldet das bereits */ }
+  finally { pvBusy = false; }
+}
+/* Entprellt: jede Feldänderung würde sonst einen Unterprozess starten. */
+function schedulePreview(){
+  clearTimeout(pvTimer);
+  pvTimer = setTimeout(renderPreview, 450);
 }
 
-/* ---------- sensor stream ---------- */
-let sensorOn=false;
-$('btnSensor').onclick=async()=>{
-  if(sensorOn){ await post('/api/sensor/stop'); }
-  else { const r=await post('/api/sensor/start',{args:sensorArgs()}); if(!r.ok) log('! '+r.error,'err'); }
-};
-// Reload the stream with the current settings (e.g. after changing advance axis).
-$('btnRefresh').onclick=async()=>{
-  resetSpark();
-  const r=await post('/api/sensor/restart',{args:sensorArgs()});
-  if(!r.ok) log('! '+r.error,'err');
-};
-function setSensor(on){
-  sensorOn=on;
-  $('btnSensor').textContent=on?'Disconnect sensor':'Connect sensor';
-  $('btnSensor').classList.toggle('danger',on);
-  $('sensorPill').classList.toggle('on',on);
-  $('sensorPillText').textContent=on?'sensor live':'sensor offline';
-  $('liveBadge').innerHTML=on?'<b>● streaming</b>':'not connected';
-  if(!on){ ['posX','posY','posZ','posAdv','posCol','posQuat','posPageU','posPageV','posPageZ','posYaw','posRoll','posPitch'].forEach(k=>$(k).textContent='–'); $('posVel').textContent=''; }
-}
+document.querySelectorAll("input,select").forEach(el => {
+  el.addEventListener("input", () => { refreshCmd(); schedulePreview(); });
+  el.addEventListener("change", () => {
+    if (el.id === "src" || el.id === "pattern") syncSource();
+    refreshCmd(); schedulePreview();
+  });
+});
 
-/* ---------- sparkline ---------- */
-const cv=$('spark'), cx=cv.getContext('2d'); let hist=[]; let lastT=null,lastAdv=null;
-function resetSpark(){ hist=[]; lastT=null; lastAdv=null; draw(); }
-function draw(){
-  const w=cv.width,h=cv.height; cx.clearRect(0,0,w,h);
-  if(hist.length<2) return;
-  const lo=Math.min(...hist), hi=Math.max(...hist), span=(hi-lo)||1;
-  cx.beginPath();
-  hist.forEach((v,i)=>{ const x=i/(hist.length-1)*w, y=h-8-((v-lo)/span)*(h-16); i?cx.lineTo(x,y):cx.moveTo(x,y); });
-  cx.strokeStyle='#2dd4bf'; cx.lineWidth=2; cx.stroke();
-  cx.lineTo(w,h); cx.lineTo(0,h); cx.closePath(); cx.fillStyle='#2dd4bf14'; cx.fill();
-}
-function fmtSigned(n,d){ return (n<0?'':'+')+n.toFixed(d); }
-function onPosition(o){
-  $('posX').textContent=o.x.toFixed(2); $('posY').textContent=o.y.toFixed(2); $('posZ').textContent=o.z.toFixed(2);
-  $('posAdv').textContent=o.advance.toFixed(2); $('posCol').textContent=o.col;
-  const now=performance.now()/1000;
-  if(lastT!==null){ const dt=now-lastT; if(dt>0){ const v=Math.abs(o.advance-lastAdv)/dt; $('posVel').textContent=' col · '+v.toFixed(1)+' mm/s'; } }
-  lastT=now; lastAdv=o.advance;
-  hist.push(o.advance); if(hist.length>240) hist.shift(); draw();
-  $('posQuat').textContent = o.qx!==undefined
-    ? `[${fmtSigned(o.qx,2)} ${fmtSigned(o.qy,2)} ${fmtSigned(o.qz,2)} ${fmtSigned(o.qw,2)}]`
-    : '–';
-  $('posPageU').textContent = o.page_u!==undefined ? o.page_u.toFixed(2) : '–';
-  $('posPageV').textContent = o.page_v!==undefined ? o.page_v.toFixed(2) : '–';
-  $('posPageZ').textContent = o.page_z!==undefined ? o.page_z.toFixed(2) : '–';
-  $('posYaw').textContent = o.yaw_deg!==undefined ? fmtSigned(o.yaw_deg,2) : '–';
-  $('posRoll').textContent = o.roll_deg!==undefined ? fmtSigned(o.roll_deg,2) : '–';
-  $('posPitch').textContent = o.pitch_deg!==undefined ? fmtSigned(o.pitch_deg,2) : '–';
-  onCalibrationPosition(o);
-}
-
-/* ---------- live 2D coverage canvas (page mode) ---------- */
-const NUM_NOZZLES = 152;                 // must match printhead/geometry.py
-const covBase=$('coverageBase'), covBaseCx=covBase.getContext('2d');
-const covCursor=$('coverageCursor'), covCursorCx=covCursor.getContext('2d');
-let covScale=1;
-function resetCoverage(width,height){
-  const maxW=1100, maxH=340;
-  covScale=Math.max(1, Math.floor(Math.min(maxW/width, maxH/height)));
-  const cw=width*covScale, ch=height*covScale;
-  covBase.width=cw; covBase.height=ch;
-  covCursor.width=cw; covCursor.height=ch;
-  covBaseCx.fillStyle='#0e131a'; covBaseCx.fillRect(0,0,cw,ch);
-  covBaseCx.strokeStyle='#2a3240'; covBaseCx.strokeRect(0.5,0.5,cw-1,ch-1);
-  covCursorCx.clearRect(0,0,cw,ch);
-  $('coverageInfo').textContent=`target ${width}×${height} px`;
-  $('coverageWrap').style.display='';
-}
-function drawCoverageCells(cells){
-  if(!cells.length) return;
-  covBaseCx.fillStyle='#2dd4bf';
-  for(const [r,c] of cells){ covBaseCx.fillRect(c*covScale, r*covScale, covScale, covScale); }
-}
-function drawCoverageCursor(row,col){
-  const cw=covCursor.width, ch=covCursor.height;
-  covCursorCx.clearRect(0,0,cw,ch);
-  covCursorCx.fillStyle='#38bdf826';
-  covCursorCx.fillRect(0, row*covScale, cw, NUM_NOZZLES*covScale);
-  covCursorCx.strokeStyle='#38bdf8'; covCursorCx.lineWidth=1;
-  covCursorCx.beginPath();
-  covCursorCx.moveTo(col*covScale+0.5, 0); covCursorCx.lineTo(col*covScale+0.5, ch);
-  covCursorCx.stroke();
-}
-function onCoverageEvent(m){
-  if(m.event==='coverage_start'){ resetCoverage(m.width, m.height); }
-  else if(m.event==='coverage'){
-    drawCoverageCells(m.new_cells);
-    drawCoverageCursor(m.row, m.col);
-    $('coverageInfo').textContent=`u=${m.u.toFixed(1)}mm v=${m.v.toFixed(1)}mm  row=${m.row} col=${m.col}`;
-  } else if(m.event==='coverage_done'){
-    log(`coverage: ${m.covered}/${m.total} px (${m.reason})`, m.reason==='complete'?'done':'sensor');
-    $('coverageInfo').textContent=`done: ${m.covered}/${m.total} px covered (${m.reason})`;
-  }
-}
-
-/* ---------- calibration tab ---------- */
-let colSamples=[], rowSamples=[], tracingCol=false, tracingRow=false, lastCalibration=null;
-// Most recent (qx,qy,qz,qw) seen on the live position stream -- only present
-// when the connected hardware/SDK actually reports orientation (see
-// diagnostics.monitor_position's --pos-json event); null on a sensor that
-// never sends one (e.g. --simulate, which never fakes orientation).
-let lastQuat=null, boresightQuat=null, simpleBoresightQuat=null;
-function onCalibrationPosition(o){
-  if(tracingCol){ colSamples.push([o.x,o.y,o.z]); $('colSampleCount').textContent=colSamples.length+' samples'; }
-  if(tracingRow){ rowSamples.push([o.x,o.y,o.z]); $('rowSampleCount').textContent=rowSamples.length+' samples'; }
-  if(o.qx!==undefined) lastQuat=[o.qx,o.qy,o.qz,o.qw];
-}
-function setBoresightStatus(text){ $('boresightStatus').textContent=text; }
-$('btnCaptureBoresight').onclick=()=>{
-  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
-  if(!lastQuat){
-    setBoresightStatus('no orientation received yet -- hold the cart still and try again');
-    return;
-  }
-  boresightQuat=lastQuat.slice();
-  const [qx,qy,qz,qw]=boresightQuat;
-  setBoresightStatus(`captured: qx=${qx.toFixed(3)} qy=${qy.toFixed(3)} qz=${qz.toFixed(3)} qw=${qw.toFixed(3)}`);
+$("b-square").onclick = () => {
+  $("sq_h").value = $("sq_mm").value;   // sonst sind die Kacheln im Soll keine Quadrate
+  refreshCmd(); schedulePreview();
 };
 
-// Simple-frame yaw reference (--simple-boresight): same "grab lastQuat, show
-// it, let the operator judge" pattern as btnCaptureBoresight above, but for
-// --page-frame simple, which has no calibration file to fold it into --
-// this instead gets forwarded as four plain CLI numbers by trackingArgs()/
-// sensorArgs() below. Exists because auto-capturing whatever pose the cart
-// happens to be in at START is unverifiable and can silently lock in a bad
-// reference (see this button's neighbouring hint text) -- capturing here
-// first lets the operator watch Yaw/Roll/Pitch settle near 0 while
-// genuinely flat before trusting it into a real print.
-$('btnCaptureSimpleBoresight').onclick=()=>{
-  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
-  if(!lastQuat){
-    $('simpleBoresightStatus').textContent='no orientation received yet -- hold the cart still and try again';
-    return;
-  }
-  simpleBoresightQuat=lastQuat.slice();
-  const [qx,qy,qz,qw]=simpleBoresightQuat;
-  $('simpleBoresightStatus').textContent=
-    `captured: qx=${qx.toFixed(3)} qy=${qy.toFixed(3)} qz=${qz.toFixed(3)} qw=${qw.toFixed(3)} -- `+
-    `hold this pose and check Yaw/Roll/Pitch above now read ~0 before printing`;
-  buildPreview();   // refresh: capturing changes the emitted command (--simple-boresight)
-                     // without touching any form field, so the usual change-listener
-                     // triggered rebuild would otherwise leave the preview stale.
-};
-function setTracing(which,on){
-  if(which==='col'){ tracingCol=on; $('btnTraceCol').textContent=on?'■ Stop tracing edge 1':'● Trace edge 1'; $('btnTraceCol').classList.toggle('danger',on); }
-  else { tracingRow=on; $('btnTraceRow').textContent=on?'■ Stop tracing edge 2':'● Trace edge 2'; $('btnTraceRow').classList.toggle('danger',on); }
-}
-$('btnTraceCol').onclick=()=>{
-  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
-  if(!tracingCol) setTracing('row',false);
-  setTracing('col',!tracingCol);
-};
-$('btnTraceRow').onclick=()=>{
-  if(!sensorOn){ log('! connect the sensor first (Live sensor position panel above)','err'); return; }
-  if(!tracingRow) setTracing('col',false);
-  setTracing('row',!tracingRow);
-};
-$('btnCalReset').onclick=()=>{
-  colSamples=[]; rowSamples=[]; lastCalibration=null; boresightQuat=null;
-  setTracing('col',false); setTracing('row',false);
-  $('colSampleCount').textContent='0 samples'; $('rowSampleCount').textContent='0 samples';
-  setBoresightStatus('not captured -- rotation correction will be disabled');
-  $('calResult').style.display='none'; $('btnCalSave').disabled=true;
-};
-function fmtQuality(q){
-  // q's fields are all null on a calibration with no measured quality --
-  // saved before this feature existed, or built without calibrate_page
-  // (see PageCalibration's docstring) -- report that plainly rather than
-  // printing "null" or a fabricated 0.
-  if(!q || q.col_trace_length_mm==null){ return 'quality: n/a (no metrics on this calibration)'; }
-  return `quality: normal tilt ${q.normal_tilt_deg.toFixed(2)}°  |  `+
-    `col edge ${q.col_trace_length_mm.toFixed(0)}mm, ${q.col_sample_count} samples, ${q.col_rms_residual_mm.toFixed(2)}mm RMS  |  `+
-    `row edge ${q.row_trace_length_mm.toFixed(0)}mm, ${q.row_sample_count} samples, ${q.row_rms_residual_mm.toFixed(2)}mm RMS`;
-}
-$('btnCalCompute').onclick=async()=>{
-  if(colSamples.length<2 || rowSamples.length<2){
-    log('! need at least 2 samples on each edge -- trace both edges first','err'); return;
-  }
-  const body={col_samples:colSamples, row_samples:rowSamples};
-  if(val('cal_sheet_w')) body.sheet_width_mm=parseFloat(val('cal_sheet_w'));
-  if(val('cal_sheet_h')) body.sheet_height_mm=parseFloat(val('cal_sheet_h'));
-  if(boresightQuat) body.boresight_quat=boresightQuat;
-  const r=await post('/api/calibration/compute',body);
-  if(!r.ok){ log('! '+r.error,'err'); return; }
-  lastCalibration=r.calibration;
-  $('calResult').style.display='';
-  let txt=`angle error: ${r.angle_error_deg.toFixed(1)}°  |  scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}`;
-  txt+=`\nboresight: ${r.has_boresight ? 'captured (rotation correction enabled)' : 'NOT captured (rotation correction disabled)'}`;
-  txt+='\n'+fmtQuality(r.quality);
-  if(r.warning) txt+='\n⚠ '+r.warning;
-  if(r.quality_warning) txt+='\n⚠ '+r.quality_warning;
-  $('calSummary').textContent=txt;
-  $('btnCalSave').disabled=false;
-};
-$('btnCalSave').onclick=async()=>{
-  if(!lastCalibration) return;
-  const r=await post('/api/calibration/save',{calibration:lastCalibration, path:val('cal_save_path')});
-  if(r.ok){ log('calibration saved -> '+r.path,'done'); $('page_calibration').value=r.path; }
-  else log('! '+r.error,'err');
-};
-$('btnCalLoad').onclick=async()=>{
-  const r=await post('/api/calibration/load',{path:val('cal_load_path')});
-  if(!r.ok){ log('! '+r.error,'err'); return; }
-  lastCalibration=r.calibration;
-  const hasBoresight=!!(r.calibration && r.calibration.boresight_quat);
-  boresightQuat=hasBoresight ? r.calibration.boresight_quat : null;
-  setBoresightStatus(hasBoresight
-    ? 'loaded from file (rotation correction enabled)'
-    : 'not captured -- rotation correction will be disabled');
-  $('calResult').style.display='';
-  $('calSummary').textContent=`loaded '${val('cal_load_path')}'  |  angle error: ${r.angle_error_deg.toFixed(1)}°  |  `+
-    `scale col: ${r.scale_col.toFixed(4)}  |  scale row: ${r.scale_row.toFixed(4)}  |  `+
-    `boresight: ${hasBoresight ? 'yes' : 'no'}`+
-    `\n`+fmtQuality(r.quality);
-  $('btnCalSave').disabled=false;
-  $('page_calibration').value=val('cal_load_path');
-};
+/* ------------------------------------------------------------ Live-Position */
+let staleTimer = null;
+const F = (x, n) => (x === null || x === undefined) ? "–" : Number(x).toFixed(n);
 
-/* ---------- run state ---------- */
-function setRun(running,cmd){
-  $('btnRun').disabled=running; $('btnStop').disabled=!running;
-  $('runPill').classList.toggle('on',running);
-  $('runPillText').textContent=running?'running':'idle';
-}
+/* Kalibrier-Zustand steht bewusst VOR setPos: setPos schneidet die Proben
+   direkt mit, statt die Funktion später zu überschreiben. */
+let calCol = [], calRow = [], calBore = null, calResult = null, calRec = null;
+let lastSample = null, lastQuat = null;
 
-/* ---------- websocket ---------- */
-let ws;
-function connect(){
-  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
-  ws.onmessage=ev=>{
-    const m=JSON.parse(ev.data);
-    if(m.type==='log') log((m.stream==='action'&&m.line.startsWith('$')?'':'')+m.line, m.stream==='sensor'?'sensor':(m.line.startsWith('$')?'cmd':''));
-    else if(m.type==='position') onPosition(m);
-    else if(m.type==='coverage_event') onCoverageEvent(m);
-    else if(m.type==='sensor_event'){ if(m.event==='error') log('sensor: '+m.message,'err'); if(m.event==='connected'){ resetSpark(); setSensor(true); } }
-    else if(m.type==='sensor_stopped') setSensor(false);
-    else if(m.type==='action_done'){ log('— finished (exit '+m.code+') —','done');
-      if(pendingRecord){ pendingRecord=false; setTimeout(()=>showImage('/api/record.png','record'),400); } }
-    else if(m.type==='status'){ setRun(m.action_running,m.action_cmd); setSensor(m.sensor_running); }
+function setPos(o, quelle){
+  const set = (id, val) => {
+    const el = $(id); el.textContent = val; el.classList.remove("stale");
   };
-  ws.onclose=()=>{ if(!shutdownRequested) setTimeout(connect,1200); };
+  set("p-x", F(o.x, 2)); set("p-y", F(o.y, 2)); set("p-z", F(o.z, 2));
+  /* --pos-json nennt sie page_u/page_v, ein Druck u/v -- beide Formen bedienen,
+     damit die Anzeige im Leerlauf und im Druck dieselbe bleibt. */
+  const u = (o.page_u !== undefined) ? o.page_u : o.u;
+  const v = (o.page_v !== undefined) ? o.page_v : o.v;
+  set("p-u", F(u, 2)); set("p-v", F(v, 2));
+  set("p-col", o.col !== undefined ? o.col : "–");
+  /* --pos-json meldet kein row; damit die Anzeige im Leerlauf nicht lückenhaft
+     ist, wird es hier aus v abgeleitet -- dieselbe Rechnung wie im Drucker
+     (v / Düsenteilung). Ein Druck liefert row selbst und hat Vorrang. */
+  const row = (o.row !== undefined) ? o.row
+            : (v === undefined || v === null ? undefined
+               : Math.round(v / NOZZLE_PITCH_MM));
+  set("p-row", row !== undefined ? row : "–");
+  set("p-yaw", F(o.yaw_deg, 2));
+  set("p-roll", F(o.roll_deg, 2));
+  set("p-pitch", F(o.pitch_deg, 2));
+  set("p-spd", o.speed_mm_s === undefined ? "–" : F(o.speed_mm_s, 1));
+  set("p-src", quelle);
+
+  if (o.covered !== undefined && o.total){
+    $("p-cov").textContent = o.covered + " / " + o.total;
+    $("p-bar").style.width = (100 * o.covered / o.total).toFixed(1) + "%";
+  }
+  clearTimeout(staleTimer);
+  staleTimer = setTimeout(() => {
+    document.querySelectorAll(".pos .v").forEach(e => e.classList.add("stale"));
+    $("p-src").textContent = "veraltet";
+  }, 2000);
+
+  /* Für die Kalibrierung mitschneiden. Der Boresight braucht das rohe
+     Quaternion, das nur der Sensorstrom liefert -- ein Druck sendet es nicht. */
+  lastSample = [o.x, o.y, o.z];
+  if (o.qw !== undefined) lastQuat = [o.qx, o.qy, o.qz, o.qw];
+  if (calRec === "col") calCol.push(lastSample);
+  else if (calRec === "row") calRow.push(lastSample);
+  if (calRec) calStateText();
 }
-connect(); updateSrc(); updateMode(); buildPreview(); draw();
+
+/* ------------------------------------------------------------ WebSocket */
+let ws = null;
+function connect(){
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://")
+                     + location.host + "/ws");
+  ws.onopen = () => { $("d-ws").className = "dot on"; };
+  ws.onclose = () => {
+    $("d-ws").className = "dot off";
+    $("d-sensor").className = "dot off";
+    setTimeout(connect, 1500);          // Server neu gestartet -> wieder rein
+  };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "log"){
+      log(m.line, m.line.startsWith("$") ? "cmd"
+          : (m.stream === "sensor" ? "sensor"
+             : (/error|fehler|traceback/i.test(m.line) ? "err" : "")));
+    }
+    else if (m.type === "position") setPos(m, "Sensor");
+    else if (m.type === "coverage_event"){
+      if (m.event === "coverage") setPos(m, "Druck");
+      else if (m.event === "coverage_done"){
+        log("Durchgang beendet: " + m.reason + " — " +
+            m.covered + "/" + m.total + " Pixel");
+        loadRecord();
+      }
+    }
+    else if (m.type === "status"){
+      $("d-action").className = "dot " + (m.action_running ? "on" : "off");
+      $("d-sensor").className = "dot " + (m.sensor_running ? "on" : "off");
+      $("b-stop").disabled = !m.action_running;
+      $("b-print").disabled = m.action_running;
+      $("b-sensor").textContent = m.sensor_running
+        ? "Sensorstrom stoppen" : "Sensorstrom starten";
+    }
+    else if (m.type === "action_done") log("· Aktion beendet (Code " + m.code + ")");
+    else if (m.type === "sensor_stopped") log("· Sensorstrom beendet", "sensor");
+    else if (m.type === "sensor_event" && m.event === "error")
+      log("Sensor: " + (m.message || JSON.stringify(m)), "err");
+  };
+}
+
+function loadRecord(){
+  const w = $("rec-wrap");
+  const img = new Image();
+  img.onload = () => { w.classList.remove("empty"); w.innerHTML = ""; w.appendChild(img); };
+  img.onerror = () => { w.classList.add("empty"); w.textContent = "noch kein Durchgang"; };
+  img.src = "/api/record.png?t=" + Date.now();
+}
+
+/* ------------------------------------------------------------ Aktionen */
+$("b-print").onclick = async () => {
+  const r = await post("/api/print", {args: fullArgs()});
+  if (!r.ok) log("Fehler: " + r.error, "err");
+};
+$("b-preview").onclick = renderPreview;
+$("b-stop").onclick = () => post("/api/stop");
+$("b-shutdown").onclick = async () => {
+  if (!confirm("Server herunterfahren? Laufende Aktion und Sensorstrom werden "
+               + "sauber beendet.")) return;
+  log("· Herunterfahren …");
+  try { await post("/api/shutdown"); } catch(e){}
+};
+$("b-sensor").onclick = async () => {
+  const running = $("d-sensor").classList.contains("on");
+  if (running) await post("/api/sensor/stop");
+  else {
+    const extra = [];
+    if ($("simulate").checked) extra.push("--simulate");
+    if ($("mode").value === "page"){
+      if ($("frame").value === "simple") extra.push("--page-frame", "simple");
+      else if ($("cal_path").value.trim())
+        extra.push("--page-calibration", $("cal_path").value.trim());
+    }
+    const r = await post("/api/sensor/start", {args: extra});
+    if (!r.ok) log("Fehler: " + r.error, "err");
+  }
+};
+
+/* ------------------------------------------------------------ Tests */
+fetch("/api/tests").then(r => r.json()).then(d => {
+  const list = $("testlist");
+  d.tests.forEach(t => {
+    const el = document.createElement("div");
+    el.className = "test";
+    el.innerHTML = '<h3><span class="tag">' + t.test + '</span>' + t.label + '</h3>'
+                 + '<p>' + t.help + '</p>';
+    const b = document.createElement("button");
+    b.textContent = "Ausführen";
+    b.onclick = async () => {
+      const args = [...t.args];
+      if (t.needs_calibration) args.push(...baseArgs());
+      else if ($("simulate").checked) args.push("--simulate");
+      const r = await post("/api/run", {args});
+      if (!r.ok) log("Fehler: " + r.error, "err");
+    };
+    el.appendChild(b);
+    list.appendChild(el);
+  });
+});
+
+/* ------------------------------------------------------------ Kalibrierung */
+function calStateText(){
+  $("cal_state").textContent =
+    "Spaltenkante: " + calCol.length + " Proben · Zeilenkante: " + calRow.length
+    + " Proben · Boresight: " + (calBore ? "erfasst" : "–")
+    + (calRec ? "  ●  nehme " + (calRec === "col" ? "Spalten" : "Zeilen") + "kante auf" : "");
+}
+function toggleRec(which, btn){
+  if (calRec === which){ calRec = null; btn.textContent = btn.dataset.idle; }
+  else {
+    document.querySelectorAll("#tab-cal button[data-idle]").forEach(b =>
+      b.textContent = b.dataset.idle);
+    if (which === "col") calCol = []; else calRow = [];
+    calRec = which; btn.textContent = "Aufnahme beenden";
+  }
+  calStateText();
+}
+$("cal_col").dataset.idle = "Spaltenkante aufnehmen";
+$("cal_row").dataset.idle = "Zeilenkante aufnehmen";
+$("cal_col").onclick = e => toggleRec("col", e.target);
+$("cal_row").onclick = e => toggleRec("row", e.target);
+$("cal_bore").onclick = () => {
+  if (!lastQuat){
+    log("Keine Orientierung verfügbar — Sensorstrom starten und den Wagen "
+        + "flach mit der Düsenleiste entlang der Zeilenkante halten.", "err");
+    return;
+  }
+  calBore = lastQuat.slice();
+  log("Boresight erfasst: [" + calBore.map(x => x.toFixed(4)).join(" ") + "]");
+  calStateText();
+};
+$("cal_reset").onclick = () => {
+  calCol = []; calRow = []; calBore = null; calRec = null; calResult = null;
+  document.querySelectorAll("#tab-cal button[data-idle]").forEach(b =>
+    b.textContent = b.dataset.idle);
+  $("cal_result").style.display = "none";
+  calStateText();
+};
+$("cal_compute").onclick = async () => {
+  const r = await post("/api/calibration/compute", {
+    col_samples: calCol, row_samples: calRow,
+    sheet_width_mm: num("cal_w"), sheet_height_mm: num("cal_h"),
+    boresight_quat: calBore});
+  const box = $("cal_result");
+  box.style.display = "";
+  if (!r.ok){ box.textContent = "Fehler: " + r.error; calResult = null; return; }
+  calResult = r.calibration;
+  const q = r.quality;
+  box.textContent =
+    "Winkelfehler " + F(q.angle_error_deg,2) + "°  ·  Normalenneigung "
+    + F(q.normal_tilt_deg,2) + "°\n"
+    + "Spalte: " + F(q.col_length_mm,1) + " mm, RMS " + F(q.col_rms_residual_mm,3)
+    + " mm, " + q.col_sample_count + " Proben\n"
+    + "Zeile:  " + F(q.row_length_mm,1) + " mm, RMS " + F(q.row_rms_residual_mm,3)
+    + " mm, " + q.row_sample_count + " Proben"
+    + (r.warnings.length ? "\n⚠ " + r.warnings.join("\n⚠ ") : "");
+};
+$("cal_save").onclick = async () => {
+  if (!calResult){ log("Erst berechnen.", "err"); return; }
+  const r = await post("/api/calibration/save",
+                       {calibration: calResult, path: $("cal_save_path").value});
+  log(r.ok ? "Kalibrierung gespeichert: " + r.path : "Fehler: " + r.error,
+      r.ok ? "" : "err");
+};
+
+/* ------------------------------------------------------------ Start */
+syncSource();
+calStateText();
+connect();
+loadRecord();
+renderPreview();
 </script>
 </body>
 </html>

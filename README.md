@@ -935,23 +935,45 @@ erforderlichen Modus gegenseitig aus.
 
 ## Web-UI
 
-Statt der Kommandozeile gibt es eine grafische Oberfläche im Browser, die **alle
-CLI-Funktionen** bedient und – sobald verbunden – **die Sensorposition dauerhaft
-live anzeigt** (X/Y/Z, Advance, Spalte, Geschwindigkeit + Sparkline).
+Grafische Oberfläche im Browser, gebaut um die zwei Dinge, für die die Anlage
+benutzt wird: **Bilder drucken** und **die Messreihe aus `TESTS.md` fahren**.
 
 ```bash
 pip install -r requirements-ui.txt
 python -m printhead.ui            # öffnet http://127.0.0.1:8000 im Browser
 ```
 
-Die UI ist ein kleiner lokaler Server (FastAPI): sie baut aus den Formularfeldern
-den passenden `main.py`-Befehl (mit Live-Vorschau des Befehls), führt ihn aus und
-streamt die Ausgabe live in eine Konsole. Alles ist in Tabs organisiert – **Print**
-(Text/Kalibrier-Lineal/Testmuster + Render-Optionen), **Tracking & Scale**,
-**Nozzle map**, **BLE & Profiling** und **Diagnostics** (list-nodes, scan-ble,
-nozzle-test, ble-benchmark). Die Schalter **Simulate** und **Dry-run** oben gelten
-global – so lässt sich die komplette UI auch **ohne Hardware** ausprobieren
-(„Connect sensor" bei aktivem Simulate zeigt eine simulierte Live-Position).
+Zwei Anzeigen sind **immer** sichtbar, egal was man gerade tut:
+
+- **Live-Position** mit denselben Größen, die `--verbose` ausgibt: rohes
+  x/y/z, Seiten-u/v, Zeile/Spalte, Gier/Roll/Nick — und während eines
+  Durchgangs zusätzlich Geschwindigkeit und Deckung mit Fortschrittsbalken.
+  Bleiben die Werte aus, färben sie sich nach zwei Sekunden grau und die
+  Quelle springt auf „veraltet", statt eine tote Zahl weiter anzuzeigen.
+- **Druckvorschau**, die sich nach jeder Änderung an einem Feld neu rendert
+  (entprellt, damit nicht jede Tasteneingabe einen Unterprozess startet).
+
+Vier Reiter: **Drucken** (Bild, Testmuster oder Text, mit Größen und den
+Ablauf-Schaltern sofort starten / ein Durchgang / Trockenlauf), **Tests** (die
+Protokolle aus `TESTS.md` als Ein-Klick-Aktionen, jeweils mit der Nummer des
+Tests und einem Satz dazu, was er misst), **Kalibrierung** (beide Blattkanten
+abfahren, Boresight erfassen, berechnen, speichern) und **Einstellungen**
+(Modus, Seitenrahmen, Dosierung, Glättung, Spray, Latenzkompensation).
+
+Der gebaute Befehl steht immer im Klartext unter den Druckknöpfen — die UI
+führt echte `main.py`-Unterprozesse aus und kann deshalb nicht davon
+abweichen, was die CLI tut.
+
+**Sensor-Übergabe:** Der Amfitrack ist ein einzelnes USB-Gerät und lässt sich
+nicht zweimal öffnen. Startet man eine Aktion, während der Leerlauf-Strom
+läuft, tritt dieser automatisch ab und kommt danach von selbst zurück;
+währenddessen speist der Durchgang selbst die Live-Anzeige. Ein ausdrücklich
+gestoppter Strom wird **nicht** wieder aufgeweckt.
+
+Oben rechts liegen **Aktion stoppen** und **Herunterfahren** — Letzteres
+beendet laufende Aktion und Sensorstrom sauber (SIGINT, damit der Druckkopf
+noch geleert und der Tracker geschlossen wird) und fährt dann den Server
+herunter.
 
 Optionen: `python -m printhead.ui --host 0.0.0.0 --port 8080 --no-browser`.
 
