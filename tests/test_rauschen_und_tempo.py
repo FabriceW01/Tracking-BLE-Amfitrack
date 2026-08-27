@@ -247,7 +247,7 @@ def test_rausch_plot_schreibt_ein_lesbares_png():
 
 # ===================================================== Tempo: Einlesen
 def _csv_page(paare):
-    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw\n"
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
     zeilen = "".join(f"{i * 0.01:.4f},0,0,{u:.3f},0.5,{v:.2f},50.0,0,0,0,1\n"
                      for i, (u, v) in enumerate(paare))
     return _schreib(kopf + zeilen, endung=".csv")

@@ -29,7 +29,7 @@ Diese Trennung ist bei fast jedem Test die halbe Diagnose und kostet nichts.
 
 ### 2. Jeder Druck mit `--profile --profile-csv`
 
-Protokolliert `t_s, row, col, u_mm, v_mm, speed_mm_s, writes_per_s, qx..qw`.
+Protokolliert `t_s, row, col, u_mm, v_mm, speed_mm_s, cols_per_s, qx..qw`.
 Kostet nichts, ist für Test 7 zwingend und beantwortet nachträglich bei jedem
 Test die Frage „wie schnell war ich an dieser Stelle eigentlich".
 
@@ -42,7 +42,7 @@ später nicht mehr auswertbar.
 | Einstellung | Default (Stand dieser Datei) | benutzt |
 |---|---|---|
 | `--mm-per-column` | 0.087 | |
-| `--dose-hold-s` | 0.001 | |
+| `--drops-per-pixel` | 3 | |
 | `--spray-radius-mm` | 0.15 | |
 | `--spray-strength` | 0.5 | |
 | `--poll-hz` | 500 | |
@@ -532,14 +532,24 @@ interpolierte Geschwindigkeit, bei der die Deckung unter die Schwelle fällt.
 
 **Drei Abgleiche, die diesen Test aussagekräftig machen**
 
-1. **Gegen die Vorhersage:** dokumentiert sind 100 % bei ≤ 17,3 mm/s, 60 % bei
-   25 mm/s, 14 % bei 35 mm/s (simuliert, `poll_hz=200`). Weicht die Messung stark
-   ab, stimmt das Dosiermodell nicht — Stellschrauben sind `--dose-hold-s` und das
-   Firmware-`PATTERN_STRIDE`, **die zusammen bewegt werden müssen** (siehe README
-   „Firmware-Kopplung"; die Firmware muss dann neu geflasht werden).
-2. **Gegen die BLE-Seite:** die Maximalgeschwindigkeit aus Vorflug V2. Liegt die
-   gemessene Grenze darunter, begrenzt die **Dosierung**; liegt sie bei V2,
-   begrenzt **BLE**.
+1. **Gegen die Vorhersage:** Seit der Umstellung auf das Tropfenmodell hängt die
+   Tinte am zurückgelegten **Weg**, nicht mehr an der Verweildauer — die Deckung
+   soll also flach bei 100 % bleiben, bis die **Abtastrate** nicht mehr mitkommt.
+   Eine Spalte, die der Tracker nie abgetastet hat, wird nie gefeuert; diese Kante
+   liegt bei `--mm-per-column × --poll-hz` = 0,087 × 500 = **43,5 mm/s**.
+   Simuliert (120-Spalten-Vollfläche): 100 % bis 43,5 mm/s, 99,2 % bei 44,
+   95,0 % bei 46, 86,7 % bei 50, 72,5 % bei 60. Zum Vergleich das **alte**
+   Verweildauer-Modell: 100 % bei ≤ 17,3 mm/s, 60 % bei 25, 14 % bei 35 — fällt
+   deine Messung so früh ab, misst du noch die alte Firmware.
+   Fällt sie deutlich früher als 43,5 mm/s ab, liegt es **nicht** am Dosiermodell:
+   zuerst `--poll-hz` und die tatsächliche Schreibrate (`--profile`) prüfen.
+2. **Gegen die BLE-Seite:** die Maximalgeschwindigkeit aus Vorflug V2. Jeder
+   Tropfen ist eine gesendete Spalte, die geforderte Spaltenrate also
+   `--drops-per-pixel × v / --mm-per-column` — bei 43,5 mm/s sind das
+   1500 Spalten/s ≈ 125 Schreibvorgänge/s (12 Spalten je Schreibvorgang), gut
+   unterhalb der gemessenen ~270/s. BLE sollte hier also **nicht** die Grenze
+   sein; ist die gemessene Grenze trotzdem die aus V2, ist die Verbindung
+   schlechter als angenommen.
 3. **Gegen die Warnschwelle:** der Default steht bei 25 mm/s
    (`--speed-warning-mm-s`). Der Test zeigt, ob der richtig gesetzt ist.
 

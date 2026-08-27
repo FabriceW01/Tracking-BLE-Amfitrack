@@ -652,11 +652,17 @@ async def nozzle_test(ble: BleSettings, nozzle_map: Optional[NozzleMapSettings] 
             # This tool bypasses _run_ble(), so nothing else pins the firmware to
             # line mode here. If it is still in page mode from an earlier --mode
             # page run, the "all on" write below would not fire 3 times like line
-            # mode intends -- it becomes a held pattern re-fired every
-            # PATTERN_STRIDE ticks, i.e. ~120 times over on_seconds=2.0s, dumping
-            # ~40x the intended ink through all nozzles at once. required=False:
-            # this must still run against older firmware without MODE_UUID, where
-            # line mode is the only behaviour anyway.
+            # mode intends -- page mode queues each written column and fires it
+            # exactly ONCE, so the 2.0s "all nozzles on" step would be a single
+            # 300 us flash instead. required=False: this must still run against
+            # older firmware without MODE_UUID, where line mode is the only
+            # behaviour anyway.
+            #
+            # Note this is the opposite failure from the one this line used to
+            # guard against: the older page-mode firmware HELD the pattern and
+            # re-fired it every PATTERN_STRIDE ticks, ~120 times over 2.0s,
+            # dumping ~40x the intended ink. Either way the fix is the same --
+            # pin line mode first -- so the call stays.
             await client.set_print_mode(NOZZLE_MODE_LINE, required=False)
             _print_start_button_hint()
             print(f"All {IMAGE_HEIGHT} nozzles ON for {on_seconds:.1f}s ...")

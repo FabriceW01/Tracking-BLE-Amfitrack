@@ -11,14 +11,21 @@ tracker, so "is this pixel done yet" is a live question answered every
 sample rather than something decided once and forgotten.
 
 Ink is dosed per *nozzle* (152 trackers), not per pixel -- a nozzle remembers
-only the one pixel it is currently over and how long it has continuously
-been there. It fires (bit=1 in the returned pattern) whenever that pixel is
-wanted and not yet printed; once the dwell has lasted ``dose_hold_s``, the
-pixel is marked printed and the nozzle stops firing for it. If a nozzle
-leaves before that, the pixel simply stays unprinted -- a later pass (by
-this nozzle, or by a different one, if vertical movement changed which
-nozzle covers that row) catches it up. This gives full coverage under loops
-and revisits without ever accumulating dose across pixels.
+only the one pixel it is currently over and how much of a dose that pixel has
+received. It fires (bit=1 in the returned pattern) whenever that pixel is
+wanted and still owed ink; once ``drops_per_pixel`` drops have actually gone
+out for it, the nozzle stops firing for it. Note "gone out", not "elapsed":
+the firmware fires each column it receives exactly once and never repeats, so
+ink is counted in drops the client really sent, not in time a bit was held
+(see ``DEFAULT_DROPS_PER_PIXEL``). If a nozzle leaves before that, the pixel
+simply stays unprinted -- a later pass (by this nozzle, or by a different
+one, if vertical movement changed which nozzle covers that row) catches it
+up. This gives full coverage under loops and revisits without ever
+accumulating dose across pixels.
+
+``printed`` is set a hair earlier than the nozzle is released, by exactly one
+poll sample; ``step()``'s Step 5 has the measurement that forces those two to
+be separate thresholds.
 
 Cart yaw about the page normal is corrected here on a per-nozzle basis: with
 the bar rotated by ``yaw_rad``, nozzle ``p`` is no longer at the same column
@@ -37,7 +44,7 @@ page-frame constant, for the same reason).
 Nozzles can optionally be tied together into fixed-size groups (``__init__``'s
 ``nozzle_group``, CLI ``--nozzle-group``): with ``nozzle_group = N``, nozzles
 ``N*k .. N*k+N-1`` form group ``k`` and always fire together or not at all --
-see ``step()`` for the exact per-group OR/dwell/deposit rule. This is a
+see ``step()`` for the exact per-group OR/drop/deposit rule. This is a
 coarser-vertical-addressing option requested by the hardware owner, nothing
 more: it is NOT a fix for the repeated-overprint behaviour ``spray_radius_mm``
 / ``spray_strength`` above address, and firing nozzles in pairs does not
@@ -57,72 +64,44 @@ import numpy as np
 from .geometry import NOZZLE_PITCH_MM, NUM_NOZZLES
 from .rendering import pack_nozzle_bits
 
-# Minimum continuous time (s) a nozzle must stay over a not-yet-printed ink
-# pixel before that pixel counts as fully dosed -- the client-side analogue
-# of the firmware's BLE_DOSE_HOLD_FACTOR, preventing a slow/stalled nozzle
-# from firing forever.
+# How many drops a pixel must receive before it counts as fully dosed.
 #
-# Measured once against a real 200x100 mm checkerboard print. The old value
-# (0.05 s = 50 ms) required the cart to be slower than 0.2/0.05 = 4 mm/s for
-# a pixel to ever be marked printed -- but the real hand speed was median
-# 17.3 mm/s / p95 46.1 mm/s, so only 5.5% of samples were ever that slow, and
-# the finished pass reported "Covered 224/503500 ink pixels" = 0.044%. With
-# `printed` staying False almost everywhere, every revisit re-fired the same
-# pixels at a slightly different hand position -- CoverageEngine's whole
-# purpose (tolerating imprecise freehand repositioning without double-firing
-# a covered pixel) was non-functional, and that repeated re-firing is what
-# produced the ghosting/doubling visible on paper.
+# This replaced a time-based hold (``DEFAULT_DOSE_HOLD_S``) when the firmware
+# changed its page-mode firing model. The old firmware HELD the last written
+# pattern and re-fired it every ``PATTERN_STRIDE`` ticks, so ink was set by
+# how LONG the client held a nozzle bit at 1, and the two sides were coupled
+# by ``DOSE_HOLD_S ~= 3 * PATTERN_STRIDE * tick``. The firmware now fires each
+# column it receives EXACTLY ONCE and never repeats (``PATTERN_STRIDE`` and
+# ``pattern_dose_should_fire()`` are gone from ble_dose.h), so there is no
+# repeat rate left to hold against: ink is decided entirely on this side, by
+# how many copies of a column the client queues.
 #
-# This value is derived from, and MUST be kept in sync with, the firmware's
-# PATTERN_STRIDE (src/ble_dose.h in the firmware repo):
-#   DEFAULT_DOSE_HOLD_S ~= 3 * PATTERN_STRIDE * 450e-6
-# (450 us = the firmware print loop tick; 3 = BLE_DROPS_PER_COLUMN, line
-# mode's long-validated per-column dose target). At PATTERN_STRIDE = 3 that
-# is 3 * 3 * 450e-6 = 0.00405 s, i.e. a pixel gets ~3 drops before the
-# coverage mask marks it printed. Changing this constant without changing
-# PATTERN_STRIDE to match (and re-flashing) breaks that ~3-drop target: a
-# shorter hold with an unchanged stride gives fewer than 3 drops, a longer
-# hold gives more. See tests/test_coverage.py for a test that pins this
-# relationship so an edit to one side fails loudly here.
+# Counting drops instead of seconds is therefore not a refactor but the only
+# model that still corresponds to the hardware. It also removes the old
+# model's sharpest edge -- ``dose_hold_s`` had to stay below the poll interval
+# or coverage collapsed off a cliff (measured: 100% at 4.90 ms against 31% at
+# 5.40 ms with a 5.00 ms interval) -- because a drop count has no relationship
+# to the polling rate at all.
 #
-# CORRECTION (this value replaces an earlier 0.0054 s / PATTERN_STRIDE=4
-# pick that also hit the 3-drop target but ignored polling quantization and
-# landed on a cliff): `step()` only marks a pixel printed on a *sample* that
-# finds elapsed dwell >= dose_hold_s, where "elapsed" is measured from the
-# first sample on that pixel -- so completing a dose costs whole poll
-# intervals, not continuous time. With the default --poll-hz 200 (5.00 ms
-# interval), a hold just *above* one interval (the old 5.4 ms) forces a
-# THIRD sample to land on the same column before it completes, because a
-# second sample at +5.00 ms is still short of 5.4 ms. Measured directly by
-# sweeping dose_hold_s at poll_hz=200 over a realistic hand-speed pass:
-#   dose_hold  4.90 ms -> 100.0 % coverage
-#   dose_hold  5.40 ms ->  31.0 %   <-- the value that shipped in the first pass
-#   dose_hold  7.00 ms ->  31.0 %
-#   dose_hold 10.00 ms ->   6.5 %
-# i.e. crossing the poll interval does not degrade coverage gracefully, it
-# collapses it. The additional constraint this adds, on top of the ~3-drop
-# target above: dose_hold_s MUST stay below the poll interval (1/poll_hz),
-# so that two consecutive samples are always enough to complete a dose --
-# cross that line and coverage falls off a cliff rather than sloping down.
-# 0.00405 s is 19% below the 5.00 ms default poll interval, giving some
-# margin rather than sitting on the edge again.
+# The value 3 is inherited from line mode's long-validated
+# ``BLE_DROPS_PER_COLUMN``: a drop spreads to roughly 60-120 um on paper, so
+# covering one column takes about three of them. It is a measured-once value
+# from real prints, not a finished calibration -- expect iteration, the same
+# way every other dose constant in this project needed several hardware
+# rounds.
 #
-# At the measured median hand speed (17.3 mm/s) a full simulated pass at
-# poll_hz=200 gives 100% coverage with this default; coverage falls off
-# above that as hand speed rises (60% at 25 mm/s, 14% at 35 mm/s, 0% at
-# 46 mm/s) because fewer poll samples land on each column before the hand
-# moves on. That falloff is BY DESIGN, not a bug -- an unfinished pixel
-# simply stays open for a later pass (see CoverageEngine's docstring) -- but
-# it means this default is not universally sufficient at all hand speeds;
-# it is tuned to the measured median, not the tail.
-#
-# Like PATTERN_STRIDE, this is a measured-once value from one real print at
-# ~17 mm/s median hand speed, not a finished calibration -- a large,
-# evidence-based improvement on the previous untested guess, but still
-# expect iteration once more prints are measured, the same way every other
-# dose constant in this project (BLE_FIRE_MIN/MAX etc.) needed several
-# rounds of hardware iteration before it was right.
-DEFAULT_DOSE_HOLD_S = 0.00405
+# Who supplies ``drops``: ``PrintController._print_freehand_pass`` converts
+# the cart's travel since the last send into a number of copies to queue
+# (``drops = DROPS_PER_PIXEL * travel / mm_per_column``, carried across
+# samples in an accumulator so no fraction is lost) and passes the same count
+# to ``step()``. Ink per pixel is then independent of hand speed by
+# construction: move twice as fast and twice as many copies go out per
+# second, in half the time over the same pixel.
+DEFAULT_DROPS_PER_PIXEL = 3
+
+# Slack on the "is this pixel fully dosed" comparison -- see step()'s Step 5
+# for why a float dose needs one at all.
+_DOSE_EPS = 1e-9
 
 
 def bar_offset_uv(offset_along_bar_mm: float, yaw_rad: float) -> Tuple[float, float]:
@@ -164,7 +143,7 @@ class CoverageEngine:
     """
 
     def __init__(self, ink: np.ndarray, mm_per_column: float,
-                 dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
+                 drops_per_pixel: int = DEFAULT_DROPS_PER_PIXEL,
                  spray_radius_mm: float = 0.0,
                  spray_strength: float = 0.0,
                  nozzle_group: int = 1):
@@ -177,34 +156,43 @@ class CoverageEngine:
         self.printed = np.zeros_like(ink, dtype=bool)
         # Where ink PHYSICALLY landed: set for every in-bounds nozzle on
         # every sample it actually fired, which is the instant its pixel is
-        # wanted -- NOT gated on dose completion the way `printed` is.
+        # wanted and any ink at all is owed -- NOT gated on dose completion
+        # the way `printed` is.
         #
-        # The two diverge exactly when a pixel is visited fewer times than
-        # `dose_hold_s` needs, i.e. when the cart is moving fast relative to
-        # mm_per_column. Measured on a simulated pass at the rig's real
-        # settings (mm_per_column 0.087, dose_hold_s 0.001, poll_hz 500),
-        # sweeping a checkerboard:
+        # The two diverge where a pixel gets SOME ink but not a full
+        # `drops_per_pixel` dose: mostly the last partial column before the
+        # cart turns or leaves the page, and any column the cart crosses
+        # faster than the poll rate can sample it. Simulated over a 120-column
+        # solid block at the rig's real settings (mm_per_column 0.087,
+        # drops_per_pixel 3, poll_hz 500):
         #
         #   speed     samples/col   printed   fired
-        #   17.3 mm/s     2.51        99.3%   99.3%
-        #   25.0 mm/s     1.74        73.3%   99.3%
-        #   30.0 mm/s     1.45        44.2%   99.3%
+        #   17.3 mm/s     2.51       100.0%   100.0%
+        #   30.0 mm/s     1.45       100.0%   100.0%
+        #   43.5 mm/s     1.00       100.0%   100.0%
+        #   50.0 mm/s     0.87        86.7%    86.7%
+        #   60.0 mm/s     0.72        72.5%    72.5%
         #
-        # Below two samples per column a pixel never accumulates enough
-        # dwell to be marked printed, yet the nozzle fired on the one sample
-        # it did get, so the paper is fully inked. Reporting `printed` as
-        # "coverage" therefore drew heavy vertical striping over squares that
-        # came out solid on paper -- reported from hardware as "the real
-        # print's fill is perfect, the coverage image looks nothing like it".
+        # Note what the columns say TOGETHER. Up to one sample per column
+        # (43.5 mm/s = mm_per_column * poll_hz) both are 100%: dose no longer
+        # depends on how long a nozzle lingers, only on how far the cart
+        # travelled, so speed cannot thin the print. Past that the two fall
+        # in step, because the failure is no longer under-dosing -- whole
+        # columns are simply never sampled, so nothing fires there at all.
+        # `fired` tracking `printed` down is the signature of that: ink that
+        # is missing from the paper, not merely from the bookkeeping.
         #
-        # `printed` deliberately keeps its dosing role (it gates re-firing
-        # and `done`, and the dose_hold_s <-> firmware PATTERN_STRIDE drop
-        # count is calibrated against it); this mask exists purely to report
-        # what the paper actually looks like. The gap between them is itself
-        # useful -- see recording.render_coverage's THIN panel.
+        # Under the previous time-based dose the same sweep gave 73.3%
+        # printed against 99.3% fired at 25 mm/s and 44.2% against 99.3% at
+        # 30 -- a fully inked page reported as heavily striped, which is how
+        # it was reported from hardware ("the real print's fill is perfect,
+        # the coverage image looks nothing like it"). This mask was added to
+        # show what the paper looks like when the two disagree; it still
+        # earns its place at the top end, where they agree for a much worse
+        # reason. See recording.render_coverage's THIN panel.
         self.fired = np.zeros_like(ink, dtype=bool)
         self.mm_per_column = mm_per_column
-        self.dose_hold_s = dose_hold_s
+        self.drops_per_pixel = max(1, int(drops_per_pixel))
         self.spray_radius_mm = spray_radius_mm
         self.spray_strength = spray_strength
         # Ties nozzles nozzle_group*k .. nozzle_group*k+nozzle_group-1 into
@@ -225,43 +213,32 @@ class CoverageEngine:
 
         self._num_groups = -(-NUM_NOZZLES // nozzle_group)   # ceil division
 
-        # Per-PIXEL accumulated dwell time (seconds), keyed on (row, col) --
-        # NOT per-group-slot and NOT reset when a group briefly stops being
-        # wanted or switches to a different pixel. See step()'s docstring
-        # for why: NOZZLE_PITCH_MM (~0.087mm) is finer than realistic tracker
+        # Per-PIXEL accumulated dose, in drops (fractional -- see step()),
+        # keyed on (row, col) -- NOT per-group-slot and NOT reset when a
+        # group briefly stops being wanted or switches to a different pixel.
+        # Why: NOZZLE_PITCH_MM (~0.087mm) is finer than realistic tracker
         # position noise, so a nozzle sitting near a row boundary has its
         # rounded (row, col) key flap between two neighbours sample to
-        # sample. A per-group-slot "since" timestamp that resets on every
-        # key change (the engine's original design) never accumulates past
-        # dose_hold_s in that case -- the nozzle fires every single sample
-        # (see `active` below, set unconditionally once `wanted`), but
-        # NEITHER neighbour ever reaches dose_hold_s of counted dwell, so
-        # `printed` stays False and the pixel never completes, no matter how
-        # long the cart sits there. Reproduced directly: 200/200 samples of
-        # real firing, 0 pixels ever marked printed, with jitter of only
-        # +-0.001mm (two orders of magnitude below plausible tracker noise)
-        # straddling one row boundary. A synthetic noise sweep (0 to 0.2mm)
-        # confirmed the direction gets WORSE, not better, with more realistic
-        # noise: recorded coverage can drop even as the number of samples
-        # that actually fired goes up, because more noise means more
+        # sample. A per-group-slot accumulator that resets on every key
+        # change (the engine's original design) never reaches a full dose in
+        # that case -- the nozzle fires every single sample (see `active`
+        # below, set unconditionally once `wanted`), but NEITHER neighbour
+        # ever collects `drops_per_pixel`, so `printed` stays False and the
+        # pixel never completes, no matter how long the cart sits there.
+        # Reproduced directly: 200/200 samples of real firing, 0 pixels ever
+        # marked printed, with jitter of only +-0.001mm (two orders of
+        # magnitude below plausible tracker noise) straddling one row
+        # boundary. A synthetic noise sweep (0 to 0.2mm) confirmed the
+        # direction gets WORSE, not better, with more realistic noise:
+        # recorded coverage can drop even as the number of samples that
+        # actually fired goes up, because more noise means more
         # boundary-crossing flips.
         #
         # Entries live here only while a pixel is wanted-but-incomplete;
-        # `_deposit` (via step()) removes the entry once dwell reaches
-        # dose_hold_s, so this dict's size is bounded by "distinct pixels
+        # `_deposit` (via step()) removes the entry once the dose is
+        # complete, so this dict's size is bounded by "distinct pixels
         # currently in progress", not by image size or pass length.
-        self._pixel_dwell_s: "dict[Tuple[int, int], float]" = {}
-        # Wall time of the previous step() call (None before the first),
-        # used to turn each call's `t` into a bounded per-sample dt (about
-        # one poll interval) added to whichever pixel(s) are wanted THIS
-        # sample -- see step()'s Step 4. Deliberately a single engine-wide
-        # value, not per-pixel: step() is called once per poll sample
-        # regardless of how many groups are active, so this dt is always a
-        # real, small inter-sample gap, never a large one accumulated while
-        # a pixel sat untouched (which would let a brief revisit after a
-        # long absence complete instantly -- exactly the over-counting a
-        # dwell requirement exists to prevent).
-        self._last_step_t: Optional[float] = None
+        self._pixel_drops: "dict[Tuple[int, int], float]" = {}
         self._last_pattern: Optional[bytes] = None
 
         # Whether the most recent step() had ANY nozzle in bounds of the
@@ -323,7 +300,7 @@ class CoverageEngine:
         (verified: it changed the per-pass firing counts by exactly zero).
 
         The centre itself is not in the kernel -- it always receives a full
-        1.0 dose from the dwell that completed it (see ``_deposit``).
+        1.0 dose from the drops that completed it (see ``_deposit``).
 
         Returns an empty kernel (spray disabled, behaviour identical to the
         pre-spray engine) when either parameter is <= 0.
@@ -353,9 +330,15 @@ class CoverageEngine:
         plus the spray kernel's partial doses around it. Any pixel whose
         accumulated dose reaches 1.0 counts as printed.
 
-        Called exactly once per completing pixel: the centre always reaches
-        1.0 here, so the pixel is `printed` on return, which makes it
-        unwanted and releases the nozzle -- it cannot deposit twice.
+        Called exactly once per completing pixel. The centre always reaches
+        1.0 here, so the pixel is `printed` on return -- but under the
+        drop-count model `printed` no longer releases the nozzle by itself
+        (see ``step()``'s Step 5: a pixel is reported up to one sample before
+        its dose finishes, and keeps firing until it does). The
+        call-once-only guarantee therefore comes from ``step()``'s explicit
+        ``not self.printed[row, col]`` guard at the call site, not from the
+        pixel going unwanted. It matters: the spray kernel below adds a
+        partial dose to neighbours, and calling twice would splash it twice.
 
         CORRECTION: the spray loop used to mark a neighbour ``printed`` on
         dose alone, without checking ``self.ink[r, c]`` -- i.e. it could
@@ -390,12 +373,31 @@ class CoverageEngine:
                 else:
                     self.dose[r, c] = acc
 
-    def step(self, u_mm: float, v_mm: float, t: float,
+    def step(self, u_mm: float, v_mm: float, t: float = 0.0,
+             drops: float = 1.0,
              yaw_rad: float = 0.0) -> "Tuple[bytes, bool]":
         """
         Advance the engine with one live page-plane sample (see
-        ``tracking.PageMapper.project``) at time ``t`` (seconds; only
-        differences between calls matter, so ``time.monotonic()`` is fine).
+        ``tracking.PageMapper.project``).
+
+        ``drops`` is how much of a full dose this sample delivers to whatever
+        pixel the bar is over, in units where ``drops_per_pixel`` is one
+        finished pixel. It is deliberately FRACTIONAL: the caller
+        (``controller._print_freehand_pass``) computes it from the distance
+        travelled since the last sample, ``drops_per_pixel * travel /
+        mm_per_column``, so summing it over one column of travel gives
+        exactly one dose no matter how fast the cart moved or how the poll
+        samples happened to land. Do not pass the integer number of BLE
+        columns that went out on this sample instead -- that is a transport
+        quantity, and crediting it produces speed-dependent false stripes
+        (measured; see Step 5's comment in the body).
+
+        ``t`` (seconds) is accepted but no longer used. Dosing was time-based
+        while the firmware re-fired a held pattern at a fixed rate; it is
+        drop-based now, and nothing else in the engine needs a clock. Kept in
+        the signature -- with a default, so new callers can omit it -- rather
+        than removed, because every existing caller and test passes it
+        positionally and none of them would read any differently without it.
 
         ``yaw_rad`` is the cart's current yaw about the page normal (see
         ``rotation.yaw_about_normal``, computed once per sample by the
@@ -457,19 +459,21 @@ class CoverageEngine:
             side (it cannot fire only half of itself).
           * if wanted, every member's ``active[p]`` is set True -- the
             defining behaviour: they always fire together.
-          * dwell is tracked ONCE per group (not per nozzle), keyed on the
-            group's FIRST member's ``(row, col)`` -- but accumulated in
-            ``self._pixel_dwell_s`` (see ``__init__``), which does NOT reset
+          * the dose is tracked ONCE per group (not per nozzle), keyed on
+            the group's FIRST member's ``(row, col)`` -- but accumulated in
+            ``self._pixel_drops`` (see ``__init__``), which does NOT reset
             when the group switches to a different pixel or stops being
             wanted for a while: it only grows, and only while this exact
-            pixel is the group's current key, until it reaches
-            ``dose_hold_s`` and the entry is removed. A later revisit of the
-            SAME pixel (by this group or, since the dict is keyed on the
-            pixel itself rather than a per-group slot, by any group) resumes
-            from where it left off rather than starting over.
-          * on completion, ``_deposit`` is called for EVERY in-bounds member
-            (not just the first) -- every member physically received ink, so
-            every member's pixel must be marked printed.
+            pixel is the group's current key, until the full
+            ``drops_per_pixel`` has gone out and the entry is removed. A
+            later revisit of the SAME pixel (by this group or, since the
+            dict is keyed on the pixel itself rather than a per-group slot,
+            by any group) resumes from where it left off rather than
+            starting over.
+          * once the dose is reported complete, ``_deposit`` is called for
+            EVERY in-bounds member (not just the first) -- every member
+            physically received ink, so every member's pixel must be marked
+            printed.
 
         At ``nozzle_group = 1`` every group has exactly one member, so all of
         the above collapses to precisely the ungrouped per-nozzle rule --
@@ -494,14 +498,6 @@ class CoverageEngine:
         else:
             sin_yaw = math.sin(yaw_rad)
             cos_yaw = math.cos(yaw_rad)
-
-        # A bounded, real inter-sample gap -- see __init__'s docstring for
-        # why this is computed once per step() call (not per pixel/group):
-        # step() runs once per poll sample regardless of how many groups are
-        # active, so this is always about one poll interval, never a large
-        # gap accumulated while some pixel sat untouched.
-        dt = 0.0 if self._last_step_t is None else max(0.0, t - self._last_step_t)
-        self._last_step_t = t
 
         active = np.zeros(NUM_NOZZLES, dtype=bool)
         in_bounds_any = False
@@ -530,74 +526,131 @@ class CoverageEngine:
                 in_bounds = 0 <= row < self.height and 0 <= col < self.width
                 if in_bounds:
                     in_bounds_any = True
-                wanted = in_bounds and bool(self.ink[row, col]) and not self.printed[row, col]
+                # `printed` alone no longer releases a nozzle: a pixel is
+                # REPORTED printed up to one sample before its dose is
+                # actually complete (Step 5), and firing has to continue
+                # through that last sample or the report would be paid for
+                # in real ink. An open ledger entry means "dose still owed",
+                # so it keeps the nozzle wanted; Step 5 removes the entry at
+                # the moment the full dose has gone out, and the nozzle
+                # releases then.
+                wanted = in_bounds and bool(self.ink[row, col]) and (
+                    not self.printed[row, col]
+                    or (row, col) in self._pixel_drops)
                 members.append((p, row, col, in_bounds))
                 group_wanted = group_wanted or wanted
 
             if not group_wanted:
-                # Deliberately does NOT touch self._pixel_dwell_s: whatever
-                # pixel this group was accumulating dwell on (if any) simply
+                # Deliberately does NOT touch self._pixel_drops: whatever
+                # pixel this group was accumulating drops on (if any) simply
                 # is not visited THIS sample. Its progress must survive --
                 # see __init__'s docstring for why resetting it here was the
                 # bug (a nozzle sitting near a row boundary flaps between
                 # "wanted here" and "wanted next door" every sample, and a
                 # reset-on-any-change rule then never lets either accumulate
-                # enough dwell, no matter how long it fires).
+                # a full dose, no matter how long it fires).
                 continue
 
-            # Step 4: dwell tracked once per group, keyed on the FIRST
+            # Step 4: drops tracked once per group, keyed on the FIRST
             # member's (row, col) -- at group_size=1 this is that one
             # nozzle's own (row, col), same key the ungrouped code used.
             # Accumulated in the persistent per-pixel dict (see __init__),
             # not reset by a key change -- only removed on completion below.
+            # Surviving a key change is what this dict exists for: a nozzle
+            # sitting near a row boundary flaps between "wanted here" and
+            # "wanted next door" every sample, and a reset-on-any-change rule
+            # would then never let either side accumulate its full dose, no
+            # matter how long the nozzle fires there.
             first_row, first_col = members[0][1], members[0][2]
             pixel = (first_row, first_col)
-            # CORRECTION: this first read `.get(pixel, 0.0) + dt`, i.e. it
-            # credited a whole poll interval to a pixel's very FIRST sample.
-            # That silently completed every pixel one sample EARLIER than the
-            # original engine, so nozzles stopped firing sooner and the rig
-            # laid down far less ink for the same recorded coverage --
-            # measured on a realistic moving pass: fire events dropped 1503
-            # -> 904 at dose_hold_s=0.001 (-40%) and 5099 -> 2404 at the
-            # 0.00405 default (-53%), while the recorded `printed` count
-            # stayed put (~750 both ways). On paper that reads exactly as
-            # "coverage.png looks fuller than the real print" / "only half
-            # of it printed", which is how it was reported. The whole
-            # dose_hold_s <-> firmware PATTERN_STRIDE pairing (~3 drops per
-            # pixel, see DEFAULT_DOSE_HOLD_S) is calibrated against the
-            # original timing, so shifting completion earlier de-calibrates
-            # the actual drop count.
+            # Ink is counted in DROPS, not in dwell time: the firmware fires
+            # each column it receives exactly once and never repeats, so how
+            # much ink a pixel gets is decided entirely on this side -- see
+            # the module docstring.
             #
-            # Arriving at a pixel therefore credits 0.0, exactly as the
-            # original "since = t" did; only SUBSEQUENT samples on that same
-            # pixel add dt. For a continuously-visited pixel that reproduces
-            # the original elapsed-time semantics exactly (after n samples:
-            # (n-1)*dt == t - t_first), while still surviving the row-flapping
-            # case this dict exists for, because the entry is not discarded
-            # when the group looks away for a sample.
-            if pixel in self._pixel_dwell_s:
-                dwell = self._pixel_dwell_s[pixel] + dt
-            else:
-                dwell = 0.0
-            self._pixel_dwell_s[pixel] = dwell
+            # `drops` is FRACTIONAL on purpose (see step()'s docstring). It is
+            # the share of a full dose this sample's travel is worth, not the
+            # integer number of BLE columns that happened to go out on this
+            # particular sample. Those differ: at 17.3 mm/s a sample is worth
+            # 1.2 drops, so the integer stream reads 1,1,2,1,1,2,... and a
+            # column that happens to collect 1+1 before the cart leaves it
+            # reads a drop short although the paper got its share. Crediting
+            # the fraction makes the credit a pixel receives while the bar
+            # crosses it sum to exactly `drops_per_pixel`, by construction,
+            # at any speed; crediting the integer leaves it at the mercy of
+            # where the rounding happened to land. Simulated over a
+            # 120-column solid block, the integer version reported 88.3% of
+            # columns printed at 25 mm/s and 96.7% at 28 (100% at every other
+            # speed in a 3-43.5 mm/s sweep) and delivered 550 columns/s at
+            # 17.3 mm/s against the budget's 597, where the fraction
+            # delivers 594. `drops = 0` (a stationary cart) credits nothing
+            # and fires nothing either way.
+            treffer = self._pixel_drops.get(pixel, 0.0) + drops
 
             # Step 3: the whole group fires together -- and every in-bounds
             # member that fires physically puts ink on its own cell, right
             # now, whether or not the dose ever completes there (see
             # self.fired in __init__). Recorded per member, not just for the
-            # dwell-key pixel, for the same reason _deposit is called for
-            # every member on completion: they all really did fire.
+            # key pixel, for the same reason _deposit is called for every
+            # member on completion: they all really did fire.
             for p, row, col, in_bounds in members:
                 active[p] = True
-                if in_bounds:
+                if in_bounds and drops > 0:
                     self.fired[row, col] = True
 
-            # Step 5: on completion, every in-bounds member actually
-            # received ink and must be marked printed -- not just the first.
-            if dwell >= self.dose_hold_s:
-                del self._pixel_dwell_s[pixel]
+            # Step 5: two thresholds on the one ledger, for two different
+            # questions. They are deliberately not the same number.
+            #
+            #   `fertig` -- the full dose has now gone out. This RELEASES the
+            #       nozzle: the entry is dropped, and with it (see `wanted`
+            #       above) the group's claim on this pixel. It has to be the
+            #       strict threshold, because everything past it is ink that
+            #       does not get printed.
+            #
+            #   `melden` -- the pixel is within ONE more sample of its full
+            #       dose. This is what marks it `printed`, i.e. what the
+            #       coverage report and `done` are built on. It has to carry
+            #       one sample of slack, because credit arrives in whole poll
+            #       samples: a crossing worth m samples deposits floor(m) or
+            #       ceil(m) of them inside the pixel, so a fully swept pixel
+            #       can end up to one sample short of a strict full dose
+            #       through nothing but how the sample grid happened to line
+            #       up with the column grid. Measured on a 120-column solid
+            #       block (mm_per_column 0.087, poll_hz 500), reporting on
+            #       the strict threshold gave 70.0% of columns printed at
+            #       5 mm/s, 35.0% at 10, 51.7% at 17.3, 74.2% at 25 and 9.2%
+            #       at 40 -- against 100% fired throughout, and swinging with
+            #       speed for no physical reason. On `melden` all of those
+            #       read 100%.
+            #
+            # Reporting one sample early costs nothing on paper precisely
+            # because it does not release the nozzle -- that is what the two
+            # thresholds buy. Reporting AND releasing on `melden` was tried
+            # and is measurably wrong: it cuts each crossing short by up to a
+            # sample of real ink, dropping the delivered column rate from
+            # ~597/s (the 3-drops-per-column budget) to 455/s at 17.3 mm/s
+            # and to 483/s at 25 mm/s -- a 20-40% under-ink that also stops
+            # being monotonic in speed.
+            #
+            # The epsilon is float hygiene, not policy: a credit built from
+            # summed fractions lands on its target only up to rounding (three
+            # exact 1.0 shares can total 2.9999999999999996), and a single
+            # ulp short would otherwise strand a column forever.
+            ziel = self.drops_per_pixel - _DOSE_EPS
+            fertig = treffer >= ziel
+            melden = treffer + drops >= ziel
+            if fertig:
+                self._pixel_drops.pop(pixel, None)
+            else:
+                self._pixel_drops[pixel] = treffer
+
+            if melden:
                 for _p, row, col, in_bounds in members:
-                    if in_bounds:
+                    # Guarded, because `melden` stays true for the samples
+                    # between the report and the release: _deposit must run
+                    # exactly once per pixel or its spray kernel would splash
+                    # a neighbour's partial dose on repeatedly.
+                    if in_bounds and not self.printed[row, col]:
                         self._deposit(row, col)
 
         self.last_in_bounds = in_bounds_any

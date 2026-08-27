@@ -30,7 +30,7 @@ from printhead.controller import (                                    # noqa: E4
     _extrapolate_uv,
     _speed_warning_transition,
 )
-from printhead.coverage import CoverageEngine, DEFAULT_DOSE_HOLD_S    # noqa: E402
+from printhead.coverage import CoverageEngine                          # noqa: E402
 from printhead.geometry import (                                      # noqa: E402
     NOZZLE_BAR_SPAN_MM,
     NOZZLE_PITCH_MM,
@@ -86,7 +86,7 @@ def _identity_calibration():
                            e_row=np.array([0.0, 1.0, 0.0]))
 
 
-def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
+def _controller(ink, drops_per_pixel=2, poll_hz=500.0, timeout_s=2.0,
                 profile=False, profile_csv=None, record=None, progress_json=False,
                 speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S, verbose=False,
                 latency_compensate_s=0.0):
@@ -109,7 +109,7 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
     # shift. See tests/test_page_mapper.py for this pinned in detail.
     return PrintController(render, ble, trk, ink=ink,
                            page_calibration=_identity_calibration(),
-                           dose_hold_s=dose_hold_s, profile=profile,
+                           drops_per_pixel=drops_per_pixel, profile=profile,
                            profile_csv=profile_csv, record=record,
                            progress_json=progress_json,
                            speed_warning_mm_s=speed_warning_mm_s,
@@ -120,7 +120,8 @@ def _controller(ink, dose_hold_s=0.01, poll_hz=500.0, timeout_s=2.0,
 
 def _sweep_positions(n_cols, samples_per_col=12):
     """u_mm = 0, 1, ..., n_cols-1, each held for samples_per_col samples --
-    long enough (at the poll rates used below) to clear a small dose_hold_s."""
+    one full column of travel per step, so every column collects a full
+    dose (mm_per_column is 1.0 in these tests)."""
     positions = []
     for c in range(n_cols):
         positions += [(float(c), 0.0, 0.0)] * samples_per_col
@@ -174,7 +175,7 @@ def test_simple_frame_pass_zeroes_at_the_nozzle_bar_and_prints():
                            smooth_ms=0.0, poll_hz=500.0, timeout_s=5.0)
     ctrl = PrintController(render, BleSettings(), trk, ink=ink,
                            page_calibration=PageCalibration.simple_frame(),
-                           dose_hold_s=0.01)
+                           drops_per_pixel=2)
     # Sweep in tracker x from wherever the cart starts -- the frame is zeroed
     # at the first sample, so absolute placement is irrelevant by design.
     tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
@@ -207,7 +208,7 @@ def test_simple_frame_pass_does_not_mutate_a_shared_frame():
                            smooth_ms=0.0, poll_hz=500.0, timeout_s=5.0)
     cal = PageCalibration.simple_frame()
     ctrl = PrintController(render, BleSettings(), trk, ink=ink,
-                           page_calibration=cal, dose_hold_s=0.01)
+                           page_calibration=cal, drops_per_pixel=2)
 
     covered_counts = []
     for _ in range(2):
@@ -240,7 +241,7 @@ def test_simple_frame_pinned_boresight_is_not_overwritten_at_start():
                            smooth_ms=0.0, poll_hz=500.0, timeout_s=5.0)
     cal = PageCalibration.simple_frame(boresight_quat=q_pinned)
     ctrl = PrintController(render, BleSettings(), trk, ink=ink,
-                           page_calibration=cal, dose_hold_s=0.01)
+                           page_calibration=cal, drops_per_pixel=2)
 
     positions = _sweep_positions(n_cols=5, samples_per_col=12)
     tracker = ScriptedTracker(positions, quats=[q_start] * len(positions))
@@ -296,7 +297,7 @@ def test_simple_frame_pass_records_sensor_and_nozzle_paths_for_record():
             record_path = os.path.join(tmp, "coverage.png")
             ctrl = PrintController(render, BleSettings(), trk, ink=ink,
                                    page_calibration=PageCalibration.simple_frame(),
-                                   dose_hold_s=0.01, record=record_path)
+                                   drops_per_pixel=2, record=record_path)
             tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
             asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
     finally:
@@ -371,7 +372,7 @@ def test_freehand_pass_actually_covers_every_ink_pixel():
     mapper = PageMapper(_identity_calibration(),
                         sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
-    coverage = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
+    coverage = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=2)
 
     t = 0.0
     for c in range(5):
@@ -407,6 +408,86 @@ def test_freehand_pass_requires_a_page_calibration():
     except RuntimeError:
         return
     raise AssertionError("expected RuntimeError without a page calibration")
+
+
+# ============================== drop accounting: what actually goes over BLE
+def _uniform_tracker(n_cols, samples_per_col, park=True):
+    """Even sweep across ``n_cols`` columns (mm_per_column is 1.0 here), then
+    optionally park far off the page so the last column stops collecting."""
+    schritt = 1.0 / samples_per_col
+    positions = [(i * schritt, 0.0, 0.0)
+                 for i in range(int(n_cols / schritt))]
+    if park:
+        positions.append((0.0, 1000.0, 0.0))
+    return ScriptedTracker(positions)
+
+
+def test_a_uniform_region_keeps_sending_instead_of_going_quiet():
+    # THE bug this whole conversion exists to fix. The old firmware held the
+    # last pattern and re-fired it forever, so the client only had to write
+    # when the pattern CHANGED. The firmware now fires each column once and
+    # never repeats, and over a solid block the wanted-nozzle set does not
+    # change from sample to sample -- so "send on change" sends twice for a
+    # whole pass and the block comes out blank while coverage reports 100%.
+    #
+    # A solid 40-column block owes 40 * drops_per_pixel columns of ink; the
+    # pattern changes about twice in it. Requiring far more writes than
+    # changes is what pins the rule.
+    ink = np.ones((30, 40), dtype=bool)
+    ctrl = _controller(ink, drops_per_pixel=3, timeout_s=5.0)
+    null = _NullPrinthead()
+    asyncio.run(ctrl._print_freehand_pass(null, _uniform_tracker(40, 4)))
+
+    assert null.pattern_columns >= 100, (
+        "a solid block sent only "
+        f"{null.pattern_columns} columns -- 'send only when the pattern "
+        "changed' cannot ink a uniform region under a fire-once firmware")
+
+
+def test_columns_sent_track_the_drops_per_pixel_budget():
+    # Ink is a decision made entirely on this side now, so it has to be the
+    # right amount: n_cols * drops_per_pixel, and proportional to the
+    # setting rather than to the sample count.
+    for dose in (1, 3, 6):
+        ink = np.ones((30, 20), dtype=bool)
+        ctrl = _controller(ink, drops_per_pixel=dose, timeout_s=5.0)
+        null = _NullPrinthead()
+        asyncio.run(ctrl._print_freehand_pass(null, _uniform_tracker(20, 5)))
+        soll = 20 * dose
+        assert abs(null.pattern_columns - soll) <= 0.15 * soll, (
+            f"drops_per_pixel={dose}: sent {null.pattern_columns} columns "
+            f"against a budget of {soll}")
+
+
+def test_a_stationary_cart_sends_nothing_after_its_first_column():
+    # Ink follows travel, so a parked cart is owed nothing -- this is what
+    # replaced the old stall-grace anti-blob logic. It must not keep
+    # dribbling columns into a stationary spot.
+    ink = np.ones((30, 20), dtype=bool)
+    ctrl = _controller(ink, drops_per_pixel=3, timeout_s=0.4)
+    null = _NullPrinthead()
+    tracker = ScriptedTracker([(0.0, 0.0, 0.0)])       # never moves
+    asyncio.run(ctrl._print_freehand_pass(null, tracker))
+
+    # Only the first sample's seeded dose (one column's worth), out of the
+    # ~200 samples a 0.4 s pass at 500 Hz takes.
+    assert null.pattern_columns <= 3, (
+        f"a parked cart sent {null.pattern_columns} columns -- travel, not "
+        "time, is supposed to decide ink")
+
+
+def test_fractional_drops_are_accumulated_rather_than_truncated():
+    # At 8 samples per column and drops_per_pixel=3 a sample is worth 0.375
+    # columns. Truncating each sample to an integer would send NOTHING at
+    # all; the accumulator has to carry the remainder across samples.
+    ink = np.ones((30, 10), dtype=bool)
+    ctrl = _controller(ink, drops_per_pixel=3, timeout_s=5.0)
+    null = _NullPrinthead()
+    asyncio.run(ctrl._print_freehand_pass(null, _uniform_tracker(10, 8)))
+
+    assert null.pattern_columns >= 25, (
+        f"sent {null.pattern_columns} columns where 30 were owed -- "
+        "per-sample truncation is dropping the fractional remainder")
 
 
 # ============================================================ --progress-json
@@ -501,7 +582,11 @@ def test_freehand_pass_with_profile_prints_a_page_mode_report():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
     report = out.getvalue()
     assert "page-mode timing profile" in report, report
-    assert "pattern updates sent" in report, report
+    assert "columns queued" in report, report
+    # The profiler must be told how many columns each send carried, or the
+    # reported rate is a send rate wearing a column label.
+    m = re.search(r"columns queued\s*:\s*(\d+)", report)
+    assert m and int(m.group(1)) == 5 * 2, report   # 5 columns x 2 drops
 
 
 def test_freehand_pass_with_profile_csv_writes_the_page_schema():
@@ -513,7 +598,7 @@ def test_freehand_pass_with_profile_csv_writes_the_page_schema():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
 
 
 def test_freehand_pass_with_profile_csv_logs_orientation_when_the_tracker_has_it():
@@ -537,7 +622,7 @@ def test_freehand_pass_with_profile_csv_logs_orientation_when_the_tracker_has_it
 
         with open(csv_path) as fh:
             lines = fh.read().strip().splitlines()
-        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
         data_rows = lines[1:]
         assert data_rows, "expected at least one profiled sample"
         quat_rows = [row.split(",")[-4:] for row in data_rows]
@@ -614,7 +699,7 @@ def test_freehand_pass_out_of_page_reports_zero_coverage_and_diagnosis():
     mapper = PageMapper(_identity_calibration(),
                         sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                         sensor_offset_col_mm=0.0)
-    coverage = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
+    coverage = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=2)
     u, v, _z = mapper.project(np.array([2.0, 500.0, 0.0]))
     coverage.step(u, v, 0.0)
     assert coverage.last_in_bounds is False
@@ -656,17 +741,18 @@ def test_progress_json_out_of_page_carries_bounds_fields():
     assert done["v_min"] == done["v_max"] == 500.0
 
 
-# =========================================== dose-hold / poll-interval guard
-def test_freehand_pass_warns_when_dose_hold_exceeds_poll_interval():
-    # The exact quantization-cliff shape from the dose-hold correction: a
-    # dose_hold_s (5.4 ms) that sits AT/ABOVE the poll interval (5.0 ms at
-    # poll_hz=200) means two consecutive samples can never complete a dose
-    # -- a third (or later) sample is required, and measured coverage
-    # collapsed from 100% to 31% at exactly this ratio. The guard must warn
-    # at pass start rather than let this surface as silent near-zero
-    # coverage with no obvious cause.
+# ====================================== poll-rate / speed-warning guard
+def test_freehand_pass_warns_when_the_poll_rate_cannot_reach_the_speed_warning():
+    # The drop-count model's replacement for the old dose-hold cliff. Ink no
+    # longer depends on dwell, so a slow poll rate cannot thin a print -- but
+    # a column the tracker never samples is never fired, so past
+    # mm_per_column * poll_hz whole columns drop out. If that edge sits at or
+    # below the configured speed warning, the warning can never arrive before
+    # the damage does, and the operator gets silent gaps with no cause.
+    #
+    # Here: 1.0 mm/column at 20 Hz = 20 mm/s, under the 25 mm/s default.
     ink = np.zeros((5, 5), dtype=bool)   # nothing to cover -- pass ends immediately
-    ctrl = _controller(ink, dose_hold_s=0.0054, poll_hz=200.0, timeout_s=1.0)
+    ctrl = _controller(ink, poll_hz=20.0, timeout_s=1.0)
     tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
 
     out = io.StringIO()
@@ -675,25 +761,22 @@ def test_freehand_pass_warns_when_dose_hold_exceeds_poll_interval():
     text = out.getvalue()
 
     assert "[warn]" in text, text
-    assert "dose_hold_s" in text and "poll interval" in text, text
-    assert "three or more samples" in text, text
+    assert "--poll-hz" in text and "speed warning" in text, text
+    assert "20.0 mm/s" in text, text
 
 
-def test_freehand_pass_does_not_warn_with_a_normally_configured_dose_hold():
-    # Guard against a false positive: the corrected production default
-    # (coverage.DEFAULT_DOSE_HOLD_S = 4.05 ms, 19% below the 5.0 ms poll
-    # interval at poll_hz=200) must never trigger the quantization-cliff
-    # warning -- this is the "normally configured" case the guard must stay
-    # out of the way of.
+def test_freehand_pass_does_not_warn_at_a_normal_poll_rate():
+    # Guard against a false positive: at the production settings the edge is
+    # far above the warning (0.087 mm/column * 500 Hz = 43.5 mm/s against
+    # 25 mm/s), and this test's 1.0 mm/column * 500 Hz is further still.
     #
     # NOTE: _controller() -> _identity_calibration() has no boresight_quat,
     # so the SEPARATE "no rotation correction" warning (see
     # test_freehand_pass_warns_about_a_missing_boresight below) is still
     # expected in this output -- this test only pins the absence of the
-    # dose-hold/poll-interval warning specifically, not "[warn]" in general.
+    # poll-rate warning specifically, not "[warn]" in general.
     ink = np.zeros((5, 5), dtype=bool)
-    ctrl = _controller(ink, dose_hold_s=DEFAULT_DOSE_HOLD_S, poll_hz=200.0,
-                       timeout_s=1.0)
+    ctrl = _controller(ink, poll_hz=500.0, timeout_s=1.0)
     tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
 
     out = io.StringIO()
@@ -701,7 +784,7 @@ def test_freehand_pass_does_not_warn_with_a_normally_configured_dose_hold():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
     text = out.getvalue()
 
-    assert "dose_hold_s" not in text and "poll interval" not in text, text
+    assert "--poll-hz" not in text and "speed warning" not in text, text
 
 
 # ==================================================== boresight-missing warning
@@ -738,7 +821,7 @@ def test_freehand_pass_does_not_warn_about_boresight_when_one_is_captured():
 
 
 def test_progress_json_suppresses_the_boresight_warning_too():
-    # --progress-json must stay pure NDJSON (mirrors how the dose-hold and
+    # --progress-json must stay pure NDJSON (mirrors how the poll-rate and
     # out-of-page warnings are suppressed in that mode) even when the
     # calibration has no boresight.
     ink = np.zeros((5, 5), dtype=bool)
@@ -753,12 +836,12 @@ def test_progress_json_suppresses_the_boresight_warning_too():
             json.loads(line)          # every non-blank line must be valid JSON
 
 
-def test_progress_json_suppresses_the_dose_hold_warning_too():
+def test_progress_json_suppresses_the_poll_rate_warning_too():
     # --progress-json must stay pure NDJSON (mirrors how the out-of-page
-    # warning is suppressed in that mode) even when the quantization-cliff
-    # condition holds.
+    # warning is suppressed in that mode) even when the poll-rate condition
+    # holds.
     ink = np.zeros((5, 5), dtype=bool)
-    ctrl = _controller(ink, dose_hold_s=0.0054, poll_hz=200.0, timeout_s=1.0,
+    ctrl = _controller(ink, poll_hz=20.0, timeout_s=1.0,
                        progress_json=True)
     tracker = ScriptedTracker([(0.0, 0.0, 0.0)])
 
@@ -790,7 +873,7 @@ def _run_freehand_pass_collect_covered_cells(quats):
                            poll_hz=500.0, timeout_s=5.0)
     ctrl = PrintController(render, ble, trk, ink=ink,
                            page_calibration=_identity_calibration_with_boresight(),
-                           dose_hold_s=0.01, progress_json=True,
+                           drops_per_pixel=2, progress_json=True,
                            sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                            sensor_offset_col_mm=0.0)
     positions = _sweep_positions(n_cols=5, samples_per_col=12)
@@ -809,7 +892,7 @@ def _run_freehand_pass_collect_covered_cells(quats):
 
 
 def test_freehand_pass_rotation_correction_changes_the_printed_mask():
-    # Same path, same target image, same dose-hold -- the ONLY difference is
+    # Same path, same target image, same dose -- the ONLY difference is
     # the orientation quaternion the tracker reports each sample: identical
     # to the boresight pose (no yaw) vs. rotated 20 degrees the whole pass.
     # If the correction genuinely reaches CoverageEngine (not just PageMapper
@@ -871,11 +954,11 @@ def test_freehand_pass_interrupted_still_closes_profiler_csv_and_attempts_record
     with tempfile.TemporaryDirectory() as tmp:
         csv_path = os.path.join(tmp, "profile.csv")
         png_path = os.path.join(tmp, "coverage.png")
-        # dose_hold_s=0.0 -> the very first in-bounds sample already dozes
+        # drops_per_pixel=1 -> the very first in-bounds sample already doses
         # its pixels, so coverage.printed is non-empty even though only a
         # few samples run before the simulated interruption -- keeps the
         # "record was attempted and had something to draw" check deterministic.
-        ctrl = _controller(ink, timeout_s=5.0, dose_hold_s=0.0,
+        ctrl = _controller(ink, timeout_s=5.0, drops_per_pixel=1,
                            profile=True, profile_csv=csv_path, record=png_path)
         tracker = _RaisingTracker(_sweep_positions(n_cols=5, samples_per_col=12),
                                   fail_after=3)
@@ -890,7 +973,7 @@ def test_freehand_pass_interrupted_still_closes_profiler_csv_and_attempts_record
         assert os.path.exists(csv_path), "profiler CSV must still be closed/flushed"
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
 
         assert os.path.exists(png_path), "coverage PNG must still be attempted"
 
@@ -939,7 +1022,7 @@ def test_cli_ble_write_ceiling_defaults_to_none_and_parses():
 
 def test_cli_sensor_offset_flags_default_to_none_and_parse():
     # Same "default None -> controller falls back to the geometry constant"
-    # pattern as --dose-hold-s / --ble-write-ceiling above.
+    # pattern as --drops-per-pixel / --ble-write-ceiling above.
     args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.sensor_offset_row_mm is None
     assert args.sensor_offset_col_mm is None
@@ -1512,7 +1595,7 @@ def test_simple_frame_placed_origin_is_not_rezeroed_at_start():
                            smooth_ms=0.0, poll_hz=500.0, timeout_s=1.0)
     cal = PageCalibration.simple_frame()
     ctrl = PrintController(render, BleSettings(), trk, ink=ink,
-                           page_calibration=cal, dose_hold_s=0.01)
+                           page_calibration=cal, drops_per_pixel=2)
 
     with redirect_stdout(io.StringIO()):
         asyncio.run(ctrl._set_page_origin(ScriptedTracker([(5.0, 6.0, 0.0)])))
@@ -1536,7 +1619,7 @@ def test_simple_frame_without_a_placed_origin_still_zeroes_at_start():
                            smooth_ms=0.0, poll_hz=500.0, timeout_s=1.0)
     cal = PageCalibration.simple_frame()
     ctrl = PrintController(render, BleSettings(), trk, ink=ink,
-                           page_calibration=cal, dose_hold_s=0.01)
+                           page_calibration=cal, drops_per_pixel=2)
 
     out = io.StringIO()
     with redirect_stdout(out):
@@ -1568,56 +1651,80 @@ def test_verbose_status_line_does_not_garble_the_final_message():
 
 
 # ============================ pass reporting counts physical ink, not dose
-# A pass where the dose completes NOWHERE: one sample per column (so dwell
-# never accumulates) and, once the sweep ends, the cart parks far off the
-# page rather than sitting on the last column -- without that park the final
-# column would keep collecting samples and complete after all, which is
-# exactly what made an earlier version of these tests pass even with the
-# fix reverted.
-_FAST_PASS = dict(dose_hold_s=0.05, poll_hz=500.0, timeout_s=1.0)
+# A pass whose LAST column ends up inked but under-dosed. Under the
+# drop-count model that is the only way a swept column comes out thin: ink is
+# derived from travel, so a crossing the cart actually completes always
+# delivers the full dose, at any speed. To produce one deliberately, the cart
+# crosses columns 0..38 cleanly at 4 samples per column, takes a SINGLE
+# sample into column 39, and then parks far off the page -- without that park
+# the last column would keep collecting samples and complete after all.
+#
+# 4 samples per column at drops_per_pixel=4 means one drop per sample, so the
+# single sample leaves column 39 on 1 of 4 -- clear of the one-sample report
+# slack in CoverageEngine.step()'s Step 5, which would otherwise (correctly)
+# call a column one drop short finished.
+_PARTIAL_PASS = dict(drops_per_pixel=4, poll_hz=500.0, timeout_s=1.0)
+_PARTIAL_COLS = 40
 
 
-def _fast_tracker():
-    return ScriptedTracker([(float(c), 0.0, 0.0) for c in range(40)]
-                           + [(0.0, 1000.0, 0.0)])
+def _partial_tracker(n_cols=_PARTIAL_COLS, per_col=4):
+    # mm_per_column is 1.0 in these tests, so one column == 1.0 mm and
+    # column k owns u in [k-0.5, k+0.5). Sweep in even steps and cut the
+    # moment the FIRST sample lands in the last column, so that column is
+    # left holding exactly one step's worth of dose.
+    schritt = 1.0 / per_col
+    letzte = n_cols - 1
+    positions = []
+    i = 0
+    while True:
+        u = i * schritt
+        positions.append((u, 0.0, 0.0))
+        if round(u) >= letzte:
+            break
+        i += 1
+    positions.append((0.0, 1000.0, 0.0))          # park far off the page
+    return ScriptedTracker(positions)
+
 
 def test_pass_end_covered_count_reports_physical_ink_not_dose_completion():
     # Reported from hardware: the real print's fill was perfect while
-    # coverage.png (and the count beside it) showed heavy gaps. The cause is
-    # that `printed` only marks a pixel once its dose completed, which needs
-    # ~2 samples on the same column -- a fast pass inks everything but
-    # completes almost nothing. The pass-end count must describe the paper.
-    ink = np.ones((30, 40), dtype=bool)
-    ctrl = _controller(ink, **_FAST_PASS)
+    # coverage.png (and the count beside it) showed heavy gaps, because
+    # `printed` only marks a pixel once its dose completes. The pass-end
+    # count must describe the paper -- every column the cart swept received
+    # ink, including the one it only half crossed.
+    ink = np.ones((30, _PARTIAL_COLS), dtype=bool)
+    ctrl = _controller(ink, **_PARTIAL_PASS)
     out = io.StringIO()
     with redirect_stdout(out):
-        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _partial_tracker()))
     text = out.getvalue()
 
     m = re.search(r"Covered (\d+)/(\d+) ink pixels", text)
     assert m, text
-    # Decisive: on this pass the dose completes NOWHERE, so a count taken
-    # from `printed` reads exactly 0 while the paper is fully inked.
-    assert int(m.group(1)) == int(m.group(2)), \
-        ("every swept pixel received ink, so the count must be complete "
-         "-- reading 0 here means the count came from the dose mask:\n" + text)
+    assert int(m.group(1)) == int(m.group(2)), (
+        "every swept pixel received ink, so the count must be complete -- "
+        "coming up short here means the count came from the dose mask:\n"
+        + text)
 
 
 def test_pass_end_flags_inked_but_underdosed_pixels_separately():
     # "inked but light" and "missed entirely" need different corrections, so
     # the summary says which one happened rather than folding them together.
-    ink = np.ones((30, 40), dtype=bool)
-    ctrl = _controller(ink, **_FAST_PASS)
+    ink = np.ones((30, _PARTIAL_COLS), dtype=bool)
+    ctrl = _controller(ink, **_PARTIAL_PASS)
     out = io.StringIO()
     with redirect_stdout(out):
-        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _partial_tracker()))
     text = out.getvalue()
-    assert "never completed --dose-hold-s" in text, text
+    assert "fewer than --drops-per-pixel drops" in text, text
+    # Exactly the one half-crossed column, not a speed-dependent smear.
+    m = re.search(r"of those, (\d+) got fewer", text)
+    assert m and int(m.group(1)) == 30, text
 
 
 def test_pass_end_omits_the_underdose_note_when_every_dose_completed():
-    # On a normally-paced pass the two counts agree and the extra line would
-    # be pure noise.
+    # On a pass that crosses every column cleanly the two counts agree and
+    # the extra line would be pure noise.
     ink = np.ones((30, 5), dtype=bool)
     ctrl = _controller(ink, timeout_s=5.0)
     tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
@@ -1627,34 +1734,35 @@ def test_pass_end_omits_the_underdose_note_when_every_dose_completed():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
     text = out.getvalue()
     assert "Page fully covered." in text, text
-    assert "never completed --dose-hold-s" not in text, text
+    assert "fewer than --drops-per-pixel drops" not in text, text
 
 
 def test_progress_json_carries_both_the_inked_and_full_dose_counts():
-    ink = np.ones((30, 40), dtype=bool)
-    ctrl = _controller(ink, progress_json=True, **_FAST_PASS)
+    ink = np.ones((30, _PARTIAL_COLS), dtype=bool)
+    ctrl = _controller(ink, progress_json=True, **_PARTIAL_PASS)
     out = io.StringIO()
     with redirect_stdout(out):
-        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _partial_tracker()))
     events = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
     done = [e for e in events if e["event"] == "coverage_done"][-1]
     # Decisive: the two must be REPORTED SEPARATELY and actually differ here
-    # -- a `covered` taken from the dose mask would equal full_dose (both 0).
-    assert done["full_dose"] == 0, done
+    # -- a `covered` taken from the dose mask would equal full_dose.
     assert done["covered"] > done["full_dose"], done
+    assert done["covered"] - done["full_dose"] == 30, done   # one thin column
 
 
-def test_verbose_live_count_agrees_with_the_pass_end_count_on_a_fast_pass():
+def test_verbose_live_count_agrees_with_the_pass_end_count():
     # The live --verbose count and the pass-end summary must describe the
-    # SAME quantity. On a slow pass they agree trivially (dose completes
-    # everywhere), so this pins the fast case, where a live count read from
-    # the dose mask would show 0 while the summary reports full coverage --
-    # exactly the contradiction that made the coverage report untrustworthy.
-    ink = np.ones((30, 40), dtype=bool)
-    ctrl = _controller(ink, verbose=True, **_FAST_PASS)
+    # SAME quantity. On a pass where every dose completes they agree
+    # trivially, so this pins the case where they could diverge: a live count
+    # read from the dose mask would leave out the half-crossed column the
+    # summary includes -- exactly the contradiction that made the coverage
+    # report untrustworthy.
+    ink = np.ones((30, _PARTIAL_COLS), dtype=bool)
+    ctrl = _controller(ink, verbose=True, **_PARTIAL_PASS)
     out = io.StringIO()
     with redirect_stdout(out):
-        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _fast_tracker()))
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), _partial_tracker()))
     text = out.getvalue()
 
     final = re.search(r"Covered (\d+)/(\d+) ink pixels", text)

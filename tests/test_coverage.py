@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from printhead.calibration import PageCalibration                      # noqa: E402
 from printhead.coverage import (                                       # noqa: E402
-    CoverageEngine, DEFAULT_DOSE_HOLD_S, bar_offset_uv,
+    CoverageEngine, DEFAULT_DROPS_PER_PIXEL, bar_offset_uv,
 )
 from printhead.geometry import (                                       # noqa: E402
     NOZZLE_BAR_SPAN_MM, NOZZLE_PITCH_MM, NUM_NOZZLES, ROW_BYTES,
@@ -24,86 +24,118 @@ from printhead.geometry import (                                       # noqa: E
 from printhead.rendering import pack_nozzle_bits                       # noqa: E402
 from printhead.tracking import PageMapper                              # noqa: E402
 
-DOSE_HOLD_S = 0.1
+# Dose used by the tests that do not care about the exact number. With the
+# default drops=1.0 per step() call, a pixel is REPORTED printed after
+# DROPS-1 samples and the nozzle is RELEASED after DROPS -- see step()'s
+# Step 5 for why those are one sample apart.
+DROPS = 3
 
 
 def _unpack(pattern: bytes) -> np.ndarray:
     return np.unpackbits(np.frombuffer(pattern, dtype=np.uint8), bitorder="little")
 
 
-# ================================================== measured dose-hold tuning
-def test_default_dose_hold_tracks_the_firmware_pattern_stride():
-    # DEFAULT_DOSE_HOLD_S is derived from -- and MUST stay in sync with --
-    # the firmware's PATTERN_STRIDE (src/ble_dose.h in the firmware repo):
-    # DOSE_HOLD_S ~= 3 * PATTERN_STRIDE * 450e-6 (3 = BLE_DROPS_PER_COLUMN,
-    # 450us = the firmware print loop tick, PATTERN_STRIDE = 3). If someone
-    # changes DEFAULT_DOSE_HOLD_S here without changing PATTERN_STRIDE (and
-    # re-flashing) to match, or vice versa, the ~3-drop-per-pixel target this
-    # pair was tuned to breaks silently on hardware -- this test is the loud
-    # failure meant to catch that on the client side.
+# ============================================== measured drop-count tuning
+def _sweep(eng, speed_mm_s, mm_per_column, poll_hz=500.0, columns=None,
+           drops_per_pixel=None, v_mm=0.0):
+    """
+    Drive a straight constant-speed sweep across ``columns`` columns, deriving
+    ``drops`` from travel exactly the way
+    ``controller._print_freehand_pass`` does (fractional share to the engine,
+    whole columns to the link). Returns ``(delivered_columns, samples)``.
+    """
+    dpp = eng.drops_per_pixel if drops_per_pixel is None else drops_per_pixel
+    columns = eng.width if columns is None else columns
+    dt = 1.0 / poll_hz
+    n = int(columns * mm_per_column / (speed_mm_s * dt)) + 1
+    schuld = 0.0
+    vorher = None
+    geliefert = 0
+    for i in range(n):
+        u = i * speed_mm_s * dt
+        anteil = float(dpp) if vorher is None else dpp * (u - vorher) / mm_per_column
+        vorher = u
+        schuld += anteil
+        kopien = int(schuld)
+        schuld -= kopien
+        pattern, _ = eng.step(u_mm=u, v_mm=v_mm, t=i * dt, drops=anteil)
+        if kopien and any(pattern):
+            geliefert += kopien
+    return geliefert, n
+
+
+def test_default_drops_per_pixel_matches_line_modes_validated_dose():
+    # The page-mode dose is inherited from line mode's BLE_DROPS_PER_COLUMN,
+    # the one drop count on this rig that has been through real prints. It is
+    # no longer paired with any firmware constant -- the firmware fires each
+    # column it receives exactly once, so the whole dose decision lives on
+    # this side -- but it must not drift away from that starting point
+    # silently either.
+    ble_drops_per_column = 3       # line mode's dose target
+    assert DEFAULT_DROPS_PER_PIXEL == ble_drops_per_column, (
+        f"DEFAULT_DROPS_PER_PIXEL={DEFAULT_DROPS_PER_PIXEL} no longer matches "
+        f"line mode's BLE_DROPS_PER_COLUMN={ble_drops_per_column} -- if that "
+        "is deliberate, say so here with the print it was measured from")
+
+
+def test_coverage_is_speed_independent_up_to_the_poll_rate_limit():
+    # The headline property of the drop-count model, and the reason it
+    # replaced the time-based hold: ink follows travel, so hand speed cannot
+    # thin a print. Under the old model the same sweep fell to 60% coverage
+    # by 25 mm/s and 14% by 35.
     #
-    # CORRECTION: an earlier pick (PATTERN_STRIDE=4, DOSE_HOLD_S=0.0054 s)
-    # also hit this ~3-drop target but landed just ABOVE the 5.00 ms poll
-    # interval of the default --poll-hz 200, which requires a third sample
-    # to land on the same column to complete a dose -- measured coverage
-    # collapsed from 100% (at 4.90 ms) to 31% (at 5.40 ms). The additional
-    # constraint that adds, on top of the 3-drop target: DOSE_HOLD_S must
-    # stay below 1/poll_hz (the poll interval), or two consecutive samples
-    # are not enough to complete a dose. 0.00405 s is 19% below the 5.00 ms
-    # default poll interval.
-    firmware_pattern_stride = 3
-    drops_per_column = 3          # BLE_DROPS_PER_COLUMN, line mode's dose target
-    tick_s = 450e-6                # firmware print loop tick
-    expected = drops_per_column * firmware_pattern_stride * tick_s
-    assert abs(DEFAULT_DOSE_HOLD_S - expected) < 1e-6, (
-        f"DEFAULT_DOSE_HOLD_S={DEFAULT_DOSE_HOLD_S} no longer matches "
-        f"3 * PATTERN_STRIDE({firmware_pattern_stride}) * 450us = {expected} "
-        "-- update the firmware's PATTERN_STRIDE (src/ble_dose.h) to match, "
-        "or this comment/test, and re-flash the firmware")
-
-    # The additional poll-interval constraint above, pinned directly: with
-    # the default poll_hz=200 (5.00 ms interval), the hold must stay below
-    # it or coverage collapses (see coverage.py's DEFAULT_DOSE_HOLD_S
-    # comment for the measured cliff).
-    default_poll_hz = 200.0
-    assert DEFAULT_DOSE_HOLD_S < 1.0 / default_poll_hz, (
-        f"DEFAULT_DOSE_HOLD_S={DEFAULT_DOSE_HOLD_S} is not below the "
-        f"{1.0 / default_poll_hz}s poll interval at poll_hz={default_poll_hz} "
-        "-- this is the quantization cliff that made the previous 0.0054s "
-        "value collapse coverage to ~31%")
+    # The limit that IS left is the poll rate: a column the tracker never
+    # sampled never fires. That edge sits at mm_per_column * poll_hz.
+    mm_per_column, poll_hz = 0.087, 500.0
+    grenze = mm_per_column * poll_hz                      # 43.5 mm/s
+    for speed in (5.0, 17.3, 25.0, 30.0, 40.0, grenze):
+        eng = CoverageEngine(np.ones((40, 120), dtype=bool),
+                             mm_per_column=mm_per_column)
+        _sweep(eng, speed, mm_per_column, poll_hz)
+        assert eng.printed.all(), (
+            f"{speed} mm/s left {int((~eng.printed).sum())} of "
+            f"{eng.printed.size} pixels unprinted -- coverage must not "
+            f"depend on speed below the {grenze:.1f} mm/s poll-rate limit")
 
 
-def test_realistic_median_dwell_completes_with_the_new_default():
-    # 0.2 mm column at the measured median hand speed (17.3 mm/s) dwells for
-    # about 11.6 ms -- comfortably above the new 4.05 ms default, so the
-    # pixel must be marked printed.
-    ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DEFAULT_DOSE_HOLD_S)
-    median_dwell_s = 0.2 / 17.3
+def test_past_the_poll_rate_limit_whole_columns_are_skipped_not_thinned():
+    # Above the limit the failure mode changes character, and the two masks
+    # say so: `fired` falls with `printed` rather than staying at 100%,
+    # because the columns are not under-dosed, they are never visited.
+    mm_per_column, poll_hz = 0.087, 500.0
+    eng = CoverageEngine(np.ones((40, 120), dtype=bool),
+                         mm_per_column=mm_per_column)
+    _sweep(eng, 60.0, mm_per_column, poll_hz)
+    anteil = eng.printed.sum() / eng.printed.size
+    assert 0.6 < anteil < 0.85, (
+        f"expected roughly 0.087*500/60 = 72% of columns to be sampled at "
+        f"60 mm/s, got {anteil:.1%}")
+    assert (eng.fired == eng.printed).all(), (
+        "past the poll-rate limit the loss is unfired columns, not partial "
+        "doses -- fired and printed must agree")
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=median_dwell_s)
-    assert eng.printed[0, 0]
 
-
-def test_short_dwell_above_49mms_stays_unprinted_with_the_new_default():
-    # A 3 ms dwell corresponds to roughly 0.2/0.003 ~= 67 mm/s, well above
-    # the ~49 mm/s point (0.2 / 0.00405) where the new default hold no
-    # longer fits inside one column's crossing time -- the pixel must stay
-    # open for a later pass rather than being marked printed early.
-    ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DEFAULT_DOSE_HOLD_S)
-    short_dwell_s = 0.003
-
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=short_dwell_s)
-    assert not eng.printed[0, 0]
+def test_the_delivered_column_count_matches_the_drops_per_pixel_budget():
+    # What actually reaches the paper, not just what the masks claim: a
+    # 120-column sweep owes 120 * drops_per_pixel columns of ink. Pinned
+    # because reporting a pixel printed one sample before its dose is
+    # complete (step()'s Step 5) is only safe as long as it does not also
+    # release the nozzle -- if it did, this count would drop by up to 40%.
+    mm_per_column = 0.087
+    for speed in (17.3, 25.0, 35.0):
+        eng = CoverageEngine(np.ones((40, 120), dtype=bool),
+                             mm_per_column=mm_per_column)
+        geliefert, _ = _sweep(eng, speed, mm_per_column)
+        soll = 120 * DEFAULT_DROPS_PER_PIXEL
+        assert abs(geliefert - soll) <= 0.03 * soll, (
+            f"{speed} mm/s delivered {geliefert} columns against a budget of "
+            f"{soll} -- the pass is under- or over-inking")
 
 
 # ======================================================= ink spread ("spray")
 def _spray_engine(radius_mm, strength, mm_per_column=0.2, size=(41, 41)):
     return CoverageEngine(np.ones(size, dtype=bool), mm_per_column=mm_per_column,
-                          dose_hold_s=DOSE_HOLD_S, spray_radius_mm=radius_mm,
+                          drops_per_pixel=DROPS, spray_radius_mm=radius_mm,
                           spray_strength=strength)
 
 
@@ -112,7 +144,7 @@ def test_spray_is_off_by_default():
     # empty and a deposit touches exactly one pixel, i.e. bit-identical to the
     # pre-spray engine.
     eng = CoverageEngine(np.ones((21, 21), dtype=bool), mm_per_column=0.2,
-                         dose_hold_s=DOSE_HOLD_S)
+                         drops_per_pixel=DROPS)
     assert eng._spray_kernel == []
     eng._deposit(10, 10)
     assert eng.printed[10, 10]
@@ -221,7 +253,7 @@ def test_spray_can_only_ever_add_coverage_never_remove_it():
                for i, u in enumerate(np.linspace(0.0, 6.0, 400))]
 
     def run(radius, strength):
-        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018,
+        eng = CoverageEngine(ink, mm_per_column=0.2, drops_per_pixel=2,
                              spray_radius_mm=radius, spray_strength=strength)
         for u, v, t in samples:
             eng.step(u_mm=u, v_mm=v, t=t)
@@ -239,8 +271,7 @@ def test_spray_never_marks_a_pixel_that_was_never_wanted():
     # (pass_spray.csv, --dose-hold-s 0.001 --spray-radius-mm 0.3
     # --spray-strength 0.8): the physical print lost the checkerboard's
     # black/white alternation and came out as one solid inked blob. The
-    # dominant cause turned out to be BLE write backlog (dose_hold_s far too
-    # short -- see the module's own dose_hold_s guidance), NOT this bug --
+    # dominant cause turned out to be BLE write backlog, NOT this bug --
     # 0.3mm cannot bridge a 10mm checkerboard square either way -- but while
     # ruling spray out, _deposit's spray loop turned out to mark a
     # neighbour `printed` on accumulated dose alone, with no check of
@@ -256,7 +287,7 @@ def test_spray_never_marks_a_pixel_that_was_never_wanted():
     ink = np.zeros((41, 41), dtype=bool)
     ink[20, 20] = True                       # the only wanted pixel
     # ink[21, 20] stays False -- one row over, inside the spray radius below.
-    eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.001,
+    eng = CoverageEngine(ink, mm_per_column=0.2, drops_per_pixel=1,
                          spray_radius_mm=0.25, spray_strength=1.0)
     eng._deposit(20, 20)
     assert eng.printed[20, 20], "the actually-wanted centre must still print"
@@ -268,143 +299,165 @@ def test_spray_never_marks_a_pixel_that_was_never_wanted():
 
 
 # ============================================================== basic dosing
-def test_single_pass_completes_after_dose_hold_elapses():
+def test_single_pass_completes_once_the_drops_have_gone_out():
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)               # first touch
-    assert not eng.printed[0, 0]                       # not yet dosed
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)  # dwelled long enough
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)                # 1 of 3 drops
+    assert not eng.printed[0, 0]                        # not yet dosed
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.1)                # 2 of 3, within one of full
     assert eng.printed[0, 0]
 
 
-def test_nozzle_stops_firing_once_its_pixel_is_printed():
+def test_nozzle_keeps_firing_through_the_last_drop_after_being_reported():
+    # `printed` is set one sample before the dose is complete; the nozzle
+    # must NOT be released with the last drop still owed, or the report is
+    # paid for in real ink (see step()'s Step 5).
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)
-    assert _unpack(pattern)[0] == 1          # fires through the completing sample
-    pattern, changed = eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.1)
-    assert _unpack(pattern)[0] == 0          # then stops
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)                        # drop 1
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.1)           # drop 2, reported
+    assert eng.printed[0, 0]
+    assert _unpack(pattern)[0] == 1
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.2)           # drop 3, the last
+    assert _unpack(pattern)[0] == 1, "released before its final drop went out"
+    pattern, changed = eng.step(u_mm=0.0, v_mm=0.0, t=0.3)
+    assert _unpack(pattern)[0] == 0                             # then stops
     assert changed
 
 
-def test_revisit_does_not_refire_an_already_printed_pixel():
+def test_a_stationary_cart_owes_no_drops_and_never_completes():
+    # The anti-blob property, and the sharpest break from the dwell model:
+    # a parked cart used to complete a pixel purely by sitting there. Ink now
+    # follows travel, so `drops=0` samples pile up forever with no effect --
+    # no matter how much wall-clock time passes.
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)   # (0,0) printed
+    for i in range(500):
+        eng.step(u_mm=0.0, v_mm=0.0, t=i * 0.1, drops=0.0)      # 50 s parked
+    assert not eng.printed[0, 0]
+    assert not eng.fired[0, 0], "a sample owing no drops must not ink either"
+
+    eng.step(u_mm=0.0, v_mm=0.0, t=50.0, drops=float(DROPS))
+    assert eng.printed[0, 0]
+
+
+def test_revisit_does_not_refire_a_fully_dosed_pixel():
+    ink = np.ones((10, 5), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
+
+    for i in range(DROPS):
+        eng.step(u_mm=0.0, v_mm=0.0, t=0.1 * i)          # full dose to (0,0)
     assert eng.printed[0, 0]
 
     eng.step(u_mm=3.0, v_mm=0.0, t=0.5)                  # move away
-    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.5 + DOSE_HOLD_S + 0.5)  # revisit, dwell plenty
+    pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.6)     # revisit
     assert _unpack(pattern)[0] == 0                      # never refires
     assert eng.printed[0, 0]                             # stays printed
 
 
-def test_loop_with_a_longer_second_pass_achieves_coverage():
-    # First pass is too fast (dwell < threshold) -> not printed. A slower
-    # "loop back" pass completes it. Models "keep going in circles until it
-    # takes" rather than a single continuous dwell.
+def test_loop_with_a_second_pass_finishes_a_partially_dosed_pixel():
+    # First pass leaves the pixel short of a dose -> not printed. A "loop
+    # back" pass finishes it. Models "keep going in circles until it takes"
+    # rather than one continuous crossing.
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=6)
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S * 0.5)     # left too early
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)                   # 1 of 6, left early
     assert not eng.printed[0, 0]
 
     eng.step(u_mm=3.0, v_mm=0.0, t=1.0)                   # loop away
-    eng.step(u_mm=0.0, v_mm=0.0, t=2.0)                   # loop back
-    eng.step(u_mm=0.0, v_mm=0.0, t=2.0 + DOSE_HOLD_S + 0.05)  # this time it dwells
+    for i in range(4):                                    # 2..5 of 6 on return
+        eng.step(u_mm=0.0, v_mm=0.0, t=2.0 + 0.1 * i)
     assert eng.printed[0, 0]
 
 
-def test_completion_depends_on_wall_clock_dwell_not_sample_count():
-    # Many samples packed into a tiny time window must not fool the engine
-    # into completing the dose early -- only elapsed time matters.
+def test_completion_depends_on_drops_delivered_not_on_elapsed_time():
+    # The inverse of the rule this engine used to follow. Fifty samples each
+    # carrying a tenth of a drop are five drops short of the dose however
+    # much or little time they span; a single sample carrying the whole dose
+    # completes it instantly.
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
     for i in range(50):
-        eng.step(u_mm=0.0, v_mm=0.0, t=0.001 * i)          # 50 samples, 49ms span
+        eng.step(u_mm=0.0, v_mm=0.0, t=1000.0 * i, drops=0.01)   # 13+ hours
     assert not eng.printed[0, 0]
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.2)       # real dwell time passes
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0, drops=float(DROPS))      # no time at all
     assert eng.printed[0, 0]
 
 
 def test_dose_does_not_accumulate_across_different_pixels():
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)                      # pixel (0,0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S * 0.5)         # 50% dwelled
-    eng.step(u_mm=1.0, v_mm=0.0, t=DOSE_HOLD_S * 0.5)         # pixel (0,1)
-    eng.step(u_mm=1.0, v_mm=0.0, t=DOSE_HOLD_S * 1.0)         # 50% dwelled
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0, drops=1.0)           # pixel (0,0), 1 of 3
+    eng.step(u_mm=1.0, v_mm=0.0, t=0.1, drops=1.0)           # pixel (0,1), 1 of 3
 
     assert not eng.printed[0, 0]
     assert not eng.printed[0, 1]
 
 
-def test_arriving_at_a_pixel_credits_no_dwell_so_ink_volume_is_preserved():
-    # REGRESSION: the per-pixel dwell fix first credited a whole poll
-    # interval to a pixel's very FIRST sample (`.get(pixel, 0.0) + dt`).
-    # That completed every pixel one sample EARLIER than the original
-    # engine, so nozzles stopped firing sooner and the rig laid down far
-    # less ink for the same recorded coverage -- measured on a realistic
-    # moving pass: 1503 -> 904 fire events at dose_hold_s=0.001 (-40%),
-    # 5099 -> 2404 at the 0.00405 default (-53%), with the recorded
-    # `printed` count unchanged (~750 either way). Reported from hardware
-    # as "coverage.png looks fuller than the real print" / "only half of it
-    # printed". The dose_hold_s <-> firmware PATTERN_STRIDE pairing (~3
-    # drops per pixel) is calibrated against the original timing, so
-    # completing earlier de-calibrates the actual drop count.
-    #
-    # Pinned as the timing rule it comes from: a nozzle parked on one pixel
-    # must fire for ceil(dose_hold_s / dt) + 1 samples -- arrival sample
-    # (0 dwell) plus one sample per dt until dwell reaches dose_hold_s.
-    poll_hz = 500
-    dt = 1.0 / poll_hz
-    for hold, expected_fire_samples in ((0.001, 2), (0.00405, 4)):
+def test_a_parked_nozzle_fires_exactly_its_dose_and_no_more():
+    # Ink volume per pixel, pinned directly rather than inferred from the
+    # masks. A nozzle sitting on one pixel must hold its fire bit for exactly
+    # `drops_per_pixel` samples at one drop a sample: fewer means the report
+    # released it early (the failure mode that made "coverage.png looks
+    # fuller than the real print" a hardware complaint under the old model),
+    # more means the dose gate is not stopping it at all.
+    for dose in (1, 3, 6):
         ink = np.ones((NUM_NOZZLES + 5, 3), dtype=bool)
-        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=hold)
-        # One prior sample elsewhere so dt is a real interval by the time
-        # the nozzle arrives -- the very first step() call has dt == 0 and
-        # would mask the bug (which is exactly why a parked-from-t0 probe
-        # showed no difference and this uses an approach sample instead).
-        eng.step(u_mm=0.4, v_mm=-50.0, t=0.0)
+        eng = CoverageEngine(ink, mm_per_column=0.2, drops_per_pixel=dose)
         fired = 0
-        for i in range(1, 12):
-            pattern, _ = eng.step(u_mm=0.4, v_mm=0.0, t=i * dt)
+        for i in range(dose + 6):
+            pattern, _ = eng.step(u_mm=0.4, v_mm=0.0, t=i * 0.002, drops=1.0)
             if pattern[0] & 0x01:
                 fired += 1
-        assert fired == expected_fire_samples, (
-            f"dose_hold_s={hold}: nozzle held its fire bit for {fired} "
-            f"samples, expected {expected_fire_samples} -- ink volume per "
-            f"pixel changed, which silently de-calibrates the dose_hold_s / "
-            f"PATTERN_STRIDE drop-count pairing")
+        assert fired == dose, (
+            f"drops_per_pixel={dose}: nozzle held its fire bit for {fired} "
+            f"samples, expected {dose} -- ink volume per pixel is wrong")
 
 
-def test_dwell_survives_flapping_between_two_neighbouring_rows():
+def test_a_dose_summed_from_fractions_completes_without_an_extra_sample():
+    # The float-hygiene epsilon in step()'s Step 5, pinned as the ink it
+    # saves. Ten samples of a tenth of a dose each is exactly one dose in
+    # real arithmetic and 0.9999999999999999 in floating point, so a strict
+    # `>=` leaves the nozzle firing for an eleventh sample it does not owe.
+    # Ten fractional samples per column is an ordinary crossing, not a
+    # contrived one -- 0.087 mm columns at 500 Hz reach it below 4.4 mm/s.
+    ink = np.ones((NUM_NOZZLES + 5, 3), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=0.2, drops_per_pixel=1)
+    fired = 0
+    for i in range(20):
+        pattern, _ = eng.step(u_mm=0.4, v_mm=0.0, t=i * 0.002, drops=0.1)
+        if pattern[0] & 0x01:
+            fired += 1
+    assert fired == 10, (
+        f"nozzle fired {fired} times for a dose worth 10 samples -- a "
+        "rounding-short total is being read as a genuinely unfinished dose")
+
+
+def test_dose_survives_flapping_between_two_neighbouring_rows():
     # REGRESSION: found analysing a real freehand print whose recorded
     # coverage.png showed far less than what was actually inked on paper.
     # NOZZLE_PITCH_MM (~0.087mm) is finer than realistic tracker position
     # noise, so a nozzle sitting near a row boundary has its rounded row
     # index flap between two neighbours sample to sample. The engine used
-    # to key dwell on a per-group "since" timestamp that RESET on every key
-    # change -- so neither neighbour ever accumulated dose_hold_s of dwell,
-    # even though `active` (and therefore real firmware firing) was True
-    # on literally every sample. Reproduced directly against the pre-fix
-    # engine: 200/200 samples fired, 0 pixels ever completed, from jitter
-    # of only +-0.001mm -- two orders of magnitude below plausible tracker
-    # noise. Dwell must now be tracked per PIXEL (persists across a key
-    # flap) rather than per group-slot (reset by one).
+    # to key the dose on a per-group slot that RESET on every key change --
+    # so neither neighbour ever collected a full dose, even though `active`
+    # (and therefore real firmware firing) was True on literally every
+    # sample. Reproduced directly against the pre-fix engine: 200/200
+    # samples fired, 0 pixels ever completed, from jitter of only +-0.001mm
+    # -- two orders of magnitude below plausible tracker noise. The dose
+    # must be tracked per PIXEL (persists across a key flap) rather than
+    # per group-slot (reset by one).
     ink = np.zeros((200, 50), dtype=bool)
     ink[50, 10] = True
     ink[51, 10] = True
-    eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.004)
+    eng = CoverageEngine(ink, mm_per_column=0.2, drops_per_pixel=DROPS)
     v_center = 50.5 * NOZZLE_PITCH_MM       # exact row-50/51 rounding boundary
     t = 0.0
     fired = 0
@@ -423,53 +476,53 @@ def test_dwell_survives_flapping_between_two_neighbouring_rows():
     assert fired >= 2, "sanity: the nozzle must have fired at least once"
     assert eng.printed[50, 10], (
         "row 50 never completed despite firing on every single sample -- "
-        "dwell was lost to key-flapping between the two boundary rows")
+        "its dose was lost to key-flapping between the two boundary rows")
     assert eng.printed[51, 10], (
         "row 51 never completed despite firing on every single sample -- "
-        "dwell was lost to key-flapping between the two boundary rows")
+        "its dose was lost to key-flapping between the two boundary rows")
 
 
-def test_dwell_resumes_after_the_group_stops_being_wanted_for_a_while():
-    # A pixel partially dwelled, then the cart wanders away (group not
-    # wanted for many samples -- e.g. off the page, or over an already-
-    # printed/blank stretch), then returns to the SAME still-unfinished
-    # pixel: the earlier partial dwell must still count. Distinct from the
-    # flapping test above (that one never leaves the group_wanted branch at
-    # all); this one specifically exercises the "not wanted" continue path
-    # not silently discarding progress.
+def test_dose_resumes_after_the_group_stops_being_wanted_for_a_while():
+    # A pixel partially dosed, then the cart wanders away (group not wanted
+    # for many samples -- e.g. off the page, or over an already-printed/blank
+    # stretch), then returns to the SAME still-unfinished pixel: the earlier
+    # partial dose must still count. Distinct from the flapping test above
+    # (that one never leaves the group_wanted branch at all); this one
+    # specifically exercises the "not wanted" continue path not silently
+    # discarding progress.
     ink = np.zeros((10, 10), dtype=bool)
     ink[0, 0] = True
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=6)
 
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)                 # arrive at (0,0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.006)               # 6ms dwelled, not yet done
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.0)                 # 1 of 6 at (0,0)
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.006)               # 2 of 6, not yet done
     assert not eng.printed[0, 0]
 
     # Wander off to unwanted territory for a while (group_wanted False).
     for i in range(20):
         eng.step(u_mm=5.0, v_mm=5.0, t=0.006 + i * 0.001)
 
-    # Come back to (0,0): only need ~4ms more to cross dose_hold_s=0.01.
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.030)
-    eng.step(u_mm=0.0, v_mm=0.0, t=0.034)
+    # Come back to (0,0): only 3 more drops needed to reach the report point.
+    for i in range(3):
+        eng.step(u_mm=0.0, v_mm=0.0, t=0.030 + 0.004 * i)
     assert eng.printed[0, 0], (
-        "dwell accumulated before the excursion was discarded instead of "
+        "the dose accumulated before the excursion was discarded instead of "
         "resumed on return")
 
 
-def test_dwell_flap_MUTATION_check_resetting_on_key_change_reintroduces_the_bug():
+def test_dose_flap_MUTATION_check_resetting_on_key_change_reintroduces_the_bug():
     # Proof the regression test above actually exercises the fix: reverting
-    # to the old reset-on-key-change dwell rule (a plain per-call "since"
-    # timestamp, exactly what step() used before this fix) reproduces the
-    # original failure -- fires every sample, completes neither pixel.
+    # to the old reset-on-key-change rule (a per-group slot dropped the
+    # moment the key moves, exactly what step() did before this fix)
+    # reproduces the original failure -- fires every sample, completes
+    # neither pixel.
     ink = np.zeros((200, 50), dtype=bool)
     ink[50, 10] = True
     ink[51, 10] = True
 
     printed = np.zeros_like(ink, dtype=bool)
-    pixel, since = None, None
+    pixel, konto = None, 0.0
     v_center = 50.5 * NOZZLE_PITCH_MM
-    t = 0.0
     fired = 0
     for i in range(200):
         v = v_center + (0.001 if i % 2 == 0 else -0.001)
@@ -479,13 +532,13 @@ def test_dwell_flap_MUTATION_check_resetting_on_key_change_reintroduces_the_bug(
         if wanted:
             key = (row, col)
             if pixel != key:
-                pixel, since = key, t              # <-- the reverted, buggy reset
+                pixel, konto = key, 0.0        # <-- the reverted, buggy reset
+            konto += 1.0
             fired += 1
-            if t - since >= 0.004:
+            if konto + 1.0 >= DROPS:
                 printed[row, col] = True
         else:
-            pixel, since = None, None
-        t += 0.002
+            pixel, konto = None, 0.0
 
     assert fired == 200, "sanity: same firing pattern as the fixed engine"
     assert not printed[50, 10] and not printed[51, 10], (
@@ -496,7 +549,7 @@ def test_dwell_flap_MUTATION_check_resetting_on_key_change_reintroduces_the_bug(
 
 def test_ink_not_requested_never_fires_or_prints():
     ink = np.zeros((10, 5), dtype=bool)          # nothing wanted anywhere
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
     pattern, changed = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
     assert not _unpack(pattern).any()
@@ -510,7 +563,7 @@ def test_ink_not_requested_never_fires_or_prints():
 # ============================================================== bar geometry
 def test_multiple_nozzles_fire_together_when_all_wanted():
     ink = np.ones((NUM_NOZZLES, 1), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
     pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
     assert _unpack(pattern)[:NUM_NOZZLES].all()
 
@@ -518,11 +571,12 @@ def test_multiple_nozzles_fire_together_when_all_wanted():
 def test_tall_image_needs_vertical_travel_to_reach_all_rows():
     height = NUM_NOZZLES + 60
     ink = np.ones((height, 1), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
-    # base_row=0 -> nozzle bar spans rows [0, NUM_NOZZLES). Dwell long enough.
+    # base_row=0 -> nozzle bar spans rows [0, NUM_NOZZLES). Two drops of
+    # three is enough to report (see step()'s Step 5).
     eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.1)
     assert eng.printed[0, 0]
     assert eng.printed[NUM_NOZZLES - 1, 0]
     assert not eng.printed[NUM_NOZZLES, 0]           # just out of the bar's reach
@@ -531,13 +585,13 @@ def test_tall_image_needs_vertical_travel_to_reach_all_rows():
     # Shift vertically so the bar's top edge now reaches the last row.
     v_shift_mm = (height - NUM_NOZZLES) * NOZZLE_PITCH_MM
     eng.step(u_mm=0.0, v_mm=v_shift_mm, t=1.0)
-    eng.step(u_mm=0.0, v_mm=v_shift_mm, t=1.0 + DOSE_HOLD_S + 0.05)
+    eng.step(u_mm=0.0, v_mm=v_shift_mm, t=1.1)
     assert eng.printed[height - 1, 0]
 
 
 def test_out_of_bounds_position_does_not_crash_or_print_anything():
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
     # Far off the image in both u and v.
     pattern, _ = eng.step(u_mm=1000.0, v_mm=1000.0, t=0.0)
@@ -554,24 +608,24 @@ def test_out_of_bounds_position_does_not_crash_or_print_anything():
 # ================================================================= bookkeeping
 def test_pattern_is_row_bytes_long():
     ink = np.ones((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
     pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
     assert len(pattern) == ROW_BYTES
 
 
 def test_done_property_tracks_full_coverage():
     ink = np.ones((3, 1), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
     assert not eng.done
 
     eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.1)
     assert eng.done                 # bar (152 nozzles) covers all 3 rows at once
 
 
 def test_done_is_true_for_a_blank_target():
     ink = np.zeros((10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
     assert eng.done                 # nothing wanted -> trivially done
 
 
@@ -581,7 +635,7 @@ def test_step_default_yaw_rad_reduces_exactly_to_the_pre_rotation_behaviour():
     # without yaw_rad at all must place every nozzle at the same column and
     # at row = base_row + p, exactly as before this feature existed.
     ink = np.ones((NUM_NOZZLES + 10, 5), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.0)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=1)
     eng.step(u_mm=2.0, v_mm=0.0, t=0.0)
     assert eng.printed[0:NUM_NOZZLES, 2].all()
     assert not eng.printed[:, [0, 1, 3, 4]].any()
@@ -599,7 +653,7 @@ def test_step_zero_yaw_is_bit_identical_across_a_sweep_of_v_offsets_incl_roundin
     for k in range(-50, 50):
         v_mm = (k + 0.5) * NOZZLE_PITCH_MM        # exact rounding boundary
         ink = np.ones((height, 3), dtype=bool)
-        eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.0)
+        eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=1)
         eng.step(u_mm=1.0, v_mm=v_mm, t=0.0, yaw_rad=0.0)
         base_row = int(round(v_mm / NOZZLE_PITCH_MM))
         expected_rows = {r for r in range(base_row, base_row + NUM_NOZZLES) if 0 <= r < height}
@@ -612,7 +666,7 @@ def test_step_nonzero_yaw_spreads_nozzles_across_columns_by_the_expected_amount(
     width_cols = 200
     height_rows = 300
     ink = np.ones((height_rows, width_cols), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, drops_per_pixel=1)
     yaw = math.radians(45.0)
 
     eng.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=yaw)
@@ -653,7 +707,7 @@ def test_step_90deg_yaw_swings_the_bar_to_lower_columns_not_higher():
     yaw = math.pi / 2.0
 
     ink = np.ones((10, 200), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, drops_per_pixel=1)
     eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
 
     row0 = int(round(v_mm / NOZZLE_PITCH_MM))
@@ -698,7 +752,7 @@ def test_bar_offset_uv_matches_the_bar_centre_of_steps_own_spread():
     yaw = math.pi / 2.0
 
     ink = np.ones((10, 200), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, drops_per_pixel=1)
     eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
 
     row0 = int(round(v_mm / NOZZLE_PITCH_MM))
@@ -749,7 +803,7 @@ def test_step_and_page_mapper_rotate_a_body_fixed_row_vector_the_same_direction(
     mm_per_column = 0.5
     u_mm, v_mm = 50.0, 5.0
     ink = np.ones((300, 200), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, drops_per_pixel=1)
     eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
     col0 = int(round(u_mm / mm_per_column))
     touched_cols = np.nonzero(eng.printed.any(axis=0))[0]
@@ -777,14 +831,14 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
 
     # Same v-step/sample-count shape as
     # test_spray_can_only_ever_add_coverage_never_remove_it above, which is
-    # known to actually accumulate coverage at this dose_hold_s -- a much
-    # faster v sweep (or too few samples) leaves each (row, col) key too
-    # short-lived to ever complete a dose, making the comparison vacuous.
+    # known to actually accumulate coverage at this dose -- a much faster v
+    # sweep (or too few samples) leaves each (row, col) key too short-lived
+    # to ever complete a dose, making the comparison vacuous.
     samples = [(u, 2.0 + 0.02 * i, 0.001 * i)
                for i, u in enumerate(np.linspace(0.0, 6.0, 400))]
 
     def run(**kwargs):
-        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018, **kwargs)
+        eng = CoverageEngine(ink, mm_per_column=0.2, drops_per_pixel=2, **kwargs)
         seen = [eng.step(u_mm=u, v_mm=v, t=t)[0] for u, v, t in samples]
         return seen, eng.printed.copy()
 
@@ -805,28 +859,30 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
     # reimplementation of the per-nozzle rule (the code this replaced) to
     # actually pin the equivalence.
     #
-    # Dwell here is accumulated PER PIXEL (a plain dict, keyed on (row, col),
-    # never reset by a key change), matching step()'s own per-pixel dwell
-    # model -- NOT the earlier per-nozzle "since" timestamp that reset to
-    # zero the instant a nozzle's rounded key changed. That earlier version
-    # is what this test used to pin, and it was itself the bug: with
+    # The dose here is accumulated PER PIXEL (a plain dict, keyed on
+    # (row, col), never reset by a key change), matching step()'s own
+    # per-pixel model -- NOT the earlier per-nozzle slot that reset to zero
+    # the instant a nozzle's rounded key changed. That earlier version is
+    # what this test used to pin, and it was itself the bug: with
     # NOZZLE_PITCH_MM (~0.087mm) finer than realistic tracker noise, a nozzle
     # hovering near a row boundary flaps its key every sample, so a
-    # reset-on-change timer never reaches dose_hold_s -- the nozzle fires
-    # every sample (see `active` below, set unconditionally once `wanted`)
-    # but no pixel is ever marked printed. Reproduced directly against the
-    # pre-fix engine: 200/200 samples fired, 0 pixels completed, from
-    # +-0.001mm jitter alone. See coverage.py's module/__init__ docstrings.
+    # reset-on-change accumulator never reaches a full dose -- the nozzle
+    # fires every sample (see `active` below, set unconditionally once
+    # `wanted`) but no pixel is ever marked printed. Reproduced directly
+    # against the pre-fix engine: 200/200 samples fired, 0 pixels completed,
+    # from +-0.001mm jitter alone. See coverage.py's module/__init__
+    # docstrings.
     def reference(yaw_rad):
         """The per-nozzle rule, written out standalone, with the same
-        never-reset-on-flap per-pixel dwell accumulation step() now uses."""
+        never-reset-on-flap per-pixel dose accumulation step() now uses --
+        including the two thresholds: `printed` is reported one drop early,
+        the ledger entry (and with it the nozzle) is only released on the
+        full dose."""
+        dose_soll = 2                      # drops_per_pixel used above
         printed = np.zeros_like(ink, dtype=bool)
-        pixel_dwell: "dict[tuple[int, int], float]" = {}
-        last_t = None
+        konten: "dict[tuple[int, int], float]" = {}
         out = []
         for u_mm, v_mm, t in samples:
-            dt = 0.0 if last_t is None else max(0.0, t - last_t)
-            last_t = t
             active = np.zeros(NUM_NOZZLES, dtype=bool)
             zero_yaw = yaw_rad == 0.0
             if zero_yaw:
@@ -840,26 +896,24 @@ def test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all():
                     col = int(round((u_mm - d * math.sin(yaw_rad)) / 0.2))
                     row = int(round((v_mm + d * math.cos(yaw_rad)) / NOZZLE_PITCH_MM))
                 in_bounds = 0 <= row < ink.shape[0] and 0 <= col < ink.shape[1]
-                wanted = in_bounds and bool(ink[row, col]) and not printed[row, col]
+                pixel = (row, col)
+                wanted = in_bounds and bool(ink[row, col]) and (
+                    not printed[row, col] or pixel in konten)
                 if not wanted:
                     continue
-                pixel = (row, col)
-                # Arrival credits 0.0, only subsequent samples on the same
-                # pixel add dt -- matching step()'s own timing (which
-                # reproduces the pre-fix elapsed-time semantics exactly; see
-                # coverage.py for why crediting dt on arrival halved the
-                # real ink laid down).
-                dwell = pixel_dwell[pixel] + dt if pixel in pixel_dwell else 0.0
-                pixel_dwell[pixel] = dwell
+                treffer = konten.get(pixel, 0.0) + 1.0     # step()'s default drops
                 active[p] = True
-                if dwell >= 0.0018:
-                    del pixel_dwell[pixel]
+                if treffer >= dose_soll:
+                    konten.pop(pixel, None)
+                else:
+                    konten[pixel] = treffer
+                if treffer + 1.0 >= dose_soll:
                     printed[row, col] = True
             out.append(pack_nozzle_bits(active))
         return out, printed
 
     for yaw in (0.0, math.radians(30.0)):
-        eng = CoverageEngine(ink, mm_per_column=0.2, dose_hold_s=0.0018,
+        eng = CoverageEngine(ink, mm_per_column=0.2, drops_per_pixel=2,
                              nozzle_group=1)
         got = [eng.step(u_mm=u, v_mm=v, t=t, yaw_rad=yaw)[0] for u, v, t in samples]
         ref_patterns, ref_printed = reference(yaw)
@@ -876,7 +930,7 @@ def test_nozzle_group_2_fires_both_members_when_only_one_row_is_wanted():
     # nozzle 1 (row 1, same group) does not. The OR rule must still fire both.
     ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
     ink[0, 0] = True
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS, nozzle_group=2)
 
     pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
     active = _unpack(pattern)
@@ -887,10 +941,10 @@ def test_nozzle_group_2_fires_both_members_when_only_one_row_is_wanted():
 def test_nozzle_group_2_marks_both_rows_printed_on_dose_completion():
     ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
     ink[0, 0] = True                        # row 1 is not itself wanted ink
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS, nozzle_group=2)
 
     eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)   # dwell completes
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.1)          # 2 of 3 drops -> reported
 
     assert eng.printed[0, 0], "the actually-wanted row must be printed"
     assert eng.printed[1, 0], (
@@ -900,12 +954,12 @@ def test_nozzle_group_2_marks_both_rows_printed_on_dose_completion():
 
 def test_nozzle_group_2_neither_member_fires_when_neither_is_wanted():
     ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)   # nothing wanted anywhere
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS, nozzle_group=2)
 
     pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
     active = _unpack(pattern)
     assert not active[0] and not active[1]
-    eng.step(u_mm=0.0, v_mm=0.0, t=DOSE_HOLD_S + 0.05)
+    eng.step(u_mm=0.0, v_mm=0.0, t=0.1)
     assert not eng.printed.any()
 
 
@@ -916,7 +970,7 @@ def test_nozzle_group_2_under_yaw_fires_both_members_without_crashing():
     mm_per_column = 0.5
     ink = np.ones((300, 200), dtype=bool)
     yaw = math.radians(45.0)
-    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=DOSE_HOLD_S,
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, drops_per_pixel=DROPS,
                          nozzle_group=2)
 
     pattern, _ = eng.step(u_mm=50.0, v_mm=5.0, t=0.0, yaw_rad=yaw)
@@ -932,7 +986,7 @@ def test_nozzle_group_2_MUTATION_check_firing_only_the_first_member_breaks_the_b
     # suite even if nobody re-derives it by hand.
     ink = np.zeros((NUM_NOZZLES, 1), dtype=bool)
     ink[0, 0] = True                # only nozzle 0 (group 0's first member) wants ink
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S, nozzle_group=2)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS, nozzle_group=2)
 
     pattern, _ = eng.step(u_mm=0.0, v_mm=0.0, t=0.0)
     real_active = _unpack(pattern)[:2].copy()
@@ -963,7 +1017,7 @@ def test_step_MUTATION_check_ignoring_yaw_rad_breaks_the_spread_test():
     col_ignoring_yaw = int(round(u_mm / mm_per_column))
     mutated_touched_cols = {col_ignoring_yaw}          # every nozzle, same column
 
-    eng = CoverageEngine(ink, mm_per_column=mm_per_column, dose_hold_s=0.0)
+    eng = CoverageEngine(ink, mm_per_column=mm_per_column, drops_per_pixel=1)
     eng.step(u_mm=u_mm, v_mm=v_mm, t=0.0, yaw_rad=yaw)
     real_touched_cols = set(np.nonzero(eng.printed.any(axis=0))[0].tolist())
 
@@ -980,7 +1034,7 @@ def test_fired_marks_a_pixel_on_its_very_first_sample_before_any_dose_completes(
     # `printed` deliberately does not.
     ink = np.zeros((NUM_NOZZLES, 3), dtype=bool)
     ink[0, 0] = True
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
 
     pattern, _ = eng.step(0.0, 0.0, 0.0)          # one single sample
     assert _unpack(pattern)[0] == 1, "nozzle 0 must fire on the first sample"
@@ -990,73 +1044,73 @@ def test_fired_marks_a_pixel_on_its_very_first_sample_before_any_dose_completes(
 
 def test_fired_never_marks_a_pixel_no_nozzle_ever_visited():
     ink = np.ones((NUM_NOZZLES, 4), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS)
     for i in range(5):
         eng.step(0.0, 0.0, i * 0.05)              # parked on column 0 only
     assert eng.fired[:, 0].any()
     assert not eng.fired[:, 1:].any(), "columns never driven over must stay clean"
 
 
-def test_fired_equals_printed_on_a_slow_pass():
-    # No divergence at a pace that comfortably clears dose_hold_s: this is
-    # what makes `fired` a strictly better report rather than a different
-    # one -- on a healthy pass the two pictures are identical.
-    ink = np.ones((NUM_NOZZLES, 6), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=0.01)
-    t = 0.0
-    for col in range(6):
-        for _ in range(8):                        # 8 samples/column, dt=2ms
-            eng.step(float(col), 0.0, t)
-            t += 0.002
-    assert np.array_equal(eng.fired, eng.printed), \
-        (int(eng.fired.sum()), int(eng.printed.sum()))
+def test_fired_equals_printed_on_a_realistic_pass():
+    # On a healthy pass driven the way the controller drives it, the two
+    # pictures are identical. Under the old time-based dose this only held
+    # at low speed; it now holds all the way to the poll-rate limit.
+    mm_per_column = 0.087
+    for speed in (5.0, 17.3, 30.0, 40.0):
+        eng = CoverageEngine(np.ones((NUM_NOZZLES, 60), dtype=bool),
+                             mm_per_column=mm_per_column)
+        _sweep(eng, speed, mm_per_column)
+        assert np.array_equal(eng.fired, eng.printed), (
+            speed, int(eng.fired.sum()), int(eng.printed.sum()))
 
 
-def test_fast_pass_inks_everything_while_printed_shows_gaps():
-    # THE reported bug, pinned with numbers: at the rig's real settings
-    # (mm_per_column 0.087, dose_hold_s 0.001, poll_hz 500) a cart moving
-    # ~30mm/s gets fewer than two samples per column, so most pixels never
-    # accumulate enough dwell to be marked printed -- yet the nozzle fired
-    # on the one sample each column did get, and the paper came out solid.
-    # A printed-based coverage image therefore drew dense vertical striping
-    # over squares that were physically fine.
-    mm_per_col, dt, speed = 0.087, 1 / 500.0, 30.0
-    ink = np.ones((NUM_NOZZLES, 200), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=mm_per_col, dose_hold_s=0.001)
-    t = u = 0.0
-    while u < 150 * mm_per_col:
-        eng.step(u, 0.0, t)
-        u += speed * dt
-        t += dt
+def test_a_partial_dose_inks_the_pixel_while_printed_still_says_no():
+    # What `fired` is FOR, in the one case that still produces it: the cart
+    # crosses a column and turns away before the dose is complete (a
+    # direction reversal, or the page edge). The nozzle fired, so there is
+    # ink on the paper, but the pixel is not fully dosed -- COVERED and THIN
+    # must be able to say both.
+    ink = np.ones((NUM_NOZZLES, 3), dtype=bool)
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=6)
 
-    swept = ink[:, :150]
-    fired = eng.fired[:, :150]
-    printed = eng.printed[:, :150]
-    assert fired.all(), "every swept pixel physically received ink"
-    assert not printed.all(), "printed is expected to lag at this speed"
-    # Not a marginal difference -- this is why the image looked wrong.
-    assert printed.sum() < 0.75 * fired.sum(), \
-        (int(printed.sum()), int(fired.sum()))
+    eng.step(0.0, 0.0, 0.0, drops=1.0)            # 1 of 6, then gone
+    assert eng.fired[0, 0], "the nozzle fired, so ink landed"
+    assert not eng.printed[0, 0], "one drop of six is not a completed dose"
 
 
-def test_fast_pass_MUTATION_check_reporting_printed_reintroduces_the_stripes():
-    # Confirms the test above measures the fix and not a coincidence: the
-    # SAME sweep, read through `printed` (what the coverage image used to
-    # render), leaves whole columns entirely blank -- the vertical stripes.
-    mm_per_col, dt, speed = 0.087, 1 / 500.0, 30.0
-    ink = np.ones((NUM_NOZZLES, 200), dtype=bool)
-    eng = CoverageEngine(ink, mm_per_column=mm_per_col, dose_hold_s=0.001)
-    t = u = 0.0
-    while u < 150 * mm_per_col:
-        eng.step(u, 0.0, t)
-        u += speed * dt
-        t += dt
+def test_MUTATION_check_crediting_integer_columns_reintroduces_speed_stripes():
+    # Guards the fractional-credit rule in step()'s Step 4. Re-drives the
+    # same 25 mm/s sweep crediting the engine with whole BLE columns (what
+    # the link actually carried that sample) instead of the exact share of a
+    # dose, and requires that to come out visibly worse -- otherwise the
+    # distinction the code makes is not being exercised here.
+    mm_per_column, poll_hz, speed = 0.087, 500.0, 25.0
+    dt = 1.0 / poll_hz
+    dpp = DEFAULT_DROPS_PER_PIXEL
 
-    blank_cols_printed = [c for c in range(150) if not eng.printed[:, c].any()]
-    blank_cols_fired = [c for c in range(150) if not eng.fired[:, c].any()]
-    assert blank_cols_printed, "expected fully blank columns in the printed mask"
-    assert not blank_cols_fired, \
-        f"fired must have no blank columns, got {blank_cols_fired[:5]}"
+    def run(integer_credit):
+        eng = CoverageEngine(np.ones((40, 120), dtype=bool),
+                             mm_per_column=mm_per_column)
+        schuld, vorher = 0.0, None
+        n = int(120 * mm_per_column / (speed * dt)) + 1
+        for i in range(n):
+            u = i * speed * dt
+            anteil = float(dpp) if vorher is None else dpp * (u - vorher) / mm_per_column
+            vorher = u
+            schuld += anteil
+            kopien = int(schuld)
+            schuld -= kopien
+            eng.step(u_mm=u, v_mm=0.0, t=i * dt,
+                     drops=(kopien if integer_credit else anteil))
+        return eng.printed.sum() / eng.printed.size
+
+    exakt = run(False)
+    ganzzahlig = run(integer_credit=True)
+    assert exakt == 1.0, f"the shipped rule must cover everything, got {exakt:.1%}"
+    assert ganzzahlig < exakt, (
+        "crediting whole BLE columns was expected to leave columns unprinted "
+        f"at {speed} mm/s but reported {ganzzahlig:.1%} -- if the two rules "
+        "now agree, Step 4's fractional-credit argument needs revisiting")
 
 
 def test_fired_records_every_member_of_a_firing_group_not_just_the_first():
@@ -1065,7 +1119,7 @@ def test_fired_records_every_member_of_a_firing_group_not_just_the_first():
     # called for every in-bounds member on completion.
     ink = np.zeros((NUM_NOZZLES, 2), dtype=bool)
     ink[0, 0] = True                              # only nozzle 0's pixel wanted
-    eng = CoverageEngine(ink, mm_per_column=1.0, dose_hold_s=DOSE_HOLD_S,
+    eng = CoverageEngine(ink, mm_per_column=1.0, drops_per_pixel=DROPS,
                          nozzle_group=2)
     eng.step(0.0, 0.0, 0.0)
     assert eng.fired[0, 0] and eng.fired[1, 0], \

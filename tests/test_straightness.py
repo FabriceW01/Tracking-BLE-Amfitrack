@@ -233,7 +233,7 @@ def _write_csv(text):
 
 def test_read_profile_csv_parses_page_mode_columns():
     path = _write_csv(
-        "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw\n"
+        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
         "0.1,0,0,0.000,0.000,10.00,50.0,0.0000,0.0000,0.0000,1.0000\n"
         "0.2,1,1,1.000,0.100,10.00,50.0,0.0000,0.0000,0.0000,1.0000\n")
     try:
@@ -247,7 +247,7 @@ def test_read_profile_csv_parses_page_mode_columns():
 
 def test_read_profile_csv_turns_blank_quaternions_into_nan():
     path = _write_csv(
-        "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw\n"
+        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
         "0.1,0,0,0.000,0.000,10.00,50.0,,,,\n")
     try:
         data = S.read_profile_csv(path)
@@ -273,7 +273,7 @@ def test_read_profile_csv_rejects_a_line_mode_file_with_a_real_diagnosis():
 
 # ========================================================= analyze / report
 def _page_csv(u, v, quats=None):
-    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"]
+    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"]
     for i, (uu, vv) in enumerate(zip(u, v)):
         if quats is None:
             q = "0.0000,0.0000,0.0000,1.0000"
@@ -393,7 +393,7 @@ def test_analyze_reports_rotation_and_its_lever_arm_cost():
 
 def test_analyze_says_so_when_the_csv_has_no_orientation():
     u = np.linspace(0, 150, 100)
-    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"]
+    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"]
     for i, uu in enumerate(u):
         lines.append(f"{i * 0.01:.4f},0,0,{uu:.3f},0.000,10.00,50.0,,,,")
     path = _write_csv("\n".join(lines) + "\n")
