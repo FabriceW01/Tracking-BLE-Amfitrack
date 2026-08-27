@@ -132,11 +132,11 @@ NOZZLE_BAR_SPAN_MM = (NUM_NOZZLES - 1) * NOZZLE_PITCH_MM
 # offset CoverageEngine actually needs (see its docstring for that math).
 
 #SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = -62.36
-SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = -45.5
+SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM = -50.25
 
 
 # Column-axis (travel direction) counterpart. Believed to be 0 -- no
 # measurement has shown otherwise -- but kept as a named, overridable
 # constant rather than assumed silently, in case a future measurement finds
 # a real offset here too.
-SENSOR_TO_NOZZLE_COL_MM = 5.5
+SENSOR_TO_NOZZLE_COL_MM = 0
