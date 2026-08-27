@@ -1046,6 +1046,18 @@ Zwei Anzeigen sind **immer** sichtbar, egal was man gerade tut:
   Quelle springt auf „veraltet", statt eine tote Zahl weiter anzuzeigen.
 - **Druckvorschau**, die sich nach jeder Änderung an einem Feld neu rendert
   (entprellt, damit nicht jede Tasteneingabe einen Unterprozess startet).
+- **Deckung (live)** — während eines Durchgangs wächst hier mit, was
+  tatsächlich schon Tinte bekommen hat. Das Zielbild liegt blass darunter,
+  also ist auf einen Blick sichtbar, was noch **fehlt**. Klick schaltet auf
+  1:1-Pixel um (die Seitenspalte verkleinert ein 2299 Spalten breites Ziel
+  sonst 6-fach, wobei einzelne Spaltenstriche untergehen).
+
+  Ein Klotz-Pixel = eine Zelle des Zielbilds, dieselbe Konvention wie
+  `record.png`. Reißt die WebSocket-Verbindung mitten im Durchgang, fehlen
+  die in dieser Zeit gedruckten Zellen dauerhaft — es gibt keine
+  Nachlieferung. Das Panel sagt das dann auch; maßgeblich ist in dem Fall
+  **Deckung (letzter Durchgang)** darunter, das am Pass-Ende aus
+  `record.png` kommt und zusätzlich MISSED und die Fahrspur zeigt.
 
 Vier Reiter: **Drucken** (Bild, Testmuster oder Text, mit Größen und den
 Ablauf-Schaltern sofort starten / ein Durchgang / Trockenlauf), **Tests** (die
@@ -1057,6 +1069,50 @@ abfahren, Boresight erfassen, berechnen, speichern) und **Einstellungen**
 Der gebaute Befehl steht immer im Klartext unter den Druckknöpfen — die UI
 führt echte `main.py`-Unterprozesse aus und kann deshalb nicht davon
 abweichen, was die CLI tut.
+
+### ⚠️ Behoben: die Buchführung pro Sample war das eigentliche Tempolimit
+
+Die UI fährt jeden Druck mit `--progress-json`. Dieser Stream schickte ein
+Ereignis **pro Poll-Sample** (bis zu 500/s), und dahinter liefen mehrere
+Vollbild-numpy-Durchläufe. Gemessen am Beispiel aus diesem README
+(`--pattern-length-mm 200 --pattern-height-mm 100` = 2299×1152 = 2,65 M Pixel),
+gegen ein Budget von 2000 µs je Sample:
+
+| Operation | Kosten/Sample | lief |
+|---|---|---|
+| `coverage.done` → `np.all(printed[ink])` | 1279 µs | **immer**, auch ohne `--progress-json` |
+| `(ink & fired).sum()` | 1536 µs | nur `--progress-json` |
+| `ink.sum()` | 977 µs | nur `--progress-json` — eine **Konstante** |
+| `fired & ~prev` + `fired.copy()` | 723 µs | nur `--progress-json` |
+
+Weil die Spalten-Kante des Tintenmodells `--mm-per-column × --poll-hz` ist,
+war das kein reines CPU-Thema, sondern ein **Tempolimit auf dem Druck**:
+
+| | erreicht | Spalten-Kante |
+|---|---|---|
+| Soll | 500 Hz | 43,5 mm/s |
+| vorher, ohne `--progress-json` | ~208 Hz | 18,1 mm/s |
+| **vorher, mit `--progress-json` (= die UI)** | **~71 Hz** | **6,2 mm/s** |
+| **jetzt** | **~330 Hz** | **28,7 mm/s** |
+
+Behoben, indem jede dieser Größen inkrementell mitgeführt wird statt pro
+Sample neu aus dem Vollbild berechnet: `printed` wird ausschließlich in
+`_deposit` gesetzt, `fired` ausschließlich in `step()`, also sind exakte
+Zähler an genau diesen Stellen möglich (`CoverageEngine.ink_total` /
+`ink_fired` / `ink_printed`, und `done` als Zählervergleich). Neu gefeuerte
+Zellen schreibt die Engine gleich mit (`drain_new_cells()`), womit der
+Masken-Diff ganz entfällt.
+
+Zusätzlich geht das `coverage`-Ereignis nur noch mit `--progress-hz`
+(Default 25) raus statt pro Sample. **Dabei geht kein Tropfen verloren:**
+zwischen zwei Ereignissen gesammelte Zellen kommen im nächsten mit, und ein
+zwingender Flush am Pass-Ende trägt den Rest — auch beim Abbruch per
+STARTPOINT-Taster oder SIGINT. Gegengeprüft an einem echten Durchlauf:
+130.720 gemeldete Zellen gegen 130.720 gezählte bedeckte Pixel.
+
+Die verbleibende Lücke zu 500 Hz ist der nicht deadline-korrigierte
+`sleep` am Schleifenende (die Periode ist immer `Arbeit + 2 ms`) plus
+`step()` selbst. Beides ist eine eigene Baustelle.
 
 **Sensor-Übergabe:** Der Amfitrack ist ein einzelnes USB-Gerät und lässt sich
 nicht zweimal öffnen. Startet man eine Aktion, während der Leerlauf-Strom

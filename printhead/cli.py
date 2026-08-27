@@ -16,6 +16,7 @@ from typing import Optional
 from . import patterns
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
 from .controller import (
+    DEFAULT_PROGRESS_HZ,
     DEFAULT_SPEED_WARNING_MM_S,
     DEFAULT_STARTPOINT_ANCHOR,
     STARTPOINT_ANCHORS,
@@ -198,10 +199,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "this option does not reorder anything, it only "
                         "ties adjacent nozzles' firing together")
     g.add_argument("--progress-json", action="store_true",
-                   help="Page mode: emit one JSON progress event per sample "
-                        "(current u/v/row/col + newly-covered cells) instead "
-                        "of the plain-text status lines -- used by the web UI's "
-                        "live coverage view")
+                   help="Page mode: emit NDJSON progress events (current "
+                        "u/v/row/col + newly-covered cells) instead of the "
+                        "plain-text status lines -- used by the web UI's live "
+                        "coverage view. Rate is --progress-hz, not one per "
+                        "poll sample")
     g.add_argument("--speed-warning-mm-s", type=float, default=None,
                    help="Page mode: cart speed (mm/s) above which the client "
                         "warns the firmware over BLE that it is moving too "
@@ -214,6 +216,21 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "threshold, to avoid chattering the characteristic "
                         "right at the boundary. Advisory only -- drives a "
                         "status LED on the firmware, never affects dosing")
+    g.add_argument("--progress-hz", type=float, default=None,
+                   help="Page mode: how often --progress-json emits its "
+                        "`coverage` event, in Hz (default: "
+                        "controller.DEFAULT_PROGRESS_HZ = "
+                        f"{DEFAULT_PROGRESS_HZ:g}). No ink report is lost by "
+                        "lowering it -- cells inked between two events are "
+                        "accumulated and sent in the next one, and a final "
+                        "flush carries the tail of the pass -- so this trades "
+                        "update smoothness against CPU, nothing else. It used "
+                        "to be one event per poll sample (up to 500/s), which "
+                        "cost enough per-sample work to drag the freehand "
+                        "loop down to ~71 Hz on a 200x100 mm target and with "
+                        "it the column-skipping speed limit to ~6 mm/s. 0 or "
+                        "less restores the un-throttled every-sample "
+                        "behaviour")
     g.add_argument("--startpoint-anchor", choices=STARTPOINT_ANCHORS,
                    default=None,
                    help="Page mode: which point of the target image a "
@@ -697,6 +714,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
         kwargs["latency_compensate_s"] = args.latency_compensate_s
     if args.startpoint_anchor is not None:
         kwargs["startpoint_anchor"] = args.startpoint_anchor
+    if args.progress_hz is not None:
+        kwargs["progress_hz"] = args.progress_hz
     return PrintController(render, build_ble(args), tracking,
                            simulate=args.simulate, preview=args.preview,
                            dry_run=args.dry_run, ink=ink,

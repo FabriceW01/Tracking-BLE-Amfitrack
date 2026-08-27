@@ -26,6 +26,7 @@ Aufruf:  python tests/test_ui_live.py
 """
 
 import asyncio
+import pathlib
 import os
 import sys
 
@@ -105,6 +106,62 @@ def test_deckung_waechst_ueber_den_durchgang():
     assert len(werte) > 2, werte
     assert werte[-1] > werte[0], werte[:5]
     assert werte == sorted(werte), "Deckung darf nie zurückgehen"
+
+
+def test_zellen_erreichen_den_client_genau_einmal():
+    """Die Live-Ansicht zeichnet Deltas: eine doppelt gemeldete Zelle wäre
+    harmlos, eine verlorene bliebe für den Rest des Durchgangs ein Loch.
+    Derselbe Exactly-once-Vertrag wie in test_freehand_pass.py, hier aber
+    hinter Drosselung, WS-Relay und JSON-Serialisierung geprüft — genau die
+    Strecke, auf der eine künftige Optimierung Zellen fallen lassen würde."""
+    async def run():
+        hub = Hub()
+        fake = _FakeWS()
+        hub.clients.add(fake)
+        await hub.run_action([
+            "--pattern", "solid", "--pattern-length-mm", "6",
+            "--pattern-height-mm", "6", "--mode", "page",
+            "--page-frame", "simple", "--dry-run", "--simulate",
+            "--progress-json", "--auto-start", "--once", "--timeout", "3",
+        ])
+        await _bis_fertig(hub)
+        return fake.messages
+
+    nachrichten = asyncio.run(run())
+
+    start = [m for m in nachrichten if m.get("event") == "coverage_start"]
+    assert start, "coverage_start muss den Client erreichen"
+    assert start[0]["width"] > 0 and start[0]["height"] > 0
+
+    zellen = [tuple(c) for m in nachrichten
+              if m.get("event") == "coverage" for c in m.get("new_cells", [])]
+    assert zellen, "ohne new_cells kann die Live-Ansicht nichts zeichnen"
+    assert len(zellen) == len(set(zellen)), (
+        f"{len(zellen) - len(set(zellen))} Zellen doppelt gemeldet")
+
+    fertig = [m for m in nachrichten if m.get("event") == "coverage_done"]
+    assert fertig, nachrichten[-3:]
+    assert len(zellen) >= fertig[-1]["covered"], (
+        "weniger Zellen gemeldet als am Ende als bedeckt gezählt — der "
+        "finale Flush fehlt oder die Drosselung verwirft")
+
+
+def test_ui_zeichnet_die_zellen_auch_wirklich():
+    """Schwacher, aber gezielter Verdrahtungstest: die Zellen wurden lange
+    berechnet, serialisiert und gesendet — und im Browser verworfen, weil es
+    gar kein Canvas gab. Genau diese Lücke sichert das hier ab."""
+    quelle = (pathlib.Path(__file__).resolve().parent.parent
+              / "printhead" / "ui" / "static" / "index.html").read_text()
+    # Auf die AUFRUFSTELLEN geprüft, nicht auf das blosse Vorkommen der
+    # Wörter: ein Kommentar, der "new_cells" erwähnt, erfüllt eine
+    # Vorkommensprüfung auch dann noch, wenn die Verdrahtung entfernt wurde
+    # (genau so ist diese Prüfung beim Mutationstest zuerst durchgerutscht).
+    for aufruf in ("covStart(m.width, m.height)",
+                   "covCells(m.new_cells)",
+                   "getContext(\"2d\")",
+                   "/api/preview.png"):
+        assert aufruf in quelle, f"index.html ruft {aufruf!r} nicht auf"
+    assert "<canvas" in quelle
 
 
 # ====================================================== Sensor-Übergabe

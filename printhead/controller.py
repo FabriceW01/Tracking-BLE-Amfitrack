@@ -95,6 +95,67 @@ DEFAULT_STARTPOINT_ANCHOR = "center"
 # since nobody reads faster than this anyway.
 _VERBOSE_STATUS_INTERVAL_S = 1.0 / 15.0
 
+# Rate at which --progress-json emits its `coverage` event. Same idea as the
+# --verbose throttle above, and for a much sharper reason: this event used to
+# go out once per POLL SAMPLE, up to 500 times a second, each carrying a
+# freshly serialised list of newly-inked cells.
+#
+# That was not free. Measured on the README's own page-mode example
+# (--pattern-length-mm 200 --pattern-height-mm 100 = 2299x1152 = 2.65M
+# pixels), the per-sample bookkeeping behind the event cost ~3.2 ms against a
+# 2000 us budget, and the freehand loop's ACHIEVED rate fell to ~71 Hz
+# (against ~208 Hz without --progress-json). Because the ink model's
+# column-skipping edge is `mm_per_column * poll_hz` (see
+# DEFAULT_SPEED_WARNING_MM_S), a 71 Hz loop is a ~6.2 mm/s speed limit on the
+# print -- well under the 17.3 mm/s median hand speed. The web UI always
+# passes --progress-json, so that was the UI's real speed limit.
+#
+# 25 Hz rather than the 15 Hz above: this feeds a canvas, which wants to look
+# smooth, where --verbose feeds a text line nobody reads faster than 15 Hz.
+# No cell is lost to the throttle -- CoverageEngine.drain_new_cells()
+# accumulates between emissions, so a slower rate means bigger batches, not
+# less ink reported. Override with --progress-hz.
+_COVERAGE_EVENT_INTERVAL_S = 1.0 / 25.0
+DEFAULT_PROGRESS_HZ = 25.0
+
+
+def _coverage_event(u_mm, v_mm, pos, yaw_rad, roll_rad, pitch_rad,
+                    mm_per_column, speed_mm_s, covered, total,
+                    new_cells) -> dict:
+    """
+    Build one ``--progress-json`` ``coverage`` event.
+
+    Pulled out of the loop because it has TWO call sites that must produce
+    byte-identical payloads: the throttled in-loop emit, and the mandatory
+    final flush in ``_print_freehand_pass``'s ``finally`` block. If those
+    ever drifted apart, the flush -- the one carrying the tail of the pass --
+    would be the one that looks wrong.
+
+    Carries the same quantities --verbose prints (raw x/y/z, page u/v,
+    row/col, yaw/roll/pitch, covered/total) so a consumer can show a live
+    readout that stays complete DURING a pass. --verbose itself is useless
+    for that: it ends every line with `\r` instead of `\n` so it can
+    overwrite itself in the terminal, which means a line-oriented reader
+    never sees a line until the pass ends.
+    """
+    return {
+        "event": "coverage",
+        "u": round(u_mm, 3),
+        "v": round(v_mm, 3),
+        "row": int(round(v_mm / NOZZLE_PITCH_MM)),
+        "col": int(round(u_mm / mm_per_column)) if mm_per_column else 0,
+        "x": round(float(pos[0]), 3),
+        "y": round(float(pos[1]), 3),
+        "z": round(float(pos[2]), 3),
+        "yaw_deg": round(math.degrees(yaw_rad), 3),
+        "roll_deg": round(math.degrees(roll_rad), 3),
+        "pitch_deg": round(math.degrees(pitch_rad), 3),
+        "covered": covered,
+        "total": total,
+        "speed_mm_s": round(speed_mm_s, 2) if speed_mm_s is not None else None,
+        "new_cells": new_cells,
+    }
+
 
 def _speed_warning_transition(is_warning: bool, speed_mm_s: float,
                                threshold_mm_s: float) -> bool:
@@ -220,7 +281,8 @@ class PrintController:
                  sensor_offset_col_mm: float = SENSOR_TO_NOZZLE_COL_MM,
                  boresight_deg: float = 0.0,
                  latency_compensate_s: float = 0.0,
-                 startpoint_anchor: str = DEFAULT_STARTPOINT_ANCHOR):
+                 startpoint_anchor: str = DEFAULT_STARTPOINT_ANCHOR,
+                 progress_hz: float = DEFAULT_PROGRESS_HZ):
         if startpoint_anchor not in STARTPOINT_ANCHORS:
             raise ValueError(
                 f"startpoint_anchor must be one of {STARTPOINT_ANCHORS}, "
@@ -262,6 +324,11 @@ class PrintController:
         # before START) parks under the nozzle bar -- see STARTPOINT_ANCHORS
         # above and _set_page_origin below.
         self.startpoint_anchor = startpoint_anchor
+        # How often --progress-json emits its `coverage` event, in Hz. See
+        # _COVERAGE_EVENT_INTERVAL_S for why this is throttled at all. <= 0
+        # means "every sample", which is what this used to do unconditionally
+        # -- kept reachable so a test can pin the un-throttled behaviour.
+        self.progress_hz = progress_hz
         # True once a STARTPOINT button press between passes has re-zeroed
         # page_calibration.origin (see _set_page_origin). Read by
         # _print_freehand_pass, which then does NOT re-zero the simple frame
@@ -795,8 +862,11 @@ class PrintController:
 
         ``self.progress_json``, if set, switches stdout from the plain-text
         status lines below to NDJSON progress events -- one ``coverage_start``
-        up front, one ``coverage`` per sample (current ``u``/``v``/``row``/
-        ``col`` plus any cells that just finished dosing), and it suppresses
+        up front, then ``coverage`` events at ``self.progress_hz`` (current
+        ``u``/``v``/``row``/``col`` plus every cell inked since the previous
+        event -- throttled, NOT one per sample, see
+        ``_COVERAGE_EVENT_INTERVAL_S``; a final flush in the ``finally`` block
+        carries the tail so no cell is ever dropped), and it suppresses
         the plain-text lines this would otherwise interleave with (mirrors
         ``diagnostics.monitor_position``'s ``ndjson`` switch). This is what
         the web UI's live coverage canvas consumes (see ``ui/server.py``).
@@ -1007,7 +1077,19 @@ class PrintController:
         # accumulator in the loop below).
         drop_debt = 0.0
         prev_send_u = prev_send_v = None
-        prev_printed = coverage.fired.copy() if pj else None
+        # --progress-json emission state. `pending_cells` accumulates what
+        # CoverageEngine.drain_new_cells() hands over between emissions, so
+        # throttling changes the SIZE of a batch, never its contents -- the
+        # exactly-once contract on the union of `new_cells` across a pass
+        # (tests/test_freehand_pass.py) survives any rate, including the
+        # final flush in the finally block below.
+        cov_interval = (1.0 / self.progress_hz) if self.progress_hz > 0 else 0.0
+        pending_cells: List[Tuple[int, int]] = []
+        last_cov_t = None
+        # Last sample's view, so the final flush can emit a well-formed event
+        # for the tail of the pass. None until the first sample: a pass that
+        # never got a pose has nothing to flush.
+        last_cov_view = None
         done_reason = None
         speed_warn_state = False   # current value of the speed-warning flag
         last_verbose_t = None      # throttle for --verbose's live status line
@@ -1228,8 +1310,8 @@ class PrintController:
                         # summary and the rendered COVERED panel report --
                         # a live number that later disagreed with the final
                         # one would be worse than no live number at all.
-                        covered = int((coverage.ink & coverage.fired).sum())
-                        total = int(coverage.ink.sum())
+                        covered = coverage.ink_fired
+                        total = coverage.ink_total
                         line = (f"x={pos[0]:9.2f}  y={pos[1]:9.2f}  z={pos[2]:9.2f} mm  |  "
                                f"page u={u_mm:8.2f}  v={v_mm:8.2f} mm  "
                                f"row={v_row:4d} col={v_col:5d}  |  "
@@ -1253,56 +1335,31 @@ class PrintController:
                                   f"[0, {req_u:.1f}] mm, v within "
                                   f"+/-{req_v:.1f} mm of the calibration origin)")
 
-                    new_cells = []
                     if pj:
-                        # NOT gated on `changed`: a nozzle's dose completing
-                        # updates its mask entry on this tick, but its bit
-                        # in `pattern` only flips off on the *next* tick (once
-                        # wanted becomes False for that pixel) -- so `changed`
-                        # lags a fresh completion by one sample and would miss
-                        # it here if the pass ends (coverage.done) before that
-                        # next tick ever happens.
-                        #
-                        # Diffed against `fired`, not `printed`: the UI canvas
-                        # draws what is on the paper, and must agree with the
-                        # COVERED panel and the pass-end count rather than
-                        # showing gaps that only exist in the dose bookkeeping
-                        # (see CoverageEngine.fired).
-                        new_mask = coverage.fired & ~prev_printed
-                        if new_mask.any():
-                            rows, cols = np.nonzero(new_mask)
-                            new_cells = list(zip(rows.tolist(), cols.tolist()))
-                            prev_printed = coverage.fired.copy()
-
-                    if pj:
-                        col = int(round(u_mm / t.mm_per_column)) if t.mm_per_column else 0
-                        row = int(round(v_mm / NOZZLE_PITCH_MM))
-                        # Carries the same quantities --verbose prints (raw
-                        # x/y/z, page u/v, row/col, yaw/roll/pitch, covered/
-                        # total) so a consumer can show a live readout that
-                        # stays complete DURING a pass. --verbose itself is
-                        # useless for that: it ends every line with `\r`
-                        # instead of `\n` so it can overwrite itself in the
-                        # terminal, which means a line-oriented reader never
-                        # sees a line until the pass ends. Added as extra keys
-                        # on the existing event rather than a new event type,
-                        # so a consumer that ignores them is unaffected.
-                        print(json.dumps({"event": "coverage", "u": round(u_mm, 3),
-                                          "v": round(v_mm, 3), "row": row, "col": col,
-                                          "x": round(float(pos[0]), 3),
-                                          "y": round(float(pos[1]), 3),
-                                          "z": round(float(pos[2]), 3),
-                                          "yaw_deg": round(math.degrees(yaw_rad), 3),
-                                          "roll_deg": round(
-                                              math.degrees(mapper.last_roll_rad), 3),
-                                          "pitch_deg": round(
-                                              math.degrees(mapper.last_pitch_rad), 3),
-                                          "covered": int((coverage.ink
-                                                          & coverage.fired).sum()),
-                                          "total": int(coverage.ink.sum()),
-                                          "speed_mm_s": (round(speed, 2)
-                                                         if speed is not None else None),
-                                          "new_cells": new_cells}), flush=True)
+                        # Drain unconditionally, emit on the throttle. The
+                        # drain must happen EVERY sample: the engine's buffer
+                        # is handed out exactly once, so skipping a drain
+                        # would not "save it for later", it would just let
+                        # the next drain return the same cells in one bigger
+                        # batch -- which is fine, but draining here keeps the
+                        # engine's buffer bounded by one emission interval
+                        # rather than by the whole pass.
+                        pending_cells.extend(coverage.drain_new_cells())
+                        last_cov_view = (u_mm, v_mm, pos, yaw_rad,
+                                         mapper.last_roll_rad,
+                                         mapper.last_pitch_rad, speed)
+                        # First sample always emits, so a consumer sees the
+                        # pass start immediately instead of waiting out one
+                        # interval -- same shape of guard as --verbose above.
+                        if last_cov_t is None or now - last_cov_t >= cov_interval:
+                            last_cov_t = now
+                            print(json.dumps(_coverage_event(
+                                u_mm, v_mm, pos, yaw_rad,
+                                mapper.last_roll_rad, mapper.last_pitch_rad,
+                                t.mm_per_column, speed,
+                                coverage.ink_fired, coverage.ink_total,
+                                pending_cells)), flush=True)
+                            pending_cells = []
 
                 if coverage.done:
                     done_reason = "complete"
@@ -1376,10 +1433,30 @@ class PrintController:
             # per column (see CoverageEngine.fired). full_dose is reported
             # alongside it whenever the two differ, since that gap is the
             # actionable "slow down" signal rather than a coverage hole.
-            covered = int((coverage.ink & coverage.fired).sum())
-            full_dose = int((coverage.ink & coverage.printed).sum())
-            total = int(coverage.ink.sum())
+            covered = coverage.ink_fired
+            full_dose = coverage.ink_printed
+            total = coverage.ink_total
             if pj:
+                # MANDATORY final flush. Cells inked after the last throttled
+                # emission would otherwise never be reported, breaking the
+                # exactly-once contract on the union of `new_cells` across a
+                # pass -- and it is the TAIL of the pass that goes missing,
+                # which is exactly where an operator looks when a print ends
+                # short. Emitted as a `coverage` event, deliberately NOT
+                # folded into coverage_done: consumers select on
+                # `event == "coverage"` to collect cells.
+                #
+                # In `finally` so it also covers the STARTPOINT-stop and
+                # SIGINT paths (the web UI's stop button sends SIGINT), which
+                # is where an unflushed tail would be most visible.
+                pending_cells.extend(coverage.drain_new_cells())
+                if pending_cells and last_cov_view is not None:
+                    lu, lv, lpos, lyaw, lroll, lpitch, lspeed = last_cov_view
+                    print(json.dumps(_coverage_event(
+                        lu, lv, lpos, lyaw, lroll, lpitch,
+                        t.mm_per_column, lspeed, covered, total,
+                        pending_cells)), flush=True)
+                    pending_cells = []
                 print(json.dumps({"event": "coverage_done", "reason": done_reason,
                                   "covered": covered, "total": total,
                                   "full_dose": full_dose,

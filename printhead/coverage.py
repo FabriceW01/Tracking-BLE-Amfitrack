@@ -271,6 +271,40 @@ class CoverageEngine:
         self._pixel_drops: "dict[Tuple[int, int], float]" = {}
         self._last_pattern: Optional[bytes] = None
 
+        # ------------------------------------------------ incremental tallies
+        # Everything below replaces a full-image numpy pass that used to run
+        # once per poll SAMPLE. That was not a micro-optimisation: measured on
+        # the README's own page-mode example (2299x1152 = 2.65M pixels), the
+        # per-sample cost was `done` 1279us + `(ink & fired).sum()` 1536us +
+        # `ink.sum()` 977us, against a 2000us budget at --poll-hz 500. The
+        # freehand loop's achieved rate collapsed to ~71 Hz under
+        # --progress-json (measured; ~208 Hz without it), and since the ink
+        # model's column-skipping edge is `mm_per_column * poll_hz`, that is a
+        # ~6.2 mm/s speed limit on the print itself -- well under the measured
+        # 17.3 mm/s median hand speed. These counters remove all of it.
+        #
+        # They can be exact rather than approximate because each mask has
+        # exactly ONE writer: `printed` only in `_deposit`, `fired` only in
+        # `step()`. Both increment right where the bit flips, guarded on the
+        # bit having been 0 before.
+        self._ink_total = int(ink.sum())
+        # Ink pixels whose dose has completed -- what `done` used to scan the
+        # whole image for.
+        self._ink_printed = 0
+        # Ink pixels that have physically received ink -- what the caller used
+        # to get from `(ink & fired).sum()`.
+        self._ink_fired = 0
+        # Cells whose `fired` bit flipped since the caller last drained this
+        # (see `drain_new_cells`). Replaces the caller diffing `fired` against
+        # its own copy of the previous mask, which cost a further ~723us per
+        # sample and needed a full-image copy to hold the baseline.
+        #
+        # NOT filtered by `ink`: the diff it replaces ran on `fired` alone, so
+        # it also reported cells fired over non-ink pixels, and
+        # tests/test_freehand_pass.py reconstructs the printed mask from this
+        # stream. Only the COUNTERS above are ink-filtered.
+        self._new_cells: "List[Tuple[int, int]]" = []
+
         # Whether the most recent step() had ANY nozzle in bounds of the
         # target image. A fully out-of-page pass (cart never over the page
         # at all) and a fully-covered pass both end up with an all-zero
@@ -290,9 +324,45 @@ class CoverageEngine:
         return self.ink.shape[1]
 
     @property
+    def ink_total(self) -> int:
+        """How many pixels the target asks for. Constant for this engine."""
+        return self._ink_total
+
+    @property
+    def ink_fired(self) -> int:
+        """Ink pixels that have physically received ink (``ink & fired``)."""
+        return self._ink_fired
+
+    @property
+    def ink_printed(self) -> int:
+        """Ink pixels whose dose has completed (``ink & printed``)."""
+        return self._ink_printed
+
+    def drain_new_cells(self) -> "List[Tuple[int, int]]":
+        """
+        Take the ``(row, col)`` cells whose ``fired`` bit flipped since the
+        last call, and clear the buffer.
+
+        Drain semantics, not peek: each flipped cell is handed out EXACTLY
+        ONCE over the engine's lifetime, which is the contract
+        ``--progress-json``'s ``new_cells`` stream is built on (see
+        ``tests/test_freehand_pass.py``'s exactly-once/no-duplicates test).
+        That holds however often -- or seldom -- a caller drains, so a caller
+        may batch several samples into one update without losing a cell.
+        """
+        cells = self._new_cells
+        self._new_cells = []
+        return cells
+
+    @property
     def done(self) -> bool:
         """True once every wanted ink pixel has been printed."""
-        return bool(np.all(self.printed[self.ink]))
+        # Counter, not `np.all(self.printed[self.ink])`. This is read once per
+        # poll sample by controller._print_freehand_pass, and that scan cost a
+        # measured 1279us per call on a 2299x1152 target -- 64% of the whole
+        # 2000us budget at --poll-hz 500, spent re-deriving a number
+        # `_deposit` already knows exactly. See __init__'s tallies.
+        return self._ink_printed >= self._ink_total
 
     def _build_spray_kernel(self) -> "List[Tuple[int, int, float]]":
         """
@@ -389,6 +459,17 @@ class CoverageEngine:
         only ever finishes a pixel that was already asked for."""
         h, w = self.ink.shape
         self.dose[row, col] = 1.0
+        # Tally before the store, while the previous value is still readable.
+        # Gated on BOTH conditions for reasons that are easy to get wrong:
+        #   - `not printed` because a double-count would make `done` fire
+        #     early and end the pass with ink still owed;
+        #   - `ink` because under --nozzle-group 2 the OR rule deposits on
+        #     every in-bounds member of a firing group, including members
+        #     sitting on pixels the target never asked for. `_ink_total`
+        #     counts only ink, so counting those would let `_ink_printed`
+        #     overshoot it.
+        if self.ink[row, col] and not self.printed[row, col]:
+            self._ink_printed += 1
         self.printed[row, col] = True
         if not self._spray_kernel:
             return
@@ -399,6 +480,10 @@ class CoverageEngine:
                 acc = self.dose[r, c] + weight
                 if acc >= 1.0:
                     self.dose[r, c] = 1.0
+                    # Already guarded on `ink` and `not printed` by the `if`
+                    # above -- spray only ever finishes a pixel that was
+                    # asked for and is not finished yet.
+                    self._ink_printed += 1
                     self.printed[r, c] = True
                 else:
                     self.dose[r, c] = acc
@@ -625,8 +710,20 @@ class CoverageEngine:
             # member on completion: they all really did fire.
             for p, row, col, in_bounds in members:
                 active[p] = True
-                if in_bounds and drops > 0:
+                if in_bounds and drops > 0 and not self.fired[row, col]:
                     self.fired[row, col] = True
+                    # Every flip is recorded once, here, at the only place
+                    # `fired` is ever written -- see drain_new_cells(). The
+                    # caller used to recover the same set by diffing `fired`
+                    # against a full-image copy of its previous state, at a
+                    # measured ~723us per sample on a 2299x1152 target.
+                    #
+                    # Deliberately NOT filtered by `ink`: the diff it replaces
+                    # ran on `fired` alone and so also reported cells fired
+                    # over non-ink pixels. Only the tally below is ink-gated.
+                    self._new_cells.append((row, col))
+                    if self.ink[row, col]:
+                        self._ink_fired += 1
 
             # Step 5: two thresholds on the one ledger, for two different
             # questions. They are deliberately not the same number.
