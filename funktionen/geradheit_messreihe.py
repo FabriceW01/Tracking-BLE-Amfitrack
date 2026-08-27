@@ -767,11 +767,15 @@ def main(argv=None):
             print(f"[geradheit] {pfad}: keine verwertbaren Punkte gefunden.")
             continue
         if quelle == "profile-csv":
-            print(f"[geradheit] {pfad}: Profil-CSV erkannt -- u_mm/v_mm sind "
-                  f"SEITENEBENEN-Koordinaten (Kalibrierung, Düsenversatz und "
-                  f"Gierwinkel sind eingerechnet) und werden nur bei "
-                  f"Musterwechseln geschrieben. Für die reine Sensor-Präzision "
-                  f"besser mit --pos --pos-json aufzeichnen.")
+            print(f"[geradheit] {pfad}: Profil-CSV erkannt -- ausgewertet "
+                  f"werden u_mm/v_mm, und das sind SEITENEBENEN-Koordinaten "
+                  f"(Kalibrierung, Düsenversatz und Gierwinkel sind "
+                  f"eingerechnet). Die rohen Sensorwerte stehen inzwischen "
+                  f"als x/y/z in derselben Datei, dieses Werkzeug liest sie "
+                  f"aber nicht. Und: geschrieben wird nur, wenn tatsächlich "
+                  f"Spalten rausgehen -- die Datei ist also KEINE "
+                  f"gleichmäßige Zeitreihe und für Rauschmessung weiterhin "
+                  f"kein Ersatz für --pos --pos-json.")
         messreihen.append((pfad, xs, ys))
 
     if not messreihen:

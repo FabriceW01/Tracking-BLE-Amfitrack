@@ -29,7 +29,7 @@ Diese Trennung ist bei fast jedem Test die halbe Diagnose und kostet nichts.
 
 ### 2. Jeder Druck mit `--profile --profile-csv`
 
-Protokolliert `t_s, row, col, u_mm, v_mm, speed_mm_s, cols_per_s, qx..qw`.
+Protokolliert `t_s, row, col, u_mm, v_mm, speed_mm_s, cols_per_s, x, y, z, qx..qw` — `x/y/z` ist die rohe Sensorposition, `u_mm/v_mm` die Seitenebene.
 Kostet nichts, ist für Test 7 zwingend und beantwortet nachträglich bei jedem
 Test die Frage „wie schnell war ich an dieser Stelle eigentlich".
 
@@ -286,11 +286,15 @@ erneut messen. Wandert die Kurve mit, war es der Balken; bleibt sie liegen, der
 Tracker. Das ist die entscheidende Gegenprobe — ohne sie ist nicht entschieden,
 welches von beiden es war.
 
-> ⚠️ **Nicht die Profil-CSV benutzen.** Deren `u_mm`/`v_mm` sind
-> Seitenebenen-Koordinaten: Kalibrierung, Sensor-zu-Düsenleisten-Versatz und
-> Gierwinkel-Drehung sind bereits eingerechnet, und geschrieben wird nur bei
-> Musterwechseln. Für die reine Sensor-Präzision `--pos --pos-json` nehmen. Das
-> Werkzeug liest eine Profil-CSV zwar, warnt dann aber ausdrücklich.
+> ⚠️ **Trotzdem nicht die Profil-CSV benutzen.** Sie enthält seit Kurzem zwar
+> die rohen Sensorwerte als `x`/`y`/`z` — die Auswertewerkzeuge lesen aber
+> `u_mm`/`v_mm`, und das sind Seitenebenen-Koordinaten mit eingerechneter
+> Kalibrierung, Düsenversatz und Gierwinkel-Drehung.
+>
+> Der entscheidende Grund bleibt aber ein anderer: geschrieben wird **nur, wenn
+> tatsächlich Spalten rausgehen**. Die Profil-CSV ist damit keine gleichmäßige
+> Zeitreihe, und genau die braucht eine Rauschmessung. Dafür `--pos --pos-json`
+> nehmen. Das Werkzeug liest eine Profil-CSV zwar, warnt dann aber ausdrücklich.
 
 ---
 

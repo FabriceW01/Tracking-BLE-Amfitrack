@@ -23,7 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from printhead import cli                                             # noqa: E402
 from printhead.calibration import PageCalibration                     # noqa: E402
 from printhead.config import BleSettings, RenderSettings, TrackingSettings  # noqa: E402
-from printhead.controller import (                                    # noqa: E402
+from printhead.controller import (
+    DEFAULT_PROGRESS_HZ,                                    # noqa: E402
     DEFAULT_SPEED_WARNING_MM_S,
     PrintController,
     _NullPrinthead,
@@ -89,7 +90,8 @@ def _identity_calibration():
 def _controller(ink, drops_per_pixel=2, poll_hz=500.0, timeout_s=2.0,
                 profile=False, profile_csv=None, record=None, progress_json=False,
                 speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S, verbose=False,
-                latency_compensate_s=0.0, startpoint_anchor="center"):
+                latency_compensate_s=0.0, startpoint_anchor="center",
+                progress_hz=DEFAULT_PROGRESS_HZ):
     render = RenderSettings(text="freehand test")
     ble = BleSettings(verbose=verbose)
     trk = TrackingSettings(mode="page", mm_per_column=1.0, smooth_ms=0.0,
@@ -116,7 +118,8 @@ def _controller(ink, drops_per_pixel=2, poll_hz=500.0, timeout_s=2.0,
                            sensor_offset_row_mm=NOZZLE_BAR_SPAN_MM / 2.0,
                            sensor_offset_col_mm=0.0,
                            latency_compensate_s=latency_compensate_s,
-                           startpoint_anchor=startpoint_anchor)
+                           startpoint_anchor=startpoint_anchor,
+                           progress_hz=progress_hz)
 
 
 def _sweep_positions(n_cols, samples_per_col=12):
@@ -540,6 +543,91 @@ def test_progress_json_reports_newly_covered_cells():
     assert len(set(map(tuple, all_new_cells))) == 150   # no duplicates
 
 
+def _pj_events(ctrl, tracker):
+    out = io.StringIO()
+    with redirect_stdout(out):
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+    return _ndjson_events(out.getvalue())
+
+
+def test_progress_events_are_throttled_but_never_drop_a_cell():
+    # The whole point of the throttle: it changes the SIZE of a batch, not
+    # its contents. Emitting one event per poll sample cost enough
+    # per-sample work to drag the freehand loop from a nominal 500 Hz down
+    # to a measured ~71 Hz on a 200x100 mm target -- and since the
+    # column-skipping edge is mm_per_column * poll_hz, that was a ~6 mm/s
+    # speed limit on the print itself.
+    ink = np.ones((30, 5), dtype=bool)
+    positionen = _sweep_positions(n_cols=5, samples_per_col=12)
+
+    schnell = _pj_events(_controller(ink, timeout_s=5.0, progress_json=True,
+                                     progress_hz=0.0),
+                         ScriptedTracker(positionen))
+    langsam = _pj_events(_controller(ink, timeout_s=5.0, progress_json=True,
+                                     progress_hz=1.0),
+                         ScriptedTracker(positionen))
+
+    def zellen(events):
+        return [tuple(c) for e in events
+                if e.get("event") == "coverage" for c in e["new_cells"]]
+
+    n_schnell = len([e for e in schnell if e.get("event") == "coverage"])
+    n_langsam = len([e for e in langsam if e.get("event") == "coverage"])
+    assert n_langsam < n_schnell, (n_langsam, n_schnell)
+
+    # ...and the union is identical and still exactly-once either way.
+    for label, events in (("unthrottled", schnell), ("throttled", langsam)):
+        c = zellen(events)
+        assert len(c) == 150, (label, len(c))
+        assert len(set(c)) == 150, f"{label}: duplicates"
+
+
+def test_progress_json_flushes_the_tail_of_the_pass():
+    # A pass ends between two throttle ticks, so the cells inked since the
+    # last event have not gone out yet. Without a final flush they never
+    # would -- and it is the END of the pass that goes missing, exactly
+    # where an operator looks when a print stops short.
+    #
+    # The rate is low enough that the pass (60 samples at 500 Hz, ~0.12 s)
+    # ends well inside the first interval, so EVERYTHING after the mandatory
+    # first event depends on the flush.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, progress_json=True, progress_hz=0.5)
+    events = _pj_events(ctrl, ScriptedTracker(_sweep_positions(5, 12)))
+
+    proben = [e for e in events if e.get("event") == "coverage"]
+    assert len(proben) >= 2, "expected the immediate first event plus a flush"
+    assert proben[-1]["new_cells"], "the flush carried no cells"
+    zellen = [tuple(c) for e in proben for c in e["new_cells"]]
+    assert len(zellen) == 150 and len(set(zellen)) == 150, len(zellen)
+    # The flush must be a `coverage` event, not folded into coverage_done:
+    # consumers select on event == "coverage" to collect cells.
+    assert events[-1]["event"] == "coverage_done"
+    assert "new_cells" not in events[-1]
+
+
+def test_first_progress_event_does_not_wait_for_the_throttle():
+    # At 0.5 Hz a consumer would otherwise sit blind for two seconds after
+    # pressing START. The first sample always emits.
+    ink = np.ones((30, 5), dtype=bool)
+    ctrl = _controller(ink, timeout_s=5.0, progress_json=True, progress_hz=0.5)
+    events = _pj_events(ctrl, ScriptedTracker(_sweep_positions(5, 12)))
+
+    assert events[0]["event"] == "coverage_start"
+    assert events[1]["event"] == "coverage", events[1]
+
+
+def test_cli_progress_hz_defaults_to_none_and_parses():
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "page",
+                           "--page-frame", "simple"])
+    assert args.progress_hz is None        # unset -> the controller's default
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "page",
+                           "--page-frame", "simple", "--progress-hz", "5"])
+    assert args.progress_hz == 5.0
+    ctrl = cli.build_controller(args)
+    assert ctrl.progress_hz == 5.0
+
+
 def test_progress_json_suppresses_plain_text_output():
     ink = np.ones((30, 5), dtype=bool)
     ctrl = _controller(ink, timeout_s=5.0, progress_json=True)
@@ -599,7 +687,7 @@ def test_freehand_pass_with_profile_csv_writes_the_page_schema():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
 
 
 def test_freehand_pass_with_profile_csv_logs_orientation_when_the_tracker_has_it():
@@ -623,12 +711,48 @@ def test_freehand_pass_with_profile_csv_logs_orientation_when_the_tracker_has_it
 
         with open(csv_path) as fh:
             lines = fh.read().strip().splitlines()
-        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
         data_rows = lines[1:]
         assert data_rows, "expected at least one profiled sample"
         quat_rows = [row.split(",")[-4:] for row in data_rows]
         assert any(fields == ["0.0000", "0.0000", "0.0000", "1.0000"]
                   for fields in quat_rows), quat_rows
+
+
+def test_freehand_pass_with_profile_csv_logs_the_raw_sensor_position():
+    # End-to-end, and the point of the whole feature: the positions the
+    # TRACKER reported must reach the CSV, not just the page-plane projection
+    # of them. Proves the controller actually passes `pos` through -- a
+    # profiler-level test only proves the profiler could write it if asked.
+    #
+    # The scripted positions are known exactly, so the x column can be
+    # checked against them by value rather than just for non-emptiness.
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "profile.csv")
+        ctrl = _controller(ink, timeout_s=5.0, profile=True, profile_csv=csv_path)
+        positions = _sweep_positions(n_cols=5, samples_per_col=12)
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(),
+                                              ScriptedTracker(positions)))
+
+        with open(csv_path) as fh:
+            lines = fh.read().strip().splitlines()
+        kopf = lines[0].split(",")
+        zeilen = [z.split(",") for z in lines[1:]]
+        assert zeilen, "expected at least one profiled sample"
+        ix = kopf.index("x")
+
+        # Never blank on a real pass: `pos` is guaranteed bound at the call
+        # site, so an empty column here means the controller stopped handing
+        # it over.
+        assert all(z[ix] and z[ix + 1] and z[ix + 2] for z in zeilen), zeilen[:3]
+
+        # Every logged x must be one of the scripted x values.
+        erwartet = {f"{p[0]:.3f}" for p in positions}
+        assert {z[ix] for z in zeilen} <= erwartet, (
+            {z[ix] for z in zeilen} - erwartet)
+        # ...and the sweep really moved, so this is not one repeated value.
+        assert len({z[ix] for z in zeilen}) > 1, zeilen[:3]
 
 
 def test_freehand_pass_with_profile_csv_blank_orientation_without_a_quat_tracker():
@@ -974,7 +1098,7 @@ def test_freehand_pass_interrupted_still_closes_profiler_csv_and_attempts_record
         assert os.path.exists(csv_path), "profiler CSV must still be closed/flushed"
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
 
         assert os.path.exists(png_path), "coverage PNG must still be attempted"
 

@@ -60,7 +60,7 @@ def test_csv_log_written(tmp_path=None):
             lines = fh.read().strip().splitlines()
         # Line mode has no orientation input -- pins the header unchanged and,
         # explicitly, that the page-mode-only quaternion columns did not leak in.
-        assert lines[0] == "t_s,column,advance_mm,write_latency_ms,speed_mm_s"
+        assert lines[0] == "t_s,column,advance_mm,write_latency_ms,speed_mm_s,x,y,z"
         assert "qx" not in lines[0] and "qw" not in lines[0]
         assert len(lines) == 1 + 5           # header + 5 rows
     finally:
@@ -143,7 +143,7 @@ def test_page_mode_csv_log_written():
         with open(path) as fh:
             lines = fh.read().strip().splitlines()
         assert lines[0] == \
-            "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+            "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
         assert len(lines) == 1 + 5
     finally:
         if os.path.exists(path):
@@ -162,7 +162,7 @@ def test_page_mode_csv_header_has_quat_columns_even_without_samples():
         with open(path) as fh:
             lines = fh.read().strip().splitlines()
         assert lines[0] == \
-            "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+            "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
     finally:
         if os.path.exists(path):
             os.remove(path)
@@ -204,6 +204,89 @@ def test_page_mode_csv_blank_quaternion_when_absent():
         # Splitting on ',' with trailing empty fields keeps them visible.
         row = lines[1].split(",")
         assert row[-4:] == ["", "", "", ""], row
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_page_mode_csv_logs_the_raw_sensor_position():
+    # The raw tracker reading, logged NEXT TO the page-plane projection of
+    # it. Until these columns existed a pass recorded no absolute sensor
+    # position at all -- u_mm/v_mm have the calibration, the nozzle offset
+    # and the yaw correction folded in, so they cannot answer "what did the
+    # tracker actually say", and capturing that needed a separate --pos run
+    # that cannot be combined with a real print.
+    path = os.path.join(
+        os.environ.get("TMPDIR", "/tmp"), "printhead_page_profile_test_xyz.csv")
+    try:
+        prof = PassProfiler(1.0, live=False, csv_path=path, mode="page")
+        prof.start()
+        prof.record_page_sample(u_mm=1.0, v_mm=2.0, speed_mm_s=5.0,
+                                quat=np.array([0.0, 0.0, 0.0, 1.0]),
+                                pos=np.array([12.3456, -7.891, 0.0004]))
+        prof.finish()
+        with open(path) as fh:
+            lines = fh.read().strip().splitlines()
+        header = lines[0].split(",")
+        row = lines[1].split(",")
+
+        i = header.index("x")
+        assert header[i:i + 3] == ["x", "y", "z"], header
+        # .3f, matching diagnostics.monitor_position's round(..., 3) on the
+        # same quantity in --pos-json, so both recordings of one pass line up.
+        assert row[i:i + 3] == ["12.346", "-7.891", "0.000"], row
+        # x/y/z must sit BEFORE the quaternion: several tests (and any
+        # hand-written parser) read the orientation off the end of a row.
+        assert header[-4:] == ["qx", "qy", "qz", "qw"], header
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_page_mode_csv_blank_position_when_absent():
+    # Blank, not "0,0,0" -- unlike a zero quaternion, a zero POSITION is
+    # perfectly plausible (right at the transmitter origin), so zero-filling
+    # would read as real data instead of as missing data.
+    path = os.path.join(
+        os.environ.get("TMPDIR", "/tmp"), "printhead_page_profile_test_nopos.csv")
+    try:
+        prof = PassProfiler(1.0, live=False, csv_path=path, mode="page")
+        prof.start()
+        prof.record_page_sample(u_mm=1.0, v_mm=2.0, speed_mm_s=5.0)
+        prof.finish()
+        with open(path) as fh:
+            lines = fh.read().strip().splitlines()
+        header = lines[0].split(",")
+        row = lines[1].split(",")
+        i = header.index("x")
+        assert row[i:i + 3] == ["", "", ""], row
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def test_line_mode_csv_logs_the_raw_sensor_position_too():
+    # Line mode's CSV had NO absolute position at all -- advance_mm is a 1-D
+    # scalar along the travel axis -- so x/y/z is the bigger gain there. The
+    # quaternion stays page-mode-only.
+    path = os.path.join(
+        os.environ.get("TMPDIR", "/tmp"), "printhead_line_profile_test_xyz.csv")
+    try:
+        prof = PassProfiler(0.2, live=False, csv_path=path)
+        prof.start()
+        prof.record_write(0, 1.5, 0.002, 10.0,
+                          pos=np.array([12.3456, -7.891, 0.0004]))
+        prof.record_write(1, 1.7, 0.002, 10.0)          # no position given
+        out = io.StringIO()
+        with redirect_stdout(out):
+            prof.finish()
+        with open(path) as fh:
+            lines = fh.read().strip().splitlines()
+        assert lines[0] == ("t_s,column,advance_mm,write_latency_ms,"
+                            "speed_mm_s,x,y,z")
+        assert "qx" not in lines[0] and "qw" not in lines[0]
+        assert lines[1].split(",")[-3:] == ["12.346", "-7.891", "0.000"]
+        assert lines[2].split(",")[-3:] == ["", "", ""], lines[2]
     finally:
         if os.path.exists(path):
             os.remove(path)

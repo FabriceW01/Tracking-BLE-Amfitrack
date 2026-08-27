@@ -69,6 +69,15 @@
   .imgwrap img{max-width:100%;display:block;image-rendering:pixelated}
   .imgwrap.empty{background:#0e1116;color:var(--dim);font-size:12px;min-height:90px}
   #rec-wrap{max-height:340px;overflow:auto;align-items:flex-start}
+  #cov{max-width:100%;display:block;image-rendering:pixelated;background:#fff;
+       cursor:zoom-in}
+  /* Klick schaltet auf 1:1: die Seitenspalte ist ~380px breit, ein
+     2299 Spalten breites Ziel also 6-fach verkleinert -- einzelne
+     Spaltenstriche verschwinden dabei, Flaechen nicht. */
+  #cov-wrap.zoom{max-height:340px;overflow:auto;align-items:flex-start}
+  #cov-wrap.zoom #cov{max-width:none;cursor:zoom-out}
+  #cov-note{color:var(--dim);font-size:11px;margin-top:4px}
+  #cov-note.warn{color:#e0a33e}
 
   /* tests */
   .test{border:1px solid var(--line);border-radius:7px;padding:11px 12px;margin-bottom:9px;
@@ -298,6 +307,14 @@
     <h2>Druckvorschau</h2>
     <div class="body">
       <div class="imgwrap empty" id="pv-wrap">noch keine Vorschau</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Deckung (live)</h2>
+    <div class="body">
+      <div class="imgwrap empty" id="cov-wrap">noch kein Durchgang</div>
+      <div id="cov-note"></div>
     </div>
   </div>
 
@@ -532,6 +549,15 @@ function connect(){
   ws.onclose = () => {
     $("d-ws").className = "dot off";
     $("d-sensor").className = "dot off";
+    /* Es gibt keine Wiederholung verpasster Zellen: was waehrend der
+       Unterbrechung gedruckt wurde, fehlt im Canvas dauerhaft. Lieber
+       sichtbar als unbemerkt -- das Bild unten am Pass-Ende ist
+       massgeblich. */
+    if (covActive && !covStale){
+      covStale = true;
+      covNote("unvollständig — Verbindung war unterbrochen; "
+              + "maßgeblich ist das Bild unten nach dem Durchgang", true);
+    }
     setTimeout(connect, 1500);          // Server neu gestartet -> wieder rein
   };
   ws.onmessage = ev => {
@@ -543,10 +569,15 @@ function connect(){
     }
     else if (m.type === "position") setPos(m, "Sensor");
     else if (m.type === "coverage_event"){
-      if (m.event === "coverage") setPos(m, "Druck");
+      if (m.event === "coverage_start") covStart(m.width, m.height);
+      else if (m.event === "coverage"){
+        setPos(m, "Druck");
+        covCells(m.new_cells);
+      }
       else if (m.event === "coverage_done"){
         log("Durchgang beendet: " + m.reason + " — " +
             m.covered + "/" + m.total + " Pixel");
+        covActive = false;
         loadRecord();
       }
     }
@@ -563,6 +594,82 @@ function connect(){
     else if (m.type === "sensor_event" && m.event === "error")
       log("Sensor: " + (m.message || JSON.stringify(m)), "err");
   };
+}
+
+/* ------------------------------------------------- Live-Deckungsansicht
+   Zeichnet die Zellen, die der Controller unter --progress-json als
+   `new_cells` schickt. Die Daten flossen schon vorher bis hierher und
+   wurden nur weggeworfen -- es fehlte allein das Zeichnen.
+
+   Eine Canvas-Zelle = ein Pixel des Zielbilds, dieselbe Konvention wie
+   record.png. Bei --mm-per-column 0.087 gegen NOZZLE_PITCH_MM 0.0868 sind
+   die Zellen auf 0,2% quadratisch; bei einem abweichenden --mm-per-column
+   ist das Bild horizontal gestreckt -- record.png hat exakt dieselbe
+   Eigenschaft, es ist also dieselbe Vereinfachung, keine neue. */
+const COV_MAX_PX = 1600;      // Deckel fuer den Canvas-Speicher
+let covCtx = null, covScale = 1, covActive = false, covStale = false;
+let covQueue = [], covPending = false;
+
+function covNote(text, warn){
+  const el = $("cov-note");
+  el.textContent = text || "";
+  el.className = warn ? "warn" : "";
+}
+
+function covStart(width, height){
+  const wrap = $("cov-wrap");
+  covScale = Math.min(1, COV_MAX_PX / width, COV_MAX_PX / height);
+  let cv = $("cov");
+  if (!cv){
+    wrap.classList.remove("empty");
+    wrap.innerHTML = '<canvas id="cov"></canvas>';
+    cv = $("cov");
+    cv.addEventListener("click", () => wrap.classList.toggle("zoom"));
+  }
+  cv.width  = Math.max(1, Math.round(width  * covScale));
+  cv.height = Math.max(1, Math.round(height * covScale));
+  covCtx = cv.getContext("2d");
+  covCtx.fillStyle = "#fff";
+  covCtx.fillRect(0, 0, cv.width, cv.height);
+  covQueue = [];
+  covActive = true; covStale = false;
+  covNote("");
+
+  /* Zielbild blass darunter: save_preview() schreibt die Ink-Maske exakt
+     1:1, also dasselbe (H,W)-Raster, das coverage_start meldet. Nur
+     verwenden, wenn die Groesse wirklich passt -- die Vorschau kann fehlen
+     oder zu anderen Argumenten gehoeren. */
+  const bg = new Image();
+  bg.onload = () => {
+    if (!covCtx || bg.naturalWidth !== width || bg.naturalHeight !== height) return;
+    covCtx.save();
+    covCtx.globalAlpha = 0.18;
+    covCtx.drawImage(bg, 0, 0, cv.width, cv.height);
+    covCtx.restore();
+  };
+  bg.src = "/api/preview.png?t=" + Date.now();
+}
+
+function covDraw(){
+  covPending = false;
+  if (!covCtx) { covQueue = []; return; }
+  covCtx.fillStyle = "#1a1f27";
+  for (const batch of covQueue){
+    for (const cell of batch){
+      /* floor + immer 1 Geraetepixel: bei covScale<1 fallen Nachbarzellen
+         auf dasselbe Pixel, was ein idempotentes Nachfuellen ist --
+         verschwinden kann dadurch nichts. */
+      covCtx.fillRect(Math.floor(cell[1] * covScale),
+                      Math.floor(cell[0] * covScale), 1, 1);
+    }
+  }
+  covQueue = [];
+}
+
+function covCells(cells){
+  if (!covCtx || !cells || !cells.length) return;
+  covQueue.push(cells);
+  if (!covPending){ covPending = true; requestAnimationFrame(covDraw); }
 }
 
 function loadRecord(){

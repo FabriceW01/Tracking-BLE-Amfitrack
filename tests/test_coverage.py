@@ -466,6 +466,137 @@ def test_a_parked_nozzle_fires_exactly_its_dose_and_no_more():
             f"samples, expected {dose} -- ink volume per pixel is wrong")
 
 
+# ============================== incremental tallies vs the full-image truth
+def _tally_invariant(eng, mm_per_column, speed=17.3, poll_hz=500.0):
+    """Drive a sweep and check every counter against its O(N) definition
+    after EVERY step -- the definitions these counters replaced."""
+    gesammelt = []
+    dt = 1.0 / poll_hz
+    dpp = eng.drops_per_pixel
+    n = int(eng.width * mm_per_column / (speed * dt)) + 1
+    vorher = None
+    for i in range(n):
+        u = i * speed * dt
+        anteil = float(dpp) if vorher is None else dpp * (u - vorher) / mm_per_column
+        vorher = u
+        eng.step(u_mm=u, v_mm=0.0, t=i * dt, drops=anteil)
+        gesammelt += eng.drain_new_cells()
+
+        assert eng.ink_total == int(eng.ink.sum())
+        assert eng.ink_fired == int((eng.ink & eng.fired).sum()), i
+        assert eng.ink_printed == int((eng.ink & eng.printed).sum()), i
+        assert eng.done == bool(np.all(eng.printed[eng.ink])), i
+    return gesammelt
+
+
+def _checkerboard(h, w, feld=5):
+    a = np.zeros((h, w), dtype=bool)
+    for r in range(h):
+        for c in range(w):
+            a[r, c] = ((r // feld) + (c // feld)) % 2 == 0
+    return a
+
+
+def test_tallies_match_the_full_image_counts_they_replaced():
+    # These counters exist to keep a full-image numpy pass out of the poll
+    # loop: measured on a 2299x1152 target, `np.all(printed[ink])` alone cost
+    # 1279 us per sample against a 2000 us budget, and the loop's achieved
+    # rate had collapsed to ~71 Hz under --progress-json -- a ~6 mm/s speed
+    # limit on the print itself, since the column-skipping edge is
+    # mm_per_column * poll_hz.
+    #
+    # Checked after EVERY step rather than once at the end: a counter that
+    # drifts and then happens to converge would pass an end-only check.
+    mm = 0.087
+    for label, kwargs in (
+            ("plain", {}),
+            # spray: _deposit marks NEIGHBOURS printed without firing them,
+            # so ink_printed must move without ink_fired following.
+            ("spray", dict(spray_radius_mm=0.25, spray_strength=1.0)),
+            # nozzle_group=2: the OR rule fires and deposits on members whose
+            # own pixel has no ink, so `fired` is NOT a subset of `ink` and an
+            # unfiltered count would overshoot ink_total.
+            ("group2", dict(nozzle_group=2)),
+            ("spray+group2", dict(spray_radius_mm=0.25, spray_strength=1.0,
+                                  nozzle_group=2)),
+    ):
+        eng = CoverageEngine(_checkerboard(60, 200), mm_per_column=mm, **kwargs)
+        gesammelt = _tally_invariant(eng, mm)
+        assert eng.ink_fired > 0, label
+        # The drained stream must reconstruct `fired` exactly -- it is what
+        # --progress-json's new_cells is built from, and tests elsewhere
+        # rebuild the printed mask from it.
+        rekonstruiert = np.zeros_like(eng.ink, dtype=bool)
+        for r, c in gesammelt:
+            rekonstruiert[r, c] = True
+        assert np.array_equal(rekonstruiert, eng.fired), label
+        assert len(gesammelt) == len(set(gesammelt)), f"{label}: duplicates"
+
+
+def test_depositing_the_same_pixel_twice_counts_it_once():
+    # step()'s Step 5 already guards `_deposit` with `not printed`, so this
+    # path is unreachable through step() today -- which is exactly why it
+    # needs its own test: the guard inside _deposit is the one that keeps
+    # ink_printed honest if that caller-side check is ever relaxed, and a
+    # double count would make `done` fire with ink still owed.
+    eng = CoverageEngine(np.ones((10, 10), dtype=bool), mm_per_column=0.087)
+    eng._deposit(3, 4)
+    assert eng.ink_printed == 1
+    eng._deposit(3, 4)
+    assert eng.ink_printed == 1, "a re-deposit must not count twice"
+    assert eng.ink_printed == int((eng.ink & eng.printed).sum())
+
+
+def test_deposit_does_not_count_a_pixel_the_target_never_asked_for():
+    # Reachable for real: under nozzle_group=2 the OR rule deposits on every
+    # in-bounds member of a firing group, including one sitting on a non-ink
+    # pixel. ink_total counts only ink, so counting those would let
+    # ink_printed overshoot it and `done` never agree with the mask.
+    ink = np.zeros((10, 10), dtype=bool)
+    ink[3, 4] = True
+    eng = CoverageEngine(ink, mm_per_column=0.087)
+    eng._deposit(7, 7)                      # no ink asked for here
+    assert eng.ink_printed == 0
+    assert eng.ink_printed == int((eng.ink & eng.printed).sum())
+
+
+def test_drain_hands_every_cell_out_exactly_once():
+    # Drain, not peek: the exactly-once property must survive an IRREGULAR
+    # drain cadence, because the caller throttles its emissions and drains in
+    # batches of whatever accumulated since the last one.
+    eng = CoverageEngine(np.ones((40, 120), dtype=bool), mm_per_column=0.087)
+    gesammelt = []
+    vorher = None
+    for i in range(900):
+        u = i * 17.3 / 500.0
+        anteil = 1.0 if vorher is None else (u - vorher) / 0.087
+        vorher = u
+        eng.step(u_mm=u, v_mm=0.0, t=i / 500.0, drops=anteil)
+        if i % 7 == 0:                      # deliberately uneven
+            gesammelt += eng.drain_new_cells()
+    gesammelt += eng.drain_new_cells()      # final flush
+
+    assert len(gesammelt) == len(set(gesammelt)), "a cell was handed out twice"
+    assert len(gesammelt) == int(eng.fired.sum()), "a cell was never handed out"
+    assert eng.drain_new_cells() == [], "drained buffer must come back empty"
+
+
+def test_group_2_reports_non_ink_cells_but_does_not_count_them():
+    # The two rules pull in opposite directions on purpose, and this pins
+    # both: `new_cells` mirrors `fired` (unfiltered, so a consumer can
+    # reconstruct the mask), while ink_fired counts only ink (so it can never
+    # exceed ink_total). Under nozzle_group=2 the OR rule makes them differ.
+    ink = np.zeros((NUM_NOZZLES, 40), dtype=bool)
+    ink[::2, :] = True                      # every other row -> groups straddle
+    eng = CoverageEngine(ink, mm_per_column=0.087, nozzle_group=2)
+    gesammelt = _tally_invariant(eng, 0.087)
+
+    assert len(gesammelt) > eng.ink_fired, (
+        "group 2 must report cells it fired over non-ink pixels")
+    assert eng.ink_fired <= eng.ink_total
+    assert int(eng.fired.sum()) > int((eng.ink & eng.fired).sum())
+
+
 def test_a_dose_summed_from_fractions_completes_without_an_extra_sample():
     # The float-hygiene epsilon in step()'s Step 5, pinned as the ink it
     # saves. Ten samples of a tenth of a dose each is exactly one dose in

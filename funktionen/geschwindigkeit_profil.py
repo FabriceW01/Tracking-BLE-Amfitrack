@@ -29,9 +29,9 @@ Die ``--profile-csv`` aus dem Druckdurchgang:
         --profile --profile-csv geschw.csv --record geschw.png
 
 Beide CSV-Formate werden gelesen:
-  * Seiten-Modus: ``t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx..qw``
+  * Seiten-Modus: ``t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx..qw``
     -- Position ist ``u_mm``.
-  * Line-Modus: ``t_s,column,advance_mm,write_latency_ms,speed_mm_s``
+  * Line-Modus: ``t_s,column,advance_mm,write_latency_ms,speed_mm_s,x,y,z``
     -- Position ist ``advance_mm``.
 
 ⚠️ Im Seiten-Modus wird nur bei **Musterwechseln** geschrieben. Steht der

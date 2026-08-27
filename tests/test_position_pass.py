@@ -15,6 +15,7 @@ import io
 import os
 import re
 import sys
+import tempfile
 from contextlib import redirect_stdout
 
 import numpy as np
@@ -60,6 +61,44 @@ def _controller():
                            min_move_mm=0.01, smooth_ms=0.0,
                            poll_hz=1000.0, timeout_s=5.0)
     return PrintController(render, ble, trk), trk.mm_per_column
+
+
+def test_line_pass_profile_csv_carries_the_raw_sensor_position():
+    # Line mode's CSV had no absolute position at all -- advance_mm is a 1-D
+    # scalar along the travel axis -- so this is where x/y/z adds the most.
+    # End-to-end through _print_line_pass, so it also proves the controller
+    # hands `pos` over rather than just that the profiler could log it.
+    #
+    # advance_axis is "y" here, so the scripted values land in the y column
+    # and x/z stay 0.000 -- which is itself worth asserting: it shows the
+    # full 3-D vector is written, not the advance value smeared across three
+    # columns.
+    ctrl, mmpc = _controller()
+    ctrl.profile = True
+    with tempfile.TemporaryDirectory() as tmp:
+        pfad = os.path.join(tmp, "line.csv")
+        ctrl.profile_csv = pfad
+        werte = [c * mmpc for c in range(0, 12)]
+        tracker = ScriptedTracker([0.0] + werte + [ctrl.width * mmpc])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(ctrl._print_line_pass(_NullPrinthead(), tracker,
+                                              _ImmediateEvent()))
+        with open(pfad) as fh:
+            zeilen = fh.read().strip().splitlines()
+
+    kopf = zeilen[0].split(",")
+    assert kopf[-3:] == ["x", "y", "z"], kopf
+    assert "qx" not in kopf, "the quaternion stays page-mode only"
+    daten = [z.split(",") for z in zeilen[1:]]
+    assert daten, "expected at least one profiled write"
+    ix = kopf.index("x")
+
+    assert all(z[ix] and z[ix + 1] and z[ix + 2] for z in daten), daten[:3]
+    # Travel is on y, so x and z must be flat zero and y must actually move.
+    assert {z[ix] for z in daten} == {"0.000"}, {z[ix] for z in daten}
+    assert {z[ix + 2] for z in daten} == {"0.000"}
+    assert len({z[ix + 1] for z in daten}) > 1, daten[:3]
 
 
 def test_no_reprint_on_reverse():
@@ -205,6 +244,8 @@ def test_verbose_status_line_does_not_garble_the_final_message():
 
 
 if __name__ == "__main__":
+    test_line_pass_profile_csv_carries_the_raw_sensor_position()
+    print("OK: line-mode profile-csv raw position test passed.")
     test_no_reprint_on_reverse()
     print("OK: no-reprint-on-reverse test passed.")
     test_startpoint_reset_restarts_from_zero()

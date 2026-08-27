@@ -265,7 +265,7 @@ def test_pos_json_ueberspringt_kaputte_und_fremde_zeilen():
 
 def test_profile_csv_liest_u_und_v():
     pfad = _schreib(
-        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
+        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
         "0.1,0,0,1.000,2.000,10.00,50.0,0,0,0,1\n"
         "0.2,0,1,3.000,4.000,10.00,50.0,0,0,0,1\n", endung=".csv")
     try:
@@ -276,7 +276,7 @@ def test_profile_csv_liest_u_und_v():
 
 
 def test_profile_csv_weist_line_modus_mit_begruendung_ab():
-    pfad = _schreib("t_s,column,advance_mm,write_latency_ms,speed_mm_s\n"
+    pfad = _schreib("t_s,column,advance_mm,write_latency_ms,speed_mm_s,x,y,z\n"
                     "0.1,0,0.0,3.1,10.0\n", endung=".csv")
     try:
         G.lies_profile_csv(pfad)
@@ -290,7 +290,7 @@ def test_profile_csv_weist_line_modus_mit_begruendung_ab():
 
 def test_lies_messreihe_erkennt_die_quelle():
     j = _schreib('{"event":"position","x":1.0,"y":2.0}\n')
-    c = _schreib("t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
+    c = _schreib("t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
                  "0.1,0,0,1.0,2.0,10.0,50.0,0,0,0,1\n", endung=".csv")
     try:
         assert G.lies_messreihe(j)[2] == "pos-json"
@@ -360,7 +360,7 @@ def test_cli_laeuft_eigenstaendig_und_schreibt_das_png():
 
 
 def test_cli_warnt_bei_einer_profile_csv():
-    pfad = _schreib("t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
+    pfad = _schreib("t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
                     + "".join(f"0.{i},0,0,{i}.0,0.5,10.0,50.0,0,0,0,1\n"
                               for i in range(1, 20)), endung=".csv")
     try:

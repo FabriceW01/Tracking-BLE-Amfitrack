@@ -233,9 +233,9 @@ def _write_csv(text):
 
 def test_read_profile_csv_parses_page_mode_columns():
     path = _write_csv(
-        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
-        "0.1,0,0,0.000,0.000,10.00,50.0,0.0000,0.0000,0.0000,1.0000\n"
-        "0.2,1,1,1.000,0.100,10.00,50.0,0.0000,0.0000,0.0000,1.0000\n")
+        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
+        "0.1,0,0,0.000,0.000,10.00,50.0,5.000,6.000,7.000,0.0000,0.0000,0.0000,1.0000\n"
+        "0.2,1,1,1.000,0.100,10.00,50.0,6.000,6.100,7.000,0.0000,0.0000,0.0000,1.0000\n")
     try:
         data = S.read_profile_csv(path)
         assert np.allclose(data["u_mm"], [0.0, 1.0])
@@ -247,8 +247,8 @@ def test_read_profile_csv_parses_page_mode_columns():
 
 def test_read_profile_csv_turns_blank_quaternions_into_nan():
     path = _write_csv(
-        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n"
-        "0.1,0,0,0.000,0.000,10.00,50.0,,,,\n")
+        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
+        "0.1,0,0,0.000,0.000,10.00,50.0,5.000,6.000,7.000,,,,\n")
     try:
         data = S.read_profile_csv(path)
         assert math.isnan(data["qx"][0]) and math.isnan(data["qw"][0])
@@ -258,8 +258,8 @@ def test_read_profile_csv_turns_blank_quaternions_into_nan():
 
 def test_read_profile_csv_rejects_a_line_mode_file_with_a_real_diagnosis():
     path = _write_csv(
-        "t_s,column,advance_mm,write_latency_ms,speed_mm_s\n"
-        "0.1,0,0.000,3.100,10.00\n")
+        "t_s,column,advance_mm,write_latency_ms,speed_mm_s,x,y,z\n"
+        "0.1,0,0.000,3.100,10.00,5.000,6.000,7.000\n")
     try:
         S.read_profile_csv(path)
     except ValueError as exc:
@@ -271,16 +271,38 @@ def test_read_profile_csv_rejects_a_line_mode_file_with_a_real_diagnosis():
     raise AssertionError("expected a ValueError for a line-mode CSV")
 
 
+def test_read_profile_csv_exposes_the_raw_sensor_columns():
+    # The reader floats every column it finds, so the new raw-sensor columns
+    # have to arrive as usable arrays -- that is what makes a profile CSV
+    # answer "what did the tracker say" alongside "where did the ink go",
+    # instead of needing a separate --pos run.
+    path = _write_csv(
+        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
+        "0.1,0,0,0.000,0.000,10.00,50.0,5.000,6.000,7.000,0.0,0.0,0.0,1.0\n"
+        "0.2,1,1,1.000,0.100,10.00,50.0,6.000,6.100,7.000,0.0,0.0,0.0,1.0\n")
+    try:
+        data = S.read_profile_csv(path)
+        assert np.allclose(data["x"], [5.0, 6.0])
+        assert np.allclose(data["y"], [6.0, 6.1])
+        assert np.allclose(data["z"], [7.0, 7.0])
+        # ...without disturbing what was already there.
+        assert np.allclose(data["u_mm"], [0.0, 1.0])
+        assert np.allclose(data["qw"], [1.0, 1.0])
+    finally:
+        os.unlink(path)
+
+
 # ========================================================= analyze / report
 def _page_csv(u, v, quats=None):
-    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"]
+    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"]
     for i, (uu, vv) in enumerate(zip(u, v)):
         if quats is None:
             q = "0.0000,0.0000,0.0000,1.0000"
         else:
             qx, qy, qz, qw = quats[i]
             q = f"{qx:.4f},{qy:.4f},{qz:.4f},{qw:.4f}"
-        lines.append(f"{i * 0.01:.4f},0,0,{uu:.3f},{vv:.3f},10.00,50.0,{q}")
+        lines.append(f"{i * 0.01:.4f},0,0,{uu:.3f},{vv:.3f},10.00,50.0,"
+                     f"{uu:.3f},{vv:.3f},0.000,{q}")
     return _write_csv("\n".join(lines) + "\n")
 
 
@@ -393,9 +415,10 @@ def test_analyze_reports_rotation_and_its_lever_arm_cost():
 
 def test_analyze_says_so_when_the_csv_has_no_orientation():
     u = np.linspace(0, 150, 100)
-    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"]
+    lines = ["t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"]
     for i, uu in enumerate(u):
-        lines.append(f"{i * 0.01:.4f},0,0,{uu:.3f},0.000,10.00,50.0,,,,")
+        lines.append(f"{i * 0.01:.4f},0,0,{uu:.3f},0.000,10.00,50.0,"
+                     f"{uu:.3f},0.000,0.000,,,,")
     path = _write_csv("\n".join(lines) + "\n")
     try:
         res = S.analyze(S.read_profile_csv(path))
