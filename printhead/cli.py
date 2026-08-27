@@ -138,20 +138,17 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable tracking (forces time mode)")
     g.add_argument("--period", type=float, default=0.03,
                    help="Seconds per column in time mode (default 0.03)")
-    g.add_argument("--dose-hold-s", type=float, default=0.001,
-                   help="Page mode: seconds a nozzle must continuously hold a "
-                        "pixel before it counts as printed (default: "
-                        "coverage.DEFAULT_DOSE_HOLD_S = 0.00405, measured "
-                        "against a real print at ~17 mm/s median hand speed "
-                        "-- must track the firmware's PATTERN_STRIDE "
-                        "(src/ble_dose.h): DEFAULT_DOSE_HOLD_S ~= "
-                        "3 * PATTERN_STRIDE * 450us; changing one without "
-                        "the other and re-flashing breaks the ~3-drop-per-"
-                        "pixel target. MUST also stay below 1/--poll-hz "
-                        "(the poll interval): at or above it, two "
-                        "consecutive samples cannot complete a dose and "
-                        "coverage collapses -- PrintController warns at "
-                        "runtime if this holds)")
+    g.add_argument("--drops-per-pixel", type=int, default=None,
+                   help="Page mode: how many drops a pixel must receive "
+                        "before it counts as printed (default: "
+                        "coverage.DEFAULT_DROPS_PER_PIXEL = 3, inherited from "
+                        "line mode's long-validated BLE_DROPS_PER_COLUMN). "
+                        "The firmware fires each column it receives exactly "
+                        "once and never repeats, so ink is decided entirely "
+                        "here: this is the number of copies the client queues "
+                        "per column of travel. Replaces the old --dose-hold-s, "
+                        "which modelled a firmware repeat rate that no longer "
+                        "exists")
     g.add_argument("--spray-radius-mm", type=float, default=0.15,
                    help="Page mode ink-spread model: physical radius (mm) "
                         "around a completed pixel that also receives a "
@@ -651,8 +648,8 @@ def build_controller(args: argparse.Namespace) -> PrintController:
     ink, label = build_ink(args, tracking.mm_per_column)
     render = RenderSettings(text=label)
     kwargs = {}
-    if args.dose_hold_s is not None:
-        kwargs["dose_hold_s"] = args.dose_hold_s
+    if args.drops_per_pixel is not None:
+        kwargs["drops_per_pixel"] = args.drops_per_pixel
     if args.spray_radius_mm is not None:
         kwargs["spray_radius_mm"] = args.spray_radius_mm
     if args.spray_strength is not None:

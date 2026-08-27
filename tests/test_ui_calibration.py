@@ -195,7 +195,7 @@ def test_coverage_events_are_relayed_with_the_coverage_event_type():
             r = await hub.run_action([
                 "Hi", "--dry-run", "--simulate", "--mode", "page",
                 "--page-calibration", cal_path, "--progress-json",
-                "--timeout", "0.15", "--dose-hold-s", "0.02",
+                "--timeout", "0.15", "--drops-per-pixel", "2",
             ])
             assert r["ok"], r
 

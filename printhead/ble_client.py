@@ -243,16 +243,21 @@ class PrintheadBLE:
     # -------------------------------------------------- freehand page mode
     async def write_pattern(self, pattern: bytes) -> None:
         """
-        Send the current full 152-nozzle state: one 19-byte frame, no response.
+        Send freehand page-mode nozzle columns: one or more concatenated
+        19-byte frames, no response.
 
         Same wire operation as :meth:`write_column`, but kept as its own named
         method because the *meaning* is different: write_column/write_columns
-        carry one column of a sequential 1D scan, each value unique and never
-        repeated (a FIFO is the right model). This carries the freehand
-        coverage engine's current live nozzle state -- a snapshot that
-        :class:`~printhead.pattern_sender.PatternSender` sends "latest wins",
-        never queued, since an intermediate snapshot superseded before it went
-        out is worthless.
+        carry one column of a sequential 1D scan, driven by a monotonic
+        frontier. This carries the freehand coverage engine's output, whose
+        column sequence comes from wherever the operator's hand went.
+
+        The firmware fires each column it receives exactly once, so every
+        frame in the payload is one drop -- see
+        :class:`~printhead.pattern_sender.PatternSender`, which decides how
+        many go into a write from :attr:`batch_cols`. It used to be a
+        single-frame "latest wins" snapshot, back when the firmware held the
+        last pattern and re-fired it on its own.
         """
         await self._client.write_gatt_char(NOZZLE_UUID, pattern, response=False)
 

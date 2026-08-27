@@ -118,7 +118,7 @@ def read_profile_csv(path: str) -> Dict[str, np.ndarray]:
     Read a page-mode ``--profile-csv`` file into arrays.
 
     Expects the page-mode header written by ``PassProfiler.start()``:
-    ``t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw``.
+    ``t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw``.
 
     A LINE-mode CSV (``t_s,column,advance_mm,write_latency_ms,speed_mm_s``)
     is rejected with a clear message rather than half-parsed: it records a

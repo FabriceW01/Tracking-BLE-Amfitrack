@@ -388,12 +388,18 @@ kalibrieren (Boresight neu aufnehmen).
 
 Zwischen "Position gelesen" und "Tinte tatsächlich platziert" liegt eine
 messbare Pipeline-Verzögerung: das ausgehandelte BLE-Verbindungsintervall
-(auf echter Hardware gemessen: durchgängig 15,00 ms, `itvl=12`), die
-Firmware-Queue (6 Slots × 450 µs ≈ 2,7 ms) und der Feuer-Takt selbst
-(`PATTERN_STRIDE` × 450 µs ≈ 1,35 ms). Zusammen ergibt das grob **5 ms
-bestenfalls, ~13 ms typisch, ~21 ms im ungünstigsten Fall** — bei 20 mm/s
-sind das ca. 0,26 mm bzw. 3 Spalten systematischer Nachlauf, der bei einem
-Richtungswechsel das Vorzeichen wechselt.
+(auf echter Hardware gemessen: durchgängig 15,00 ms, `itvl=12`) und die
+Firmware-Warteschlange. Zusammen ergibt das grob **5 ms bestenfalls, ~13 ms
+typisch, ~21 ms im ungünstigsten Fall** — bei 20 mm/s sind das ca. 0,26 mm
+bzw. 3 Spalten systematischer Nachlauf, der bei einem Richtungswechsel das
+Vorzeichen wechselt.
+
+> Die Firmware-Anteile darin stammen noch aus dem alten Seiten-Modus
+> (6-Slot-Queue × 450 µs plus `PATTERN_STRIDE` × 450 µs Feuer-Takt). Der neue
+> Seiten-Modus fährt einen 128-Spalten-FIFO mit 300 µs Takt und feuert jede
+> Spalte genau einmal; die Größenordnung bleibt, die genaue Aufteilung ist
+> **nicht neu vermessen** — der Wert oben ist als Startpunkt zu lesen, nicht
+> als aktuelle Messung.
 
 `--latency-compensate-s SEKUNDEN` extrapoliert **nur** die an
 `CoverageEngine.step()` übergebene Position linear entlang der aktuell
@@ -691,83 +697,111 @@ python main.py --pattern checkerboard --mode page --page-calibration page_calibr
     --pattern-square-mm 10 --pattern-square-height-mm 10
 ```
 
-**Dosierung in `--mode page` (`--dose-hold-s`):** Ein Pixel gilt erst als
-gedruckt, wenn eine Düse ununterbrochen `--dose-hold-s` Sekunden darüber
-steht — Default `coverage.DEFAULT_DOSE_HOLD_S = 0.00405` s (4.05 ms), gemessen
-an einem echten 200×100 mm Schachbrett-Druck bei median 17.3 mm/s
-Handgeschwindigkeit. Bei diesem Wert bekommt ein Pixel ca. **3 Tropfen**
-(wie `BLE_DROPS_PER_COLUMN` im Zeilen-Modus), bevor es als fertig gilt. Der
-alte Default (0.05 s = 50 ms) verlangte unter 4 mm/s, um überhaupt ein Pixel
-zu markieren; gemessen wurden dabei nur 0.044 % Coverage über einen
-fertigen Druck, mit sichtbarem Geisterbild/Doppeldruck als Folge (jeder
-Revisit hat dieselben Pixel an leicht anderer Handposition erneut gefeuert,
-weil `printed` fast nirgends True wurde).
-
-⚠️ **Quantisierungs-Klippe (korrigiert):** Ein Pixel wird nur in dem
-Sample als fertig markiert, in dem die Verweildauer seit dem *ersten*
-Sample auf diesem Pixel `>= dose_hold_s` erreicht — Fertigstellung kostet
-also ganze Poll-Intervalle (`1 / --poll-hz`), keine stetige Zeit. Eine erste
-Korrekturrunde setzte `dose_hold_s = 0.0054` s (5.4 ms) bei
-`PATTERN_STRIDE = 4` — knapp **über** dem 5.00 ms Poll-Intervall von
-`--poll-hz 200`. Das erzwingt ein *drittes* Sample auf derselben Spalte,
-weil ein zweites Sample bei +5.00 ms die 5.4 ms noch nicht erreicht. Direkt
-gemessen (poll_hz=200, realistischer Handgeschwindigkeits-Durchlauf):
+**Dosierung in `--mode page` (`--drops-per-pixel`):** Ein Pixel gilt als
+gedruckt, sobald es `--drops-per-pixel` Tropfen bekommen hat — Default
+`coverage.DEFAULT_DROPS_PER_PIXEL = 3`, übernommen aus dem im Zeilen-Modus
+seit Langem bewährten `BLE_DROPS_PER_COLUMN`. Wie viele Kopien einer Spalte
+dafür rausgehen, entscheidet **allein der zurückgelegte Weg**:
 
 ```
-dose_hold  4.90 ms -> 100.0 % Coverage
-dose_hold  5.40 ms ->  31.0 %   <-- der zuvor ausgelieferte Wert
-dose_hold  7.00 ms ->  31.0 %
-dose_hold 10.00 ms ->   6.5 %
+Kopien für dieses Sample = --drops-per-pixel × gefahrener Weg / --mm-per-column
 ```
 
-Das Überschreiten des Poll-Intervalls degradiert die Coverage also nicht
-sanft, sondern lässt sie einbrechen. Zusätzlich zum 3-Tropfen-Ziel gilt
-deshalb: `dose_hold_s` **muss unter** dem Poll-Intervall (`1 / poll_hz`)
-bleiben, damit zwei aufeinanderfolgende Samples immer für eine
-Fertigstellung reichen. Der Default 4.05 ms liegt 19 % unter dem
-5.00 ms Poll-Intervall von `--poll-hz 200` (statt knapp darüber).
-`PrintController` warnt zur Laufzeit, falls `dose_hold_s >= 1 / poll_hz`
-doch wieder zutrifft.
+Der Bruchteil wird in einem Akkumulator über die Samples mitgeschleppt, damit
+nichts durch Abschneiden verlorengeht (bei 500 Hz und 17,3 mm/s ist ein Sample
+1,2 Tropfen wert — pro Sample abzuschneiden lieferte 1 statt 3 pro Spalte).
 
-⚠️ **`--poll-hz` ist jetzt standardmäßig 500, nicht mehr 200:** Das
-Poll-Intervall schrumpft dadurch von 5.00 ms auf **2.00 ms** — kürzer als
-das unveränderte `dose_hold_s`-Default (4.05 ms). Die obige
-Laufzeit-Warnung feuert also seit diesem Release **out of the box** bei
-jedem Seiten-Druck mit Default-Einstellungen (ein Pixel braucht jetzt 3
-Samples × 2 ms = 6 ms reale Zeit für eine Dosis, minimal schlechter als die
-alten 2 Samples × 5 ms = 10 ms bei 200 Hz — die höhere Poll-Rate verbessert
-nur die Spalten-Platzierungsgenauigkeit, nicht von sich aus die
-Dosis-Fertigstellungszeit). Bis eine an Hardware neu vermessene Paarung
-vorliegt, entweder explizit ein kürzeres `--dose-hold-s` setzen (und die
-Firmware entsprechend auf ein neues `PATTERN_STRIDE` umstellen und neu
-flashen, siehe "Firmware-Kopplung" unten) oder für die alte, zueinander
-passende Kombination explizit `--poll-hz 200` übergeben.
-`coverage.DEFAULT_DOSE_HOLD_S` selbst wurde in diesem Release **nicht**
-geändert — das bleibt für eine spätere, hardwareverifizierte Runde offen.
+Das ist **geschwindigkeitsunabhängig per Konstruktion**: doppeltes Tempo heißt
+doppelter Weg je Sample, also doppelt so viele Kopien in der halben Zeit — die
+gleiche Tintenmenge pro Spalte. Ein *stehender* Wagen ist entsprechend gar
+nichts schuldig und feuert nicht (das ersetzt die alte Stillstands-Logik gegen
+Tintenklekse).
 
-Bei Handgeschwindigkeiten über ca. **20 mm/s** reicht die Verweildauer über
-einer Spalte nicht mehr für die vollen 4.05 ms — das Pixel bleibt
-absichtlich offen für einen späteren Durchgang, statt halb dosiert zu
-gelten; das ist gewolltes Verhalten, kein Fehler, aber auch kein Hinweis,
-dass dieser Default bei jeder Handgeschwindigkeit ausreicht: gemessen
-(poll_hz=200) sind es 100 % bei ≤17.3 mm/s, 60 % bei 25 mm/s, 14 % bei
-35 mm/s und 0 % bei 46 mm/s — abgestimmt auf die gemessene Median-, nicht
-die Spitzengeschwindigkeit.
+⚠️ **Umstellung vom Verweildauer-Modell (`--dose-hold-s` gibt es nicht mehr).**
+Die alte Firmware **hielt** das zuletzt geschriebene Muster und feuerte es alle
+`PATTERN_STRIDE` Ticks erneut; die Tinte hing also daran, wie *lange* der
+Client ein Düsenbit auf 1 hielt, und beide Seiten waren über
+`DOSE_HOLD_S ≈ 3 × PATTERN_STRIDE × Tick` gekoppelt. Die neue Firmware feuert
+jede empfangene Spalte **genau einmal** und wiederholt sie nie
+(`PATTERN_STRIDE` und `pattern_dose_should_fire()` sind aus `ble_dose.h`
+verschwunden). Damit gibt es keine Wiederholrate mehr, gegen die man halten
+könnte — die Tinte wird vollständig hier entschieden.
 
-⚠️ **Firmware-Kopplung:** `--dose-hold-s` muss zum Firmware-`PATTERN_STRIDE`
-(`src/ble_dose.h`, Firmware-Repo) passen: `DEFAULT_DOSE_HOLD_S ≈ 3 ×
-PATTERN_STRIDE × 450 µs` (jetzt `PATTERN_STRIDE = 3`). Wird nur eine Seite geändert, stimmt die
-Tropfenzahl pro Pixel nicht mehr — die Firmware muss bei einer Änderung
-**neu geflasht** werden.
+Zwei Konsequenzen, die beide Verhalten ändern:
+
+1. **Der Client sendet jetzt bei jedem Sample mit offener Tintenschuld, nicht
+   nur bei Musterwechsel.** Unter einer Feuer-einmal-Firmware bedeutet „nur
+   bei Änderung senden“, dass eine gleichmäßige Fläche (ein gefüllter Block,
+   eine breite Linie) *gar nichts* sendet: die Menge der gewollten Düsen
+   ändert sich dort von Sample zu Sample nicht. Gemessen an einem 120 Spalten
+   breiten Vollblock bei 30 mm/s: **2 Schreibvorgänge für den ganzen
+   Durchlauf** statt der ~360, die das Tintenbudget verlangt — während die
+   Deckung 100 % meldete.
+2. **`PatternSender` ist keine „latest wins“-Mailbox mehr, sondern eine
+   begrenzte Warteschlange.** Eine überholte Spalte war früher wertlos (die
+   gehaltene färbte ohnehin weiter); heute ist jede verworfene Spalte
+   verlorene *Tinte*. Mehrere Spalten gehen gebündelt in einem Schreibvorgang
+   raus (bis zu `BLE_NOZZLE_MAX_COLS_PER_WRITE = 32`, in der Praxis 12 bei
+   MTU 247). Läuft die Warteschlange über, fliegt die **älteste** Spalte
+   (die, deren Position der Wagen am sichersten schon verlassen hat) und wird
+   in `PatternSender.dropped` gezählt statt still geschluckt.
+
+**Was die Geschwindigkeit jetzt begrenzt, ist die Abtastrate, nicht die
+Dosis.** Eine Spalte, die der Tracker nie abgetastet hat, wird nie gefeuert;
+diese Kante liegt bei `--mm-per-column × --poll-hz` = 0,087 × 500 =
+**43,5 mm/s**. Simuliert über einen 120-Spalten-Vollblock:
+
+```
+Geschwindigkeit   Samples/Spalte   printed   fired
+      17,3 mm/s             2,51    100,0 %   100,0 %
+      30,0 mm/s             1,45    100,0 %   100,0 %
+      43,5 mm/s             1,00    100,0 %   100,0 %
+      50,0 mm/s             0,87     86,7 %    86,7 %
+      60,0 mm/s             0,72     72,5 %    72,5 %
+```
+
+Zum Vergleich das alte Verweildauer-Modell an derselben Strecke: 73,3 %
+`printed` gegen 99,3 % `fired` bei 25 mm/s, 44,2 % gegen 99,3 % bei 30 — eine
+vollständig eingefärbte Seite, die als stark gestreift gemeldet wurde. Genau
+das war die Rückmeldung von der Hardware („die Füllung des echten Drucks ist
+perfekt, das Coverage-Bild sieht völlig anders aus“).
+
+Man beachte, was die beiden Spalten oben **zusammen** sagen: unterhalb von
+43,5 mm/s sind beide 100 %; darüber fallen sie **gemeinsam**, weil der Fehler
+keine Unterdosierung mehr ist, sondern komplett übersprungene Spalten. `fired`,
+das `printed` nach unten folgt, ist die Signatur davon — Tinte, die auf dem
+Papier fehlt, nicht bloß in der Buchhaltung.
+
+BLE ist dabei nicht die Grenze: jeder Tropfen ist eine gesendete Spalte, also
+`--drops-per-pixel × v / --mm-per-column` Spalten/s — selbst 43,5 mm/s
+verlangen 1500 Spalten/s = 125 Schreibvorgänge/s bei 12 Spalten je Vorgang,
+unter der Hälfte der gemessenen ~270/s.
+
+⚠️ **Firmware-Kopplung:** Erfordert die Firmware mit dem
+Feuer-einmal-Seitenmodus (Branch `claude/ble-i2s-nozzle-frequency-axpot1` im
+Repo `Printhead_Original_V2`). Gegen die **alte**, das Muster haltende
+Firmware würde dieser Client massiv überdrucken, weil er jetzt bei jedem
+Sample sendet. `--drops-per-pixel` ist dagegen **nicht** mehr an eine
+Firmware-Konstante gekoppelt — es ist ein reiner Client-Wert und kann ohne
+Neu-Flashen verändert werden.
+
+⚠️ **Neue Startwarnung statt der Quantisierungs-Klippe.** Die alte Warnung
+(„`dose_hold_s` muss unter dem Poll-Intervall bleiben“) ist ersatzlos weg —
+eine Tropfenzahl hat mit der Poll-Rate nichts zu tun. An ihre Stelle tritt
+eine Warnung, wenn die Spalten-Kante (`--mm-per-column × --poll-hz`) auf oder
+unter der Geschwindigkeitswarnung (`--speed-warning-mm-s`, Default 25 mm/s)
+liegt: dann kann die Warnung den Schaden nicht mehr ankündigen. Bei den
+Defaults (43,5 gegen 25 mm/s) feuert sie nicht; bei `--poll-hz 200` läge die
+Kante bei 17,4 mm/s und sie feuert.
 
 ⚠️ **Fehler behoben: Verweildauer ging bei Zeilen-Flapping komplett verloren,
 `coverage.png` zeigte deutlich weniger als real gedruckt wurde.**
 `NOZZLE_PITCH_MM` (ca. 0,087 mm) ist feiner als reales Tracker-Rauschen. Steht eine
 Düse nahe an einer Zeilengrenze, kippt die gerundete Zeile von Sample zu
-Sample zwischen zwei Nachbarn — die Engine hat den Verweildauer-Zähler bisher
+Sample zwischen zwei Nachbarn — die Engine hat den Dosis-Zähler bisher
 bei **jedem** Wechsel auf 0 zurückgesetzt. Die Düse feuert dabei trotzdem
 (`active[p]` wird gesetzt, sobald ein Pixel gewollt ist — unabhängig davon,
-ob die Verweildauer schon erreicht wurde), aber `dose_hold_s` wurde nie
+ob die Dosis schon voll ist), aber die volle Dosis wurde nie
 erreicht, weil der Zähler nie über einen Sample-Wechsel hinweg überlebt hat.
 Reproduziert: Düse (fast) still auf einer Zeilengrenze, nur ±0,001 mm
 Rauschen (zwei Größenordnungen unter realem Sensorrauschen) — **200 von 200
@@ -783,38 +817,49 @@ Rauschen (mm)   Proben mit Feuern   verbuchte Pixel
          0.20           963/1000                173
 ```
 
-Behoben, indem die Verweildauer jetzt **pro Pixel** akkumuliert wird
-(`CoverageEngine._pixel_dwell_s`, ein Dict, keyed auf `(row, col)`) statt pro
+Behoben, indem die Dosis jetzt **pro Pixel** akkumuliert wird
+(`CoverageEngine._pixel_drops`, ein Dict, keyed auf `(row, col)`) statt pro
 Düsen-/Gruppen-Slot mit Reset bei jedem Zeilenwechsel. Ein Wechsel weg von
 einem Pixel — sei es Flapping zur Nachbarzeile oder ein längerer Ausflug,
-weil der Wagen woanders hin fährt — lässt die bereits angesammelte
-Verweildauer unangetastet; sie läuft beim nächsten Besuch einfach weiter,
-statt bei 0 neu zu beginnen. Der Eintrag wird erst beim Fertigstellen des
-Pixels aus dem Dict entfernt, der Speicherbedarf bleibt also auf „gerade
-angefangene, noch nicht fertige Pixel" begrenzt, nicht auf die Bildgröße.
+weil der Wagen woanders hin fährt — lässt die bereits angesammelte Dosis
+unangetastet; sie läuft beim nächsten Besuch einfach weiter, statt bei 0 neu
+zu beginnen. Der Eintrag wird erst beim Fertigstellen des Pixels aus dem Dict
+entfernt, der Speicherbedarf bleibt also auf „gerade angefangene, noch nicht
+fertige Pixel" begrenzt, nicht auf die Bildgröße.
 
-Kleine, bewusst hingenommene Verhaltensänderung dabei: Der pro-Sample-Anteil
-(`dt`, ungefähr ein Poll-Intervall) wird jetzt auch auf das allererste
-Sample eines neuen Pixels angerechnet, statt (wie vorher) erst ab dem
-zweiten — bei `poll_hz=500` (Default) ändert das nichts an der
-Mindest-Sample-Zahl für eine Fertigstellung, weil `dose_hold_s` (4,05 ms)
-mehr als ein Poll-Intervall (2,00 ms) braucht.
+**Zwei Schwellen auf einem Konto.** `printed` (der Report, `coverage.done` und
+die Zahl am Durchlaufende) wird **eine Probe früher** gesetzt als die Düse
+freigegeben wird. Grund: die Gutschrift kommt in ganzen Poll-Samples an. Ist
+eine Spaltenüberquerung `m` Samples wert, landen `floor(m)` oder `ceil(m)`
+davon *innerhalb* der Spalte — eine vollständig überfahrene Spalte kann also
+allein dadurch eine Probe zu kurz kommen, wie das Sample-Raster gerade zum
+Spalten-Raster steht. Ohne diese eine Probe Spiel meldet der Report regelmäßige
+Streifen, deren Dichte sinnlos mit dem Tempo schwankt (gemessen: 70,0 % der
+Spalten bei 5 mm/s, 35,0 % bei 10, 51,7 % bei 17,3, 9,2 % bei 40 — gegen
+durchgehend 100 % `fired`). Die Düse **freizugeben** darf dagegen erst die
+strenge Schwelle: wer beides auf der lockeren Schwelle macht, kürzt jede
+Überquerung um bis zu eine Probe echte Tinte (gemessen: 455 statt 594
+Spalten/s bei 17,3 mm/s, 483 statt 862 bei 25).
 
-**Neue Tests** (`tests/test_coverage.py`):
+**Neue Tests** (`tests/test_coverage.py`, `tests/test_freehand_pass.py`,
+`tests/test_pattern_sender.py`):
 
 ```
-test_dwell_survives_flapping_between_two_neighbouring_rows
-test_dwell_resumes_after_the_group_stops_being_wanted_for_a_while
-test_dwell_flap_MUTATION_check_resetting_on_key_change_reintroduces_the_bug
+test_coverage_is_speed_independent_up_to_the_poll_rate_limit
+test_past_the_poll_rate_limit_whole_columns_are_skipped_not_thinned
+test_the_delivered_column_count_matches_the_drops_per_pixel_budget
+test_nozzle_keeps_firing_through_the_last_drop_after_being_reported
+test_a_stationary_cart_owes_no_drops_and_never_completes
+test_completion_depends_on_drops_delivered_not_on_elapsed_time
+test_a_dose_summed_from_fractions_completes_without_an_extra_sample
+test_MUTATION_check_crediting_integer_columns_reintroduces_speed_stripes
+test_a_uniform_region_keeps_sending_instead_of_going_quiet
+test_columns_sent_track_the_drops_per_pixel_budget
+test_fractional_drops_are_accumulated_rather_than_truncated
+test_copies_are_queued_once_each_and_never_merged
+test_sends_made_while_a_write_is_in_flight_are_NOT_coalesced
+test_overflow_drops_the_OLDEST_columns_and_counts_them
 ```
-
-Zusätzlich musste `test_nozzle_group_1_is_bit_identical_to_no_group_param_at_all`s
-unabhängige Referenzimplementierung aktualisiert werden — sie bildete bisher
-exakt die alte, jetzt behobene Reset-Logik nach und hätte den Fix sonst als
-„Abweichung" markiert, obwohl die neue Engine hier richtig liegt.
-Mutationsgeprüft direkt gegen die echte Vorher-Version aus der Git-Historie
-(nicht nur gegen eine Nachbildung im Test): Beide neuen Tests fangen sie
-zuverlässig.
 
 ### Tintenausbreitung: `--spray-radius-mm` / `--spray-strength`
 
@@ -833,7 +878,9 @@ Beide müssen `> 0` sein, damit das Modell greift; sonst verhält sich die Engin
 exakt wie zuvor (Default-Verhalten unverändert).
 
 Gemessen an simulierten Mehrfach-Überfahrten mit 0,05 mm Versatz pro Durchgang
-(40 × 30 mm Vollfläche, `--dose-hold-s 0.0018`, 500 Hz):
+(40 × 30 mm Vollfläche, 500 Hz; gemessen noch unter dem alten
+Verweildauer-Modell mit `dose_hold_s = 0.0018` — die *relative* Wirkung des
+Spray-Modells hängt nicht daran, die absoluten Feuerungszahlen schon):
 
 ```
 Einstellung   | Düsen-Feuerungen | Deckung im überfahrenen Band
@@ -862,12 +909,16 @@ Nozzle-Charakteristik eine neue BLE-Charakteristik (`SPEED_WARN_UUID =
 58c05253-945f-48fc-a26c-989c785d6678`, Read/Write, 1 Byte, `0` = ok /
 `1` = zu schnell), sobald die gemessene Handgeschwindigkeit
 `--speed-warning-mm-s` überschreitet — Default
-`controller.DEFAULT_SPEED_WARNING_MM_S = 25.0` mm/s. Dieser Wert stammt aus
-derselben Messreihe wie oben: bei 25 mm/s war die Coverage bereits auf **~60
-%** gefallen (siehe Tabelle oben), also der Punkt, ab dem ein spürbarer Teil
-des Durchlaufs ungedruckt bleibt und eine Warnung an den Bediener sinnvoll
-wird. Die Firmware nutzt den Wert nur, um die (zu diesem Zweck
-umgewidmete) HEALTH-LED anzusteuern — auf die Dosierung hat er keinen
+`controller.DEFAULT_SPEED_WARNING_MM_S = 25.0` mm/s. Der Wert stammte
+ursprünglich aus dem Verweildauer-Modell, wo die Coverage bei 25 mm/s bereits
+auf ~60 % gefallen war. Unter dem Tropfenmodell ist er **bewusster
+Sicherheitsabstand** statt Klippenkante: die erste Geschwindigkeit, bei der
+real etwas verlorengeht, ist `--mm-per-column × --poll-hz` = 43,5 mm/s (siehe
+Dosierungs-Abschnitt), 25 mm/s liegt ~40 % darunter. Das lässt Luft für
+Übersteuern der Hand zwischen zwei Samples und für ein kleineres `--poll-hz`
+(bei `--poll-hz 200` läge die Kante bei 17,4 mm/s — dann warnt der Client
+beim Start, siehe dort). Die Firmware nutzt den Wert nur, um die (zu diesem
+Zweck umgewidmete) HEALTH-LED anzusteuern — auf die Dosierung hat er keinen
 Einfluss.
 
 Um an der Schwelle nicht bei jedem Sample umzuschalten, hat das Ein-/
@@ -876,7 +927,7 @@ Ausschalten eine **Hysterese**: EIN ab `speed_warning_mm_s`, AUS erst wieder
 bei einem tatsächlichen Zustandswechsel beschrieben, nicht bei jedem
 Sample, und bei Durchlaufende immer auf `0` zurückgesetzt (auch wenn der
 Durchlauf durch einen Fehler abbricht). Der Schreibvorgang ist bewusst
-*fail-soft*: anders als der Print-Mode-Wechsel (`--dose-hold-s` o.ä.) darf
+*fail-soft*: anders als der Print-Mode-Wechsel darf
 ein verlorenes BLE-Write hier niemals den Druckvorgang abbrechen — ein
 Fehler wird nur geloggt.
 
@@ -1533,6 +1584,16 @@ BLE-Write-Latenz ausgegeben (`load > 1.0` = BLE kommt nicht hinterher). Am Ende 
 Fazit inkl. „bis ~X mm/s halten die Spalten mit". Das `--profile-csv` schreibt pro
 Spalte `t, column, advance, write_latency, speed` für die Offline-Analyse.
 
+Im **Seiten-Modus** misst `--profile` **Spalten pro Sekunde**, nicht
+Musterwechsel pro Sekunde: seit die Firmware jede empfangene Spalte genau
+einmal feuert, ist eine Spalte ein Tintentropfen, ein „Musterwechsel"
+dagegen nur eine Abtastung, bei der etwas fällig war. Verglichen wird gegen
+`--ble-write-ceiling × Spalten pro Write` (Default 270 × 12 bei MTU 247 ≈
+3200 Spalten/s). Wird die Decke überschritten, geht **Tinte verloren**, nicht
+bloß Aktualität — `PatternSender` verwirft dann die ältesten Spalten und
+zählt sie mit. Die CSV-Spalte heißt entsprechend `cols_per_s` (früher
+`writes_per_s`).
+
 Im Seitenmodus (`--mode page`) enthält dieselbe `--profile-csv`-Datei zusätzlich
 `qx,qy,qz,qw` — das rohe Orientierungs-Quaternion des Sensors, sofern die Hardware es
 gerade geliefert hat (sonst leer, nicht `0,0,0,0`). Ursprünglich reine Diagnosedaten
@@ -1579,16 +1640,16 @@ gestapelte Panels — INTENDED (Zielbild), COVERED (tatsächlich getroffen) und 
 (gewollt, aber nie getroffen) — plus ein viertes, farbiges **PATH**-Panel: die blau
 gezeichnete Spur ist der **Sensor-Mittelpunkt**, orange die **Düsenleisten-Mitte**
 (nicht Düse 0). Damit lässt sich eine MISSED-Stelle direkt gegen die Fahrspur
-prüfen — ist der Wagen dort nie vorbeigekommen, oder war er zu schnell für
-`--dose-hold-s`?
+prüfen — ist der Wagen dort nie vorbeigekommen, oder war er so schnell, dass
+der Tracker diese Spalten nie abgetastet hat?
 
 ⚠️ **Fehler behoben: `coverage.png` zeigte senkrechte Streifen, obwohl der echte
 Druck vollflächig war.** COVERED/MISSED wurden aus `printed` gezeichnet — das ist
 aber die **Dosis-Abschluss**-Buchhaltung, nicht die tatsächlich gelandete Tinte.
 Eine Düse feuert, sobald ihr Pixel gewollt ist; `printed` wird dagegen erst
-gesetzt, wenn die Verweildauer `--dose-hold-s` erreicht ist, wofür eine Spalte
-**mindestens zwei Samples** braucht. Gemessen an den echten Einstellungen der
-Anlage (`--mm-per-column 0.087`, `--dose-hold-s 0.001`, `--poll-hz 500`):
+gesetzt, wenn die Dosis voll ist. Unter dem damaligen Verweildauer-Modell
+brauchte eine Spalte dafür **mindestens zwei Samples**, gemessen an den echten
+Einstellungen der Anlage (`--mm-per-column 0.087`, `--poll-hz 500`):
 
 | Wagen-Geschwindigkeit | Samples/Spalte | `printed` | tatsächlich gefeuert |
 |---|---|---|---|
@@ -1596,16 +1657,20 @@ Anlage (`--mm-per-column 0.087`, `--dose-hold-s 0.001`, `--poll-hz 500`):
 | 25 mm/s | 1,74 | **73,3 %** | 99,3 % |
 | 30 mm/s | 1,45 | **44,2 %** | 99,3 % |
 
-Unterhalb von zwei Samples pro Spalte schließt keine Dosis mehr ab, die Düse hat
-aber auf dem einen Sample gefeuert — das Papier ist voll, das Bild zeigte Lücken.
+Unterhalb von zwei Samples pro Spalte schloss keine Dosis mehr ab, die Düse hatte
+aber auf dem einen Sample gefeuert — das Papier war voll, das Bild zeigte Lücken.
 `CoverageEngine.fired` hält jetzt zusätzlich fest, wo Tinte **physisch** gelandet
 ist (gegen eine unabhängige Rekonstruktion der gesendeten BLE-Patterns bit-genau
 geprüft), und COVERED/MISSED sowie die `Covered N/M`-Zeile stammen daraus.
-`printed` behält seine Dosis-Rolle unverändert (steuert Nachfeuern und
-`coverage.done`, und die `--dose-hold-s`↔`PATTERN_STRIDE`-Tropfenzahl hängt davon
-ab). Weichen beide voneinander ab, kommt ein zusätzliches **THIN**-Panel dazu
-(Tinte da, Dosis unvollständig) plus eine Zeile in der Zusammenfassung — das
-bedeutet „langsamer fahren", nicht „Stelle verpasst".
+`printed` behält seine Dosis-Rolle (steuert Nachfeuern und `coverage.done`).
+
+Mit dem Tropfenmodell ist diese Schere weitgehend zu: eine überfahrene Spalte
+bekommt ihre volle Dosis bei jedem Tempo, das der Tracker noch abtasten kann
+(siehe Dosierungs-Abschnitt), und jenseits davon fallen `fired` und `printed`
+gemeinsam. Das **THIN**-Panel (Tinte da, Dosis unvollständig) bleibt trotzdem —
+es zeigt jetzt echte Teil-Dosierung, im Wesentlichen die letzte Spalte vor einem
+Richtungswechsel oder dem Seitenrand — und erscheint nur, wenn es nicht leer
+ist. Es bedeutet „das kam hell heraus", nicht „Stelle verpasst".
 
 Das ganze PNG wird dabei standardmäßig **3-fach vergrößert** (`recording.
 DEFAULT_RECORD_SCALE`) — INTENDED/COVERED/MISSED blockig (jeder Block bleibt exakt

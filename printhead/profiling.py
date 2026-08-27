@@ -15,14 +15,20 @@ class, so the CSV/live-printing/CLI plumbing is shared):
     the call site) and the head speed -> the *demanded* column rate. Derives
     the *sustained* rate from the measured latencies.
   * ``"page"`` -- freehand mode has no per-write latency to time at the call
-    site: ``PatternSender.send()`` hands a pattern to a background task and
-    returns immediately (that asynchrony is the whole point of "latest
-    wins", see ``pattern_sender.py``). So instead of measuring sustained
-    throughput directly, page mode records how often the pattern actually
-    changes (``CoverageEngine.step()`` reporting ``changed=True``) and
-    compares that *demanded update rate* against a known BLE throughput
-    ceiling (``ble_write_ceiling``, the same physical write-without-response
-    limit as line mode, measured with ``--ble-benchmark``).
+    site: ``PatternSender.send()`` queues columns for a background task and
+    returns immediately. So instead of measuring sustained throughput
+    directly, page mode records the *demanded column rate* -- how many
+    columns the coverage engine's drop budget asks for per second -- and
+    compares it against a known BLE throughput ceiling
+    (``ble_write_ceiling`` writes/s, the same physical write-without-response
+    limit as line mode, measured with ``--ble-benchmark``, times
+    ``batch_cols`` columns per write).
+
+    Columns, not pattern updates: since the firmware fires each column it
+    receives exactly once, a column IS a drop of ink, while a "pattern
+    update" is now just a poll sample that happened to owe some. Measuring
+    updates against a writes/s ceiling would compare two different things
+    and cry wolf at any decent poll rate.
 
 Note: without per-frame firmware feedback we cannot prove a column was
 physically *printed* on time; the write latency + backlog (line) or update
@@ -41,7 +47,9 @@ import numpy as np
 # Empirical BLE write-without-response ceiling (see diagnostics.ble_benchmark),
 # used as page mode's throughput reference since PatternSender's background
 # sends are not individually timed at the call site the way line mode's writes
-# are. Override with the real number from --ble-benchmark on your hardware.
+# are. In WRITES per second -- multiply by the columns packed into each write
+# (``batch_cols``) for the column ceiling. Override with the real number from
+# --ble-benchmark on your hardware.
 DEFAULT_BLE_WRITE_CEILING_PER_S = 270.0
 
 
@@ -49,13 +57,17 @@ class PassProfiler:
     def __init__(self, mm_per_column: float, live: bool = True,
                  csv_path: Optional[str] = None, live_every_s: float = 0.5,
                  mode: str = "line",
-                 ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S):
+                 ble_write_ceiling: float = DEFAULT_BLE_WRITE_CEILING_PER_S,
+                 batch_cols: int = 1):
         self.mm_per_column = mm_per_column
         self.live = live
         self.csv_path = csv_path
         self.live_every_s = live_every_s
         self.mode = mode
         self.ble_write_ceiling = ble_write_ceiling
+        # Columns the transport packs into one write; the column
+        # ceiling is the write ceiling times this.
+        self.batch_cols = max(1, int(batch_cols))
 
         self.n_cols = 0
         self.total_write_time = 0.0
@@ -68,8 +80,9 @@ class PassProfiler:
 
         # page mode only
         self.page_events = 0
+        self.page_columns = 0
         self.page_speeds: List[float] = []
-        self.page_write_rates: List[float] = []
+        self.page_col_rates: List[float] = []
         self._page_last_t: Optional[float] = None
 
     def start(self) -> None:
@@ -86,7 +99,7 @@ class PassProfiler:
                     # PageMapper), explains observed freehand misalignment.
                     # Not read back or used to correct anything live yet.
                     self._csv.write(
-                        "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw\n")
+                        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n")
                 else:
                     self._csv.write("t_s,column,advance_mm,write_latency_ms,speed_mm_s\n")
             except OSError as exc:
@@ -114,13 +127,14 @@ class PassProfiler:
 
     def record_page_sample(self, u_mm: float, v_mm: float,
                            speed_mm_s: Optional[float],
-                           quat: Optional[np.ndarray] = None) -> None:
+                           quat: Optional[np.ndarray] = None,
+                           columns: int = 1) -> None:
         """
-        Log one page-mode pattern update. Call this only when
-        ``CoverageEngine.step()`` reports ``changed=True`` (i.e. a pattern
-        was actually handed to ``PatternSender.send()``), mirroring
-        ``record_write()``'s per-write-event cadence rather than logging
-        every poll tick -- most ticks do not change anything.
+        Log one page-mode send. Call this whenever columns were actually
+        handed to ``PatternSender.send()``, with ``columns`` set to how many
+        went into the queue -- that is the ink, since the firmware fires each
+        received column exactly once. Ticks that owe no drops are not logged,
+        mirroring ``record_write()``'s per-event cadence.
 
         ``quat`` is the raw ``(qx, qy, qz, qw)`` orientation for this sample
         (see ``AmfitrackTracker.read_pose``), or ``None`` when no orientation
@@ -135,13 +149,18 @@ class PassProfiler:
         col = int(round(u_mm / self.mm_per_column)) if self.mm_per_column else 0
         row = int(round(v_mm / NOZZLE_PITCH_MM))
         now = time.perf_counter()
-        writes_per_s = 1.0 / (now - self._page_last_t) if self._page_last_t else 0.0
+        spalten = max(1, int(columns))
+        # Columns per second, not events per second: `columns` of them were
+        # queued in the gap since the previous send, and each one is a fire.
+        luecke = (now - self._page_last_t) if self._page_last_t else 0.0
+        cols_per_s = spalten / luecke if luecke > 0 else 0.0
         self._page_last_t = now
 
         self.page_events += 1
+        self.page_columns += spalten
         if speed_mm_s is not None:
             self.page_speeds.append(speed_mm_s)
-        self.page_write_rates.append(writes_per_s)
+        self.page_col_rates.append(cols_per_s)
 
         if self._csv is not None:
             t = now - self._t0
@@ -153,12 +172,12 @@ class PassProfiler:
             else:
                 quat_fields = ",,,"
             self._csv.write(f"{t:.4f},{row},{col},{u_mm:.3f},{v_mm:.3f},"
-                            f"{speed_mm_s or 0.0:.2f},{writes_per_s:.1f},"
+                            f"{speed_mm_s or 0.0:.2f},{cols_per_s:.1f},"
                             f"{quat_fields}\n")
 
         if self.live and now - self._last_live >= self.live_every_s:
             self._last_live = now
-            self._print_live_page(speed_mm_s, writes_per_s)
+            self._print_live_page(speed_mm_s, cols_per_s)
 
     def _sustained_rate(self) -> float:
         """Columns per second the BLE writes actually sustained."""
@@ -174,12 +193,17 @@ class PassProfiler:
               f"ble~{sustained:6.0f} cols/s  wlat={latency * 1000:5.1f} ms  "
               f"load={load:4.2f}{flag}", flush=True)
 
-    def _print_live_page(self, speed: Optional[float], writes_per_s: float) -> None:
+    def _column_ceiling(self) -> float:
+        """Columns per second the link can carry: writes/s x columns/write."""
+        return self.ble_write_ceiling * self.batch_cols
+
+    def _print_live_page(self, speed: Optional[float], cols_per_s: float) -> None:
         speed = speed or 0.0
-        load = writes_per_s / self.ble_write_ceiling if self.ble_write_ceiling else 0.0
-        flag = "   <-- pattern updates may be outrunning BLE" if load > 1.0 else ""
-        print(f"[profile] v={speed:6.1f} mm/s  updates~{writes_per_s:6.1f}/s  "
-              f"ceiling~{self.ble_write_ceiling:.0f}/s  load={load:4.2f}{flag}",
+        decke = self._column_ceiling()
+        load = cols_per_s / decke if decke else 0.0
+        flag = "   <-- columns may be outrunning BLE" if load > 1.0 else ""
+        print(f"[profile] v={speed:6.1f} mm/s  cols~{cols_per_s:6.0f}/s  "
+              f"ceiling~{decke:.0f}/s  load={load:4.2f}{flag}",
               flush=True)
 
     def finish(self) -> None:
@@ -222,28 +246,31 @@ class PassProfiler:
             print("  VERDICT: BLE kept up with the head at the observed speeds.")
 
     def _report_page(self) -> None:
-        if not self.page_write_rates:
-            print("[profile] no pattern updates recorded.")
+        if not self.page_col_rates:
+            print("[profile] no columns recorded.")
             return
         dur = max(1e-9, self._t_end - self._t0)
-        rates = np.array(self.page_write_rates)
+        rates = np.array(self.page_col_rates)
         peak_speed = max(self.page_speeds) if self.page_speeds else 0.0
         p95_rate = float(np.percentile(rates, 95))
+        decke = self._column_ceiling()
 
         print("---- page-mode timing profile ----")
         print(f"  pass duration        : {dur:6.2f} s")
-        print(f"  pattern updates sent : {self.page_events}  "
-              f"(avg {self.page_events / dur:.1f} updates/s)")
-        print(f"  update rate          : avg {rates.mean():.1f}/s  "
-              f"p95 {p95_rate:.1f}/s  max {rates.max():.1f}/s")
+        print(f"  columns queued       : {self.page_columns}  "
+              f"(avg {self.page_columns / dur:.0f} cols/s, in "
+              f"{self.page_events} sends)")
+        print(f"  column rate          : avg {rates.mean():.0f}/s  "
+              f"p95 {p95_rate:.0f}/s  max {rates.max():.0f}/s")
         print(f"  peak head speed      : {peak_speed:.1f} mm/s")
-        print(f"  BLE write ceiling    : ~{self.ble_write_ceiling:.0f}/s (from "
-              f"--ble-benchmark; PatternSender sends are 'latest wins', so "
-              f"exceeding this delays which pattern is currently live -- it "
-              f"does not lose or corrupt data, unlike line mode's FIFO).")
-        if p95_rate > self.ble_write_ceiling:
-            print("  VERDICT: pattern updates are being requested faster than BLE "
-                  "can plausibly deliver them -> the printed pattern may lag "
-                  "behind the live coverage state.")
+        print(f"  BLE column ceiling   : ~{decke:.0f} cols/s "
+              f"(~{self.ble_write_ceiling:.0f} writes/s from --ble-benchmark "
+              f"x {self.batch_cols} columns per write). Every column is one "
+              f"fire, so exceeding this loses INK: PatternSender drops the "
+              f"oldest queued columns and counts them.")
+        if p95_rate > decke:
+            print("  VERDICT: columns are being queued faster than BLE can "
+                  "plausibly carry them -> check PatternSender.dropped; ink "
+                  "is being lost, not merely delayed.")
         else:
-            print("  VERDICT: pattern update rate stayed within the known BLE ceiling.")
+            print("  VERDICT: column rate stayed within the known BLE ceiling.")

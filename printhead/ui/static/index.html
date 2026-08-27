@@ -235,8 +235,8 @@
           <input id="cal_path" value="page_calibration.json"></div>
         <div class="field"><label>Abtastrate (--poll-hz)</label>
           <input id="poll" type="number" value="500"></div>
-        <div class="field"><label>Dosierzeit (--dose-hold-s)</label>
-          <input id="dose" type="number" value="0.001" step="0.0001"></div>
+        <div class="field"><label>Tropfen je Pixel (--drops-per-pixel)</label>
+          <input id="dose" type="number" value="3" step="1" min="1"></div>
         <div class="field"><label>Glättung (--smooth-ms)</label>
           <input id="smooth" type="number" value="0" step="1"></div>
         <div class="field"><label>Spray-Radius (mm)</label>
@@ -352,7 +352,7 @@ function baseArgs(){
   }
   const m = num("mmcol"); if (m !== null) a.push("--mm-per-column", m);
   const p = num("poll");  if (p !== null) a.push("--poll-hz", p);
-  const d = num("dose");  if (d !== null) a.push("--dose-hold-s", d);
+  const d = num("dose");  if (d !== null) a.push("--drops-per-pixel", d);
   const s = num("smooth");if (s !== null) a.push("--smooth-ms", s);
   const sr= num("spray_r");if (sr!== null) a.push("--spray-radius-mm", sr);
   const ss= num("spray_s");if (ss!== null) a.push("--spray-strength", ss);

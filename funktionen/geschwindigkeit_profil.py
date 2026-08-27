@@ -29,7 +29,7 @@ Die ``--profile-csv`` aus dem Druckdurchgang:
         --profile --profile-csv geschw.csv --record geschw.png
 
 Beide CSV-Formate werden gelesen:
-  * Seiten-Modus: ``t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx..qw``
+  * Seiten-Modus: ``t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx..qw``
     -- Position ist ``u_mm``.
   * Line-Modus: ``t_s,column,advance_mm,write_latency_ms,speed_mm_s``
     -- Position ist ``advance_mm``.
@@ -255,12 +255,18 @@ def bericht(laeufe, bei_u=None, schwelle=DECKUNGS_SCHWELLE):
                           f"belastbare Kurve besser 4-5)")
 
     zeilen.append("")
-    zeilen.append("  Abgleich mit der Vorhersage: dokumentiert sind 100 % bei "
-                  "<=17,3 mm/s, 60 % bei 25 mm/s, 14 % bei 35 mm/s "
-                  "(simuliert, poll_hz=200). Weicht die Messung stark ab, "
-                  "stimmt das Dosiermodell nicht — dann sind --dose-hold-s und "
-                  "das Firmware-PATTERN_STRIDE die Stellschrauben, die "
-                  "zusammen bewegt werden müssen.")
+    zeilen.append("  Abgleich mit der Vorhersage: seit der Umstellung auf das "
+                  "Tropfenmodell haengt die Tinte am zurueckgelegten Weg, "
+                  "nicht mehr an der Verweildauer — die Deckung soll also "
+                  "flach bei 100 % bleiben, bis die Abtastrate nicht mehr "
+                  "mitkommt. Diese Kante liegt bei mm_per_column * poll_hz "
+                  "(0,087 * 500 = 43,5 mm/s); simuliert: 100 % bis 43,5, "
+                  "95 % bei 46, 86,7 % bei 50, 72,5 % bei 60. Faellt die "
+                  "Messung deutlich frueher ab, liegt es nicht am "
+                  "Dosiermodell — dann zuerst --poll-hz und die BLE-Rate "
+                  "(--profile) pruefen. Zum Vergleich das alte "
+                  "Verweildauer-Modell: 100 % bei <=17,3 mm/s, 60 % bei 25, "
+                  "14 % bei 35.")
     return "\n".join(zeilen)
 
 

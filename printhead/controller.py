@@ -27,7 +27,7 @@ import numpy as np
 from .ble_client import PrintheadBLE
 from .calibration import PageCalibration
 from .config import BleSettings, NozzleMapSettings, RenderSettings, TrackingSettings
-from .coverage import DEFAULT_DOSE_HOLD_S, CoverageEngine, bar_offset_uv
+from .coverage import DEFAULT_DROPS_PER_PIXEL, CoverageEngine, bar_offset_uv
 from .geometry import (
     BLANK_FRAME,
     NOZZLE_BAR_SPAN_MM,
@@ -35,6 +35,7 @@ from .geometry import (
     NOZZLE_MODE_PAGE,
     NOZZLE_PITCH_MM,
     NUM_NOZZLES,
+    ROW_BYTES,
     SENSOR_TO_NOZZLE_BAR_CENTER_ROW_MM,
     SENSOR_TO_NOZZLE_COL_MM,
 )
@@ -50,14 +51,30 @@ _STALL_GRACE_S = 0.2
 
 # Cart speed (mm/s) above which the freehand pass warns the firmware "too
 # fast" over BLE (see PrintController.speed_warning_mm_s and
-# _print_freehand_pass's hysteresis below). Derived from the dose-tuning
-# measurement documented in coverage.DEFAULT_DOSE_HOLD_S's comment: a
-# simulated pass at the production dose_hold_s/poll_hz defaults gives 100%
-# coverage at the measured median hand speed (17.3 mm/s), falling to 60% by
-# 25 mm/s and 14% by 35 mm/s -- 25 mm/s is picked here as the point past
-# which a meaningful fraction of a pass is already going unprinted, worth
-# surfacing to the operator (and the firmware's LED) rather than a hard
-# cutoff derived from any firmware constant.
+# _print_freehand_pass's hysteresis below).
+#
+# What limits speed changed with the firing model, and this value has to be
+# re-read against the new one. Under the old time-based dose, coverage
+# started falling almost immediately past the measured median hand speed
+# (17.3 mm/s): 60% by 25 mm/s, 14% by 35. Ink is now proportional to travel
+# rather than to dwell, so speed cannot thin a print at all; what it can do
+# is outrun the POLL RATE, and a column the tracker never sampled is never
+# fired. That cliff sits at mm_per_column * poll_hz = 0.087 * 500 =
+# 43.5 mm/s, and it is sharp -- simulated over a 120-column solid block,
+# coverage holds at 100% through 43.5 mm/s, then 99.2% at 44, 95.0% at 46,
+# 86.7% at 50 and 72.5% at 60.
+#
+# BLE is not the binding constraint: the column rate demanded is
+# drops_per_pixel * speed / mm_per_column, so even 43.5 mm/s asks for
+# 1500 columns/s = 125 writes/s at 12 columns per write, under half the
+# measured ~270 writes/s ceiling.
+#
+# 25 mm/s is kept as the warning point, now as deliberate headroom rather
+# than as the edge of a cliff: it sits ~40% below the first speed at which
+# anything is actually lost, which leaves room for the hand to overshoot
+# between samples and for a lower --poll-hz (the cliff scales with it --
+# at --poll-hz 200 it drops to 17.4 mm/s, below this threshold). It is a
+# warning to the operator and the firmware's LED, not a cutoff.
 DEFAULT_SPEED_WARNING_MM_S = 25.0
 
 # Throttle for --verbose's live status line during a print pass (see
@@ -121,6 +138,18 @@ class _NullPrinthead:
         self.column_writes = 0
         self.blank_writes = 0
         self.pattern_writes = 0
+        # Columns, not writes. Under the fire-once firmware one write can
+        # carry up to MAX_COLS_PER_WRITE columns and each one is a separate
+        # fire, so "how many writes went out" no longer measures ink --
+        # this does. (Counted from the payload length rather than assumed,
+        # so it stays right whatever batch size the transport reports.)
+        self.pattern_columns = 0
+        # Mirrors PrintheadBLE.batch_cols so a --dry-run --profile pass
+        # reports a column ceiling comparable to a real link rather than a
+        # pessimistic one-column-per-write figure. Derived, not guessed: the
+        # ATT payload at the MTU real hardware negotiates here (247, minus a
+        # 3-byte header) holds this many 19-byte columns.
+        self.batch_cols = max(1, (247 - 3) // ROW_BYTES)
         self.print_mode = None
         self.speed_warnings = []   # every set_speed_warning() call, in order
 
@@ -135,6 +164,7 @@ class _NullPrinthead:
 
     async def write_pattern(self, pattern):
         self.pattern_writes += 1
+        self.pattern_columns += max(1, len(pattern) // ROW_BYTES)
 
     async def set_print_mode(self, mode, required: bool = True):
         self.print_mode = mode
@@ -169,7 +199,7 @@ class PrintController:
                  profile: bool = False, profile_csv: Optional[str] = None,
                  record: Optional[str] = None,
                  page_calibration: Optional[PageCalibration] = None,
-                 dose_hold_s: float = DEFAULT_DOSE_HOLD_S,
+                 drops_per_pixel: int = DEFAULT_DROPS_PER_PIXEL,
                  spray_radius_mm: float = 0.0,
                  spray_strength: float = 0.0,
                  nozzle_group: int = 1,
@@ -190,7 +220,7 @@ class PrintController:
         self.profile_csv = profile_csv
         self.record = record
         self.page_calibration = page_calibration
-        self.dose_hold_s = dose_hold_s
+        self.drops_per_pixel = drops_per_pixel
         self.spray_radius_mm = spray_radius_mm
         self.spray_strength = spray_strength
         # Page mode only (see CoverageEngine.step()'s docstring for the
@@ -700,16 +730,17 @@ class PrintController:
         ``PageCalibration`` (no per-pass origin -- the calibration already
         anchors ``(u, v)`` to the traced page corner, unlike line mode's
         button-zeroed origin), dose per-nozzle via ``CoverageEngine``, and
-        stream the live pattern through a ``PatternSender`` ("latest wins",
-        see ``pattern_sender.py``) instead of a queue of distinct columns.
-        Runs until the whole target image is covered, the pass times out, or
-        the operator stops it (below).
+        stream the resulting columns through a ``PatternSender`` (a bounded
+        queue -- see ``pattern_sender.py`` for why it is no longer "latest
+        wins"). Runs until the whole target image is covered, the pass times
+        out, or the operator stops it (below).
 
         Unlike ``_print_line_pass``, there is no separate stall-grace/anti-
-        blob logic here: ``CoverageEngine`` already stops firing a pixel once
-        it has been held for ``dose_hold_s``, whether the head is moving or
-        stalled -- that cutoff *is* the anti-blob protection, per pixel
-        rather than per pass.
+        blob logic here, and it is doubly unnecessary now. Ink is derived
+        from travel, so a stalled cart is owed nothing and queues nothing;
+        and ``CoverageEngine`` independently stops firing a pixel once it
+        has received ``drops_per_pixel`` drops. Either alone *is* the
+        anti-blob protection, per pixel rather than per pass.
 
         ``startpoint_event`` is the STARTPOINT button, and in page mode it
         means **STOP**: a press ends this pass immediately (blank frame,
@@ -781,7 +812,7 @@ class PrintController:
                            sensor_offset_col_mm=self.sensor_offset_col_mm,
                            boresight_offset_rad=math.radians(self.boresight_deg))
         coverage = CoverageEngine(self._ink, t.mm_per_column,
-                                  dose_hold_s=self.dose_hold_s,
+                                  drops_per_pixel=self.drops_per_pixel,
                                   spray_radius_mm=self.spray_radius_mm,
                                   spray_strength=self.spray_strength,
                                   nozzle_group=self.nozzle_group)
@@ -795,7 +826,9 @@ class PrintController:
         if self.profile:
             from .profiling import PassProfiler
             profiler = PassProfiler(t.mm_per_column, csv_path=self.profile_csv,
-                                    mode="page", ble_write_ceiling=self.ble_write_ceiling)
+                                    mode="page",
+                                    ble_write_ceiling=self.ble_write_ceiling,
+                                    batch_cols=getattr(ble, "batch_cols", 1))
             profiler.start()
 
         if pj:
@@ -803,30 +836,38 @@ class PrintController:
                               "height": self.height}), flush=True)
         else:
             print(f"Printing freehand: {self.width} columns x {self.height} rows, "
-                  f"dose_hold={self.dose_hold_s * 1000:.0f} ms. Move the cart over "
+                  f"{self.drops_per_pixel} drops/pixel. Move the cart over "
                   f"the calibrated page.")
 
-        # Quantization-cliff guard (see coverage.DEFAULT_DOSE_HOLD_S for the
-        # measured example): CoverageEngine.step() only marks a pixel
-        # printed on a *sample* that finds elapsed dwell >= dose_hold_s,
-        # measured from the first sample on that pixel -- so completion
-        # costs whole poll intervals, not continuous time. Once
-        # dose_hold_s >= 1/poll_hz, a second sample one interval later is
-        # never enough (it lands at exactly one interval, still short of a
-        # hold that is itself >= one interval); a THIRD sample landing on
-        # the same column is required, which is a much narrower window at
-        # realistic hand speeds and collapses coverage rather than merely
-        # reducing it. Warn here instead of letting that surface later as a
-        # near-empty coverage report with no obvious cause. Suppressed in
-        # --progress-json mode, which must stay pure NDJSON for the UI
-        # consumer (mirrors the out-of-page warning's `not pj` gating below).
-        if not pj and self.dose_hold_s >= 1.0 / t.poll_hz:
-            poll_interval_ms = 1000.0 / t.poll_hz
-            print(f"[warn] dose_hold_s={self.dose_hold_s * 1000:.2f} ms >= poll "
-                  f"interval={poll_interval_ms:.2f} ms (--poll-hz {t.poll_hz:g}): "
-                  f"a dose then needs three or more samples to land on the same "
-                  f"column, and coverage will be very low. Use a shorter "
-                  f"--dose-hold-s or a higher --poll-hz.")
+        # The old dwell model needed a quantization-cliff guard here:
+        # dose_hold_s had to stay below the poll interval or coverage
+        # collapsed off a cliff. Counting drops removes that failure mode --
+        # a drop count has no relationship to the polling rate -- but it
+        # does not remove the poll rate as a limit, it moves it. A column
+        # the tracker never sampled is a column that never fires, so past
+        # mm_per_column * poll_hz whole columns start being skipped (see
+        # DEFAULT_SPEED_WARNING_MM_S for the measured shape of that edge).
+        #
+        # The check is therefore the same idea against a different pair of
+        # settings: warn when the configured speed warning sits at or above
+        # the speed at which columns actually start dropping out, because
+        # then the warning can no longer arrive before the damage does.
+        spalten_grenze = t.mm_per_column * t.poll_hz
+        if not pj and self.speed_warning_mm_s >= spalten_grenze:
+            print(f"[warn] --poll-hz {t.poll_hz:.0f} samples only "
+                  f"{spalten_grenze:.1f} mm/s worth of columns "
+                  f"({t.mm_per_column:.3f} mm/column), at or below the "
+                  f"{self.speed_warning_mm_s:.1f} mm/s speed warning -- "
+                  f"columns will start being skipped before the warning "
+                  f"fires. Raise --poll-hz or lower the speed warning.")
+
+        # BLE is deliberately NOT warned about up front: every drop is a
+        # queued column, so the demanded column rate is drops_per_pixel *
+        # speed / mm_per_column, and even at the column-skipping edge above
+        # that is 3 * 43.5 / 0.087 = 1500 columns/s -- 125 writes/s at 12
+        # columns per write, under half the measured ~270 writes/s ceiling.
+        # The speed is not known here anyway; --profile reports the real
+        # update rate against that ceiling once a pass is running.
 
         # No boresight_quat on this calibration (every calibration saved
         # before this feature existed): PageMapper.project() therefore never
@@ -917,6 +958,11 @@ class PrintController:
 
         t_start = loop.time()
         prev_u, prev_v, prev_t = None, None, None
+        # Drop accounting for the one-shot firmware: how many copies are owed
+        # but not yet queued, and where the last batch went out (see the
+        # accumulator in the loop below).
+        drop_debt = 0.0
+        prev_send_u = prev_send_v = None
         prev_printed = coverage.fired.copy() if pj else None
         done_reason = None
         speed_warn_state = False   # current value of the speed-warning flag
@@ -926,9 +972,9 @@ class PrintController:
         # Out-of-page visibility (defect 2): a pass whose (u, v) never lands
         # inside the target image is otherwise indistinguishable from a
         # normal pass at the API level -- `coverage.step()` just returns an
-        # all-zero pattern forever, `changed` goes False after the first
-        # sample, nothing gets sent, no profiler sample is recorded, and the
-        # pass exits 0 with "Covered 0/N". Track the observed extents and
+        # all-zero pattern forever, so nothing gets sent (the send rule below
+        # skips a blank frame), no profiler sample is recorded, and the pass
+        # exits 0 with "Covered 0/N". Track the observed extents and
         # whether anything was ever in bounds so the end (and, in plain-text
         # mode, a live warning) can tell the user *why* nothing happened
         # instead of leaving them to guess.
@@ -1057,13 +1103,72 @@ class PrintController:
                     u_fire, v_fire = _extrapolate_uv(u_mm, v_mm, vx, vy,
                                                      self.latency_compensate_s)
 
-                    pattern, changed = coverage.step(u_fire, v_fire, now, yaw_rad=yaw_rad)
+                    # How much ink this sample is worth. The firmware fires
+                    # each queued column exactly once, so ink is entirely this
+                    # side's decision: to lay down `drops_per_pixel` drops on
+                    # every column the cart crosses, the amount owed is
+                    # proportional to the distance travelled since the last
+                    # sample. Speed-independent by construction -- twice the
+                    # speed means twice the travel per sample, so twice the
+                    # ink goes out in half the time, the same amount per
+                    # column.
+                    #
+                    # Two quantities come out of this, and they are NOT the
+                    # same number:
+                    #
+                    #   `anteil` -- the exact, fractional share of a dose,
+                    #       handed to the coverage engine. At 500 Hz and
+                    #       17.3 mm/s a sample is worth 1.2 drops.
+                    #   `copies` -- whole BLE columns, the only thing the
+                    #       firmware can actually fire. The fraction left over
+                    #       is carried in `drop_debt` to the next sample so
+                    #       none of it is lost.
+                    #
+                    # Feeding `copies` to the engine instead looks tempting
+                    # and is wrong: the integer stream reads 1,1,2,1,1,2,...
+                    # and a column that collects 1+1 before the cart leaves it
+                    # reads one drop short although the paper got its share.
+                    # See CoverageEngine.step()'s Step 4 for what that costs,
+                    # measured.
+                    if prev_send_u is None:
+                        anteil = float(self.drops_per_pixel)   # first sample
+                    elif t.mm_per_column:
+                        gefahren = math.hypot(u_fire - prev_send_u,
+                                              v_fire - prev_send_v)
+                        anteil = self.drops_per_pixel * gefahren / t.mm_per_column
+                    else:
+                        anteil = 0.0
+                    drop_debt += anteil
+                    copies = int(drop_debt)
+                    drop_debt -= copies
+                    prev_send_u, prev_send_v = u_fire, v_fire
+
+                    # `changed` is discarded on purpose -- see the send rule
+                    # right below; it is what the old "send only on change"
+                    # gate used, and nothing here may depend on it again.
+                    pattern, _changed = coverage.step(u_fire, v_fire, now,
+                                                      drops=anteil,
+                                                      yaw_rad=yaw_rad)
                     if coverage.last_in_bounds:
                         in_bounds_samples += 1
-                    if changed:
-                        sender.send(pattern)
+                    # Sent whenever there are drops owed and something to ink
+                    # -- NOT only when the pattern changed. Under a firmware
+                    # that fires once per write, "send only on change" means a
+                    # uniform area (a filled block, a wide line) sends nothing
+                    # and therefore receives no ink at all: measured on a solid
+                    # 120-column block at 30 mm/s, 2 writes for the whole pass
+                    # against the ~360 the ink budget calls for.
+                    #
+                    # An all-blank pattern is skipped: queuing blanks would
+                    # only push real columns further back in the firmware FIFO.
+                    # A silent client already means no fires, so stopping is
+                    # the correct way to stop printing.
+                    if copies > 0 and pattern != BLANK_FRAME:
+                        sender.send(pattern, copies=copies)
                         if profiler is not None:
-                            profiler.record_page_sample(u_mm, v_mm, speed, quat=quat)
+                            profiler.record_page_sample(u_mm, v_mm, speed,
+                                                        quat=quat,
+                                                        columns=copies)
 
                     # Live --verbose status line (see this method's docstring):
                     # the --pos equivalent, but usable while an actual pass is
@@ -1273,11 +1378,12 @@ class PrintController:
                 # just be noise.
                 if full_dose < covered:
                     thin = covered - full_dose
-                    print(f"  of those, {thin} got ink but never completed "
-                          f"--dose-hold-s ({full_dose}/{total} did) -- the cart "
-                          f"passed over them faster than the dose needs, so "
-                          f"they are inked but lighter. Move slower, or raise "
-                          f"--poll-hz, if the print looks faint there.")
+                    print(f"  of those, {thin} got fewer than "
+                          f"--drops-per-pixel drops ({full_dose}/{total} got "
+                          f"the full dose) -- the cart passed over them before "
+                          f"enough copies went out, so they are inked but "
+                          f"lighter. Move slower, or raise --drops-per-pixel, "
+                          f"if the print looks faint there.")
 
     # ---------------------------------------------- dry-run simulation path
     async def _dry_run_line_pass(self) -> None:
@@ -1307,5 +1413,6 @@ class PrintController:
             await self._print_freehand_pass(null, tracker)
         finally:
             tracker.close()
-        print(f"[sim] freehand loop issued {null.pattern_writes} pattern writes "
-              f"for a {self.width}x{self.height} target image.")
+        print(f"[sim] freehand loop issued {null.pattern_columns} nozzle columns "
+              f"in {null.pattern_writes} BLE writes for a "
+              f"{self.width}x{self.height} target image.")

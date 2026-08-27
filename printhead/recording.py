@@ -134,18 +134,20 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
 
     ``fired`` (``CoverageEngine.fired``) is where ink physically landed and
     is what COVERED/MISSED are drawn from when given; ``printed`` is the
-    dose-COMPLETION mask, which additionally requires a pixel to be held
-    long enough for ``dose_hold_s``. Passing only ``printed`` (the older
-    signature) makes it stand in for both, reproducing the pre-``fired``
-    image exactly. The distinction matters on a real pass: a cart moving
-    faster than roughly two samples per column never completes a dose, so a
-    ``printed``-only image shows dense vertical striping across squares that
-    came out perfectly solid on paper -- see ``CoverageEngine.fired`` for
-    the measured numbers. A MISSED panel (ink wanted, never inked at all) is
-    included since that is the whole open question after a freehand pass --
-    did the cart cover everything, and if not, where -- and a THIN panel
-    (inked, but dose never completed) is added when non-empty, since "you
-    moved too fast here" and "you missed this spot" call for different
+    dose-COMPLETION mask, which additionally requires a pixel to have
+    received its full ``--drops-per-pixel``. Passing only ``printed`` (the
+    older signature) makes it stand in for both, reproducing the pre-``fired``
+    image exactly. The two masks used to diverge widely -- under the previous
+    time-based dose a cart moving faster than roughly two samples per column
+    never completed one, so a ``printed``-only image showed dense vertical
+    striping across squares that came out perfectly solid on paper. Ink now
+    follows travel rather than dwell, so on a normal pass they agree and the
+    THIN panel is empty; what is left is genuine partial dosing, mostly the
+    last column before the cart turns or leaves the page. A MISSED panel
+    (ink wanted, never inked at all) is included since that is the whole
+    open question after a freehand pass -- did the cart cover everything,
+    and if not, where -- and the THIN panel is added when non-empty, since
+    "this came out light" and "you missed this spot" call for different
     corrections.
 
     ``sensor_path``/``nozzle_path``, if given, are lists of ``(row, col)``
@@ -157,8 +159,8 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
     sample precisely so this can draw them). When either is given, a 4th
     "PATH" panel is added, letting an operator trace where the cart
     actually went against what got covered -- e.g. spotting that a MISSED
-    patch was simply never driven over, versus driven over too fast for
-    ``--dose-hold-s`` to complete. Points outside the page are drawn
+    patch was simply never driven over, versus driven over so fast that the
+    tracker never sampled those columns at all. Points outside the page are drawn
     anyway (PIL clips automatically) rather than dropped, since a path
     leaving/re-entering the page is itself useful information. Omitting
     both keeps this call's PATH panel omitted, for any caller that doesn't
@@ -185,23 +187,25 @@ def render_coverage(printed: np.ndarray, ink: np.ndarray, path: str,
     ink = np.asarray(ink, dtype=bool)
     # COVERED/MISSED report where ink physically LANDED whenever the caller
     # can say (`fired`), falling back to the dose-completion mask otherwise.
-    # These are not the same picture: `printed` only marks a pixel once its
-    # dose completed, so a pass moving faster than ~2 samples per column
-    # leaves heavy vertical striping in a `printed`-based image while the
-    # paper itself came out solid -- see CoverageEngine.fired for the
-    # measured numbers behind that. The fallback keeps older/simpler callers
-    # (and every test written before `fired` existed) rendering exactly as
-    # they did.
+    # They are close on a healthy pass now that ink follows travel, but they
+    # are still different questions -- `fired` is what the paper shows,
+    # `printed` is what the dose ledger says -- and it was the second one
+    # standing in for the first that produced heavy vertical striping in a
+    # `printed`-based image while the paper came out solid (see
+    # CoverageEngine.fired for the measured numbers, then and now). The
+    # fallback keeps older/simpler callers (and every test written before
+    # `fired` existed) rendering exactly as they did.
     fired = printed if fired is None else np.asarray(fired, dtype=bool)
     if not fired.any():
         return False
     missed = ink & ~fired
-    # Got ink, but never enough dwell for the full intended dose -- the
-    # information the old `printed`-based COVERED panel was really showing,
-    # kept as its own panel rather than silently folded into "covered". A
-    # large THIN area means "slow down", not "you missed a spot". Omitted
-    # entirely when empty (the common, healthy case) so the usual image
-    # keeps its familiar three mask panels.
+    # Got ink, but never a full dose -- the information the old
+    # `printed`-based COVERED panel was really showing, kept as its own
+    # panel rather than silently folded into "covered". THIN means "this
+    # came out light", not "you missed a spot". Omitted entirely when empty,
+    # which under the drop-count model is the normal case (a swept column
+    # gets its full dose at any speed the tracker can sample), so the usual
+    # image keeps its familiar three mask panels.
     thin = ink & fired & ~printed
     panels = [
         ("INTENDED", ink),

@@ -79,12 +79,15 @@ def test_empty_profiler_is_safe():
 
 # ---- page mode --------------------------------------------------------
 def _run_page_profiler(mm_per_column, n=20, gap_s=0.01, speed=10.0, csv_path=None,
-                       ble_write_ceiling=DEFAULT_BLE_WRITE_CEILING_PER_S):
+                       ble_write_ceiling=DEFAULT_BLE_WRITE_CEILING_PER_S,
+                       columns=1, batch_cols=1):
     prof = PassProfiler(mm_per_column, live=False, csv_path=csv_path, mode="page",
-                        ble_write_ceiling=ble_write_ceiling)
+                        ble_write_ceiling=ble_write_ceiling,
+                        batch_cols=batch_cols)
     prof.start()
     for i in range(n):
-        prof.record_page_sample(u_mm=i * mm_per_column, v_mm=0.0, speed_mm_s=speed)
+        prof.record_page_sample(u_mm=i * mm_per_column, v_mm=0.0, speed_mm_s=speed,
+                                columns=columns)
         time.sleep(gap_s)
     out = io.StringIO()
     with redirect_stdout(out):
@@ -92,17 +95,44 @@ def _run_page_profiler(mm_per_column, n=20, gap_s=0.01, speed=10.0, csv_path=Non
     return prof, out.getvalue()
 
 
-def test_page_mode_reports_update_rate_within_ceiling():
-    # ~100 updates/s (10ms gaps), well under the default 270/s ceiling.
+def test_page_mode_reports_column_rate_within_ceiling():
+    # ~100 columns/s (10ms gaps), well under the default 270/s ceiling.
     prof, report = _run_page_profiler(mm_per_column=1.0, n=20, gap_s=0.01)
     assert prof.page_events == 20
+    assert prof.page_columns == 20
     assert "stayed within the known BLE ceiling" in report, report
 
 
-def test_page_mode_flags_updates_outrunning_a_low_ceiling():
+def test_page_mode_counts_columns_not_sends():
+    # The unit that matters is the column: the firmware fires each one it
+    # receives exactly once, so three copies in one send are three drops.
+    # Counting sends would under-report the load by that factor.
+    prof, report = _run_page_profiler(mm_per_column=1.0, n=10, gap_s=0.01,
+                                      columns=3)
+    assert prof.page_events == 10
+    assert prof.page_columns == 30
+    assert "columns queued       : 30" in report, report
+
+
+def test_page_mode_ceiling_scales_with_the_columns_packed_per_write():
+    # The BLE ceiling is in WRITES; batching several columns into each one
+    # raises the column ceiling proportionally. Reporting columns against a
+    # writes ceiling would cry wolf at any decent poll rate.
+    _, schmal = _run_page_profiler(mm_per_column=1.0, n=5, gap_s=0.01,
+                                   ble_write_ceiling=100.0, batch_cols=1)
+    _, breit = _run_page_profiler(mm_per_column=1.0, n=5, gap_s=0.01,
+                                  ble_write_ceiling=100.0, batch_cols=12)
+    assert "~100 cols/s" in schmal, schmal
+    assert "~1200 cols/s" in breit, breit
+
+
+def test_page_mode_flags_columns_outrunning_a_low_ceiling():
     _, report = _run_page_profiler(mm_per_column=1.0, n=20, gap_s=0.005,
                                    ble_write_ceiling=1.0)
-    assert "may lag behind" in report, report
+    assert "faster than BLE can" in report, report
+    # Says what the cost IS: under a fire-once firmware this is lost ink,
+    # not a delayed snapshot.
+    assert "ink" in report and "dropped" in report, report
 
 
 def test_page_mode_csv_log_written():
@@ -113,7 +143,7 @@ def test_page_mode_csv_log_written():
         with open(path) as fh:
             lines = fh.read().strip().splitlines()
         assert lines[0] == \
-            "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+            "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
         assert len(lines) == 1 + 5
     finally:
         if os.path.exists(path):
@@ -132,7 +162,7 @@ def test_page_mode_csv_header_has_quat_columns_even_without_samples():
         with open(path) as fh:
             lines = fh.read().strip().splitlines()
         assert lines[0] == \
-            "t_s,row,col,u_mm,v_mm,speed_mm_s,writes_per_s,qx,qy,qz,qw"
+            "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
     finally:
         if os.path.exists(path):
             os.remove(path)
@@ -185,7 +215,7 @@ def test_empty_page_profiler_is_safe():
     out = io.StringIO()
     with redirect_stdout(out):
         prof.finish()
-    assert "no pattern updates" in out.getvalue()
+    assert "no columns recorded" in out.getvalue()
 
 
 # ---- CLI wiring -----------------------------------------------------------
