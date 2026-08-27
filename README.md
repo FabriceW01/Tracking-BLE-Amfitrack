@@ -1681,7 +1681,8 @@ python main.py "Test" --profile --profile-csv timing.csv   # zusätzlich CSV-Log
 Live werden Kopfgeschwindigkeit, **geforderte** vs. **erreichte** Spaltenrate und die
 BLE-Write-Latenz ausgegeben (`load > 1.0` = BLE kommt nicht hinterher). Am Ende ein
 Fazit inkl. „bis ~X mm/s halten die Spalten mit". Das `--profile-csv` schreibt pro
-Spalte `t, column, advance, write_latency, speed` für die Offline-Analyse.
+Spalte `t_s, column, advance_mm, write_latency_ms, speed_mm_s, x, y, z` für die
+Offline-Analyse.
 
 Im **Seiten-Modus** misst `--profile` **Spalten pro Sekunde**, nicht
 Musterwechsel pro Sekunde: seit die Firmware jede empfangene Spalte genau
@@ -1692,6 +1693,30 @@ dagegen nur eine Abtastung, bei der etwas fällig war. Verglichen wird gegen
 bloß Aktualität — `PatternSender` verwirft dann die ältesten Spalten und
 zählt sie mit. Die CSV-Spalte heißt entsprechend `cols_per_s` (früher
 `writes_per_s`).
+
+**Rohe Sensorposition (`x,y,z`), in beiden Modi.** Bis dahin protokollierte
+kein Modus eine absolute Position: im Seiten-Modus stehen mit `u_mm`/`v_mm`
+nur Seitenebenen-Koordinaten (Kalibrierung, Düsenversatz und Gierwinkel sind
+eingerechnet), im Line-Modus mit `advance_mm` nur ein 1-D-Vorschub. Wer die
+Tracking-Rohdaten **während eines Drucks** brauchte, musste einen zweiten,
+getrennten `--pos --pos-json`-Lauf fahren — was mit einem echten Druck gar
+nicht kombinierbar ist.
+
+Die Spalten heißen bewusst wie die NDJSON-Felder aus `--pos-json` (`x`, `y`,
+`z`, drei Nachkommastellen), damit dieselbe Auswertung beide Quellen lesen
+kann. Fehlt die Position, bleiben die Felder **leer**, nicht `0,0,0` — anders
+als beim Quaternion wäre eine Null hier ein plausibler Messwert (direkt am
+Sender-Ursprung) und würde als echte Angabe gelesen. Im Seiten-Modus stehen
+sie **vor** der Quaternion-Gruppe, damit die Orientierung das Zeilenende
+bleibt.
+
+⚠️ Trotz der Rohwerte ersetzt die Profil-CSV `--pos --pos-json` **nicht** für
+Rauschmessungen: geschrieben wird nur, wenn tatsächlich Spalten rausgehen
+(Seiten-Modus nur bei fälliger Tinte und nicht-leerem Muster, Line-Modus nur
+beim Spaltenwechsel). Sie ist damit keine gleichmäßige Zeitreihe. Im
+Line-Modus kommt hinzu, dass ein ganzer Spalten-Batch in einem BLE-Vorgang
+rausgeht und die Zeilen dieses Batches sich dieselbe Position teilen — die
+Wiederholung ist die Bündelung, kein eingefrorenes Tracking.
 
 Im Seitenmodus (`--mode page`) enthält dieselbe `--profile-csv`-Datei zusätzlich
 `qx,qy,qz,qw` — das rohe Orientierungs-Quaternion des Sensors, sofern die Hardware es

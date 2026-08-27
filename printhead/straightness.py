@@ -118,9 +118,9 @@ def read_profile_csv(path: str) -> Dict[str, np.ndarray]:
     Read a page-mode ``--profile-csv`` file into arrays.
 
     Expects the page-mode header written by ``PassProfiler.start()``:
-    ``t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw``.
+    ``t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw``.
 
-    A LINE-mode CSV (``t_s,column,advance_mm,write_latency_ms,speed_mm_s``)
+    A LINE-mode CSV (``t_s,column,advance_mm,write_latency_ms,speed_mm_s,x,y,z``)
     is rejected with a clear message rather than half-parsed: it records a
     1D column index and an advance distance, with no second page axis at
     all, so there is genuinely no 2D path in it to check straightness

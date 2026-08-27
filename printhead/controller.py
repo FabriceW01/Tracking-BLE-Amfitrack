@@ -751,7 +751,11 @@ class PrintController:
                             per_col = (loop.time() - tw) / len(cols)
                             for c in cols:
                                 if profiler is not None:
-                                    profiler.record_write(c, adv, per_col, speed)
+                                    # Same pos for every column of this batch
+                                    # -- one BLE round trip covered them all
+                                    # (see record_write's docstring).
+                                    profiler.record_write(c, adv, per_col, speed,
+                                                          pos=pos)
                                 if recorder is not None:
                                     recorder.record(adv, self.frames[c])
                             frontier = col
@@ -1292,9 +1296,14 @@ class PrintController:
                     if copies > 0 and pattern != BLANK_FRAME:
                         sender.send(pattern, copies=copies)
                         if profiler is not None:
+                            # pos alongside u_mm/v_mm: the raw tracker
+                            # reading next to the page-plane projection of
+                            # it, so a later analysis can separate a tracking
+                            # problem from a calibration one.
                             profiler.record_page_sample(u_mm, v_mm, speed,
                                                         quat=quat,
-                                                        columns=copies)
+                                                        columns=copies,
+                                                        pos=pos)
 
                     # Live --verbose status line (see this method's docstring):
                     # the --pos equivalent, but usable while an actual pass is

@@ -687,7 +687,7 @@ def test_freehand_pass_with_profile_csv_writes_the_page_schema():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
 
 
 def test_freehand_pass_with_profile_csv_logs_orientation_when_the_tracker_has_it():
@@ -711,12 +711,48 @@ def test_freehand_pass_with_profile_csv_logs_orientation_when_the_tracker_has_it
 
         with open(csv_path) as fh:
             lines = fh.read().strip().splitlines()
-        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+        assert lines[0] == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
         data_rows = lines[1:]
         assert data_rows, "expected at least one profiled sample"
         quat_rows = [row.split(",")[-4:] for row in data_rows]
         assert any(fields == ["0.0000", "0.0000", "0.0000", "1.0000"]
                   for fields in quat_rows), quat_rows
+
+
+def test_freehand_pass_with_profile_csv_logs_the_raw_sensor_position():
+    # End-to-end, and the point of the whole feature: the positions the
+    # TRACKER reported must reach the CSV, not just the page-plane projection
+    # of them. Proves the controller actually passes `pos` through -- a
+    # profiler-level test only proves the profiler could write it if asked.
+    #
+    # The scripted positions are known exactly, so the x column can be
+    # checked against them by value rather than just for non-emptiness.
+    ink = np.ones((30, 5), dtype=bool)
+    with tempfile.TemporaryDirectory() as tmp:
+        csv_path = os.path.join(tmp, "profile.csv")
+        ctrl = _controller(ink, timeout_s=5.0, profile=True, profile_csv=csv_path)
+        positions = _sweep_positions(n_cols=5, samples_per_col=12)
+        asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(),
+                                              ScriptedTracker(positions)))
+
+        with open(csv_path) as fh:
+            lines = fh.read().strip().splitlines()
+        kopf = lines[0].split(",")
+        zeilen = [z.split(",") for z in lines[1:]]
+        assert zeilen, "expected at least one profiled sample"
+        ix = kopf.index("x")
+
+        # Never blank on a real pass: `pos` is guaranteed bound at the call
+        # site, so an empty column here means the controller stopped handing
+        # it over.
+        assert all(z[ix] and z[ix + 1] and z[ix + 2] for z in zeilen), zeilen[:3]
+
+        # Every logged x must be one of the scripted x values.
+        erwartet = {f"{p[0]:.3f}" for p in positions}
+        assert {z[ix] for z in zeilen} <= erwartet, (
+            {z[ix] for z in zeilen} - erwartet)
+        # ...and the sweep really moved, so this is not one repeated value.
+        assert len({z[ix] for z in zeilen}) > 1, zeilen[:3]
 
 
 def test_freehand_pass_with_profile_csv_blank_orientation_without_a_quat_tracker():
@@ -1062,7 +1098,7 @@ def test_freehand_pass_interrupted_still_closes_profiler_csv_and_attempts_record
         assert os.path.exists(csv_path), "profiler CSV must still be closed/flushed"
         with open(csv_path) as fh:
             header = fh.readline().strip()
-        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw"
+        assert header == "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
 
         assert os.path.exists(png_path), "coverage PNG must still be attempted"
 

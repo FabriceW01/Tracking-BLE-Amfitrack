@@ -53,6 +53,27 @@ import numpy as np
 DEFAULT_BLE_WRITE_CEILING_PER_S = 270.0
 
 
+def _xyz_fields(pos) -> str:
+    """
+    The three raw-sensor CSV fields for ``pos``, or three BLANKS when there
+    is no position.
+
+    Blank, not ``0,0,0`` -- the same rule the quaternion columns already
+    follow (see ``record_page_sample``), and for a sharper reason here:
+    ``0,0,0`` is a perfectly plausible position right at the transmitter
+    origin, so a zero-filled row would read as real data rather than as
+    missing data.
+
+    ``.3f`` matches ``diagnostics.monitor_position``'s ``round(..., 3)`` on
+    the same quantity in ``--pos-json``, and the ``u_mm``/``v_mm``/
+    ``advance_mm`` columns in this very file, so the two recordings of one
+    pass are directly comparable.
+    """
+    if pos is None:
+        return ",,"
+    return (f"{float(pos[0]):.3f},{float(pos[1]):.3f},{float(pos[2]):.3f}")
+
+
 class PassProfiler:
     def __init__(self, mm_per_column: float, live: bool = True,
                  csv_path: Optional[str] = None, live_every_s: float = 0.5,
@@ -91,6 +112,19 @@ class PassProfiler:
         if self.csv_path:
             try:
                 self._csv = open(self.csv_path, "w")
+                # x,y,z: the RAW sensor position, in the tracker's own frame.
+                # Distinct from u_mm/v_mm (page mode), which are page-plane
+                # coordinates with the calibration, the nozzle offset and the
+                # yaw correction already folded in, and from advance_mm (line
+                # mode), which is a 1-D scalar along the travel axis. Until
+                # these columns existed, a pass recorded no absolute sensor
+                # position at all and the raw signal could only be captured by
+                # a SEPARATE `--pos --pos-json` run -- which cannot be combined
+                # with an actual print.
+                #
+                # Placed BEFORE the quaternion group on purpose: several tests
+                # read the orientation off the END of a row (`[-4:]`), so the
+                # quaternion has to stay the tail.
                 if self.mode == "page":
                     # qx,qy,qz,qw: raw orientation quaternion, logged purely for
                     # offline correlation -- investigating whether cart rotation,
@@ -99,15 +133,30 @@ class PassProfiler:
                     # PageMapper), explains observed freehand misalignment.
                     # Not read back or used to correct anything live yet.
                     self._csv.write(
-                        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,qx,qy,qz,qw\n")
+                        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,"
+                        "x,y,z,qx,qy,qz,qw\n")
                 else:
-                    self._csv.write("t_s,column,advance_mm,write_latency_ms,speed_mm_s\n")
+                    self._csv.write("t_s,column,advance_mm,write_latency_ms,"
+                                    "speed_mm_s,x,y,z\n")
             except OSError as exc:
                 print(f"[profile] cannot open CSV {self.csv_path!r}: {exc}")
                 self._csv = None
 
     def record_write(self, column: int, advance_mm: float, latency_s: float,
-                     speed_mm_s: Optional[float]) -> None:
+                     speed_mm_s: Optional[float], pos=None) -> None:
+        """
+        Log one line-mode column write.
+
+        ``pos`` is the raw ``(x, y, z)`` sensor position in mm, or ``None``
+        (blank fields -- see ``_xyz_fields``). Optional and keyword-friendly
+        so existing callers keep working.
+
+        Note the cadence: the caller writes a whole BATCH of columns in one
+        BLE round trip and then calls this once per column of that batch, so
+        several consecutive rows share one ``pos`` -- exactly as they already
+        share one ``advance_mm`` and one latency. Repeated x/y/z across a run
+        of rows is that batching, not frozen tracking.
+        """
         self.n_cols += 1
         self.total_write_time += latency_s
         self.write_latencies.append(latency_s)
@@ -117,7 +166,8 @@ class PassProfiler:
         if self._csv is not None:
             t = time.perf_counter() - self._t0
             self._csv.write(f"{t:.4f},{column},{advance_mm:.3f},"
-                            f"{latency_s * 1000:.3f},{speed_mm_s or 0.0:.2f}\n")
+                            f"{latency_s * 1000:.3f},{speed_mm_s or 0.0:.2f},"
+                            f"{_xyz_fields(pos)}\n")
 
         if self.live:
             now = time.perf_counter()
@@ -128,13 +178,21 @@ class PassProfiler:
     def record_page_sample(self, u_mm: float, v_mm: float,
                            speed_mm_s: Optional[float],
                            quat: Optional[np.ndarray] = None,
-                           columns: int = 1) -> None:
+                           columns: int = 1, pos=None) -> None:
         """
         Log one page-mode send. Call this whenever columns were actually
         handed to ``PatternSender.send()``, with ``columns`` set to how many
         went into the queue -- that is the ink, since the firmware fires each
         received column exactly once. Ticks that owe no drops are not logged,
         mirroring ``record_write()``'s per-event cadence.
+
+        ``pos`` is the raw ``(x, y, z)`` sensor position in mm -- the
+        tracker's own frame, BEFORE the page projection that produced the
+        ``u_mm``/``v_mm`` arguments. Both are logged because they answer
+        different questions: ``u_mm``/``v_mm`` say where the ink went on the
+        page, ``x``/``y``/``z`` say what the tracker actually reported, so a
+        disagreement between them can be attributed to the calibration rather
+        than guessed at. ``None`` writes blank fields (see ``_xyz_fields``).
 
         ``quat`` is the raw ``(qx, qy, qz, qw)`` orientation for this sample
         (see ``AmfitrackTracker.read_pose``), or ``None`` when no orientation
@@ -173,7 +231,7 @@ class PassProfiler:
                 quat_fields = ",,,"
             self._csv.write(f"{t:.4f},{row},{col},{u_mm:.3f},{v_mm:.3f},"
                             f"{speed_mm_s or 0.0:.2f},{cols_per_s:.1f},"
-                            f"{quat_fields}\n")
+                            f"{_xyz_fields(pos)},{quat_fields}\n")
 
         if self.live and now - self._last_live >= self.live_every_s:
             self._last_live = now
