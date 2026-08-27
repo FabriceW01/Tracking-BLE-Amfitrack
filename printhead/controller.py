@@ -65,9 +65,9 @@ _STALL_GRACE_S = 0.2
 # 86.7% at 50 and 72.5% at 60.
 #
 # BLE is not the binding constraint: the column rate demanded is
-# drops_per_pixel * speed / mm_per_column, so even 43.5 mm/s asks for
-# 1500 columns/s = 125 writes/s at 12 columns per write, under half the
-# measured ~270 writes/s ceiling.
+# drops_per_pixel * speed / mm_per_column, so at the default dose even
+# 43.5 mm/s asks for 500 columns/s = 42 writes/s at 12 columns per write,
+# well under the measured ~270 writes/s ceiling.
 #
 # 25 mm/s is kept as the warning point, now as deliberate headroom rather
 # than as the edge of a cliff: it sits ~40% below the first speed at which
@@ -199,7 +199,7 @@ class PrintController:
                  profile: bool = False, profile_csv: Optional[str] = None,
                  record: Optional[str] = None,
                  page_calibration: Optional[PageCalibration] = None,
-                 drops_per_pixel: int = DEFAULT_DROPS_PER_PIXEL,
+                 drops_per_pixel: float = DEFAULT_DROPS_PER_PIXEL,
                  spray_radius_mm: float = 0.0,
                  spray_strength: float = 0.0,
                  nozzle_group: int = 1,
@@ -835,9 +835,12 @@ class PrintController:
             print(json.dumps({"event": "coverage_start", "width": self.width,
                               "height": self.height}), flush=True)
         else:
+            dichte = (self.drops_per_pixel / t.mm_per_column
+                      if t.mm_per_column else 0.0)
             print(f"Printing freehand: {self.width} columns x {self.height} rows, "
-                  f"{self.drops_per_pixel} drops/pixel. Move the cart over "
-                  f"the calibrated page.")
+                  f"{self.drops_per_pixel:g} drops/pixel "
+                  f"({dichte:.1f} drops/mm at {t.mm_per_column:.3f} mm/column). "
+                  f"Move the cart over the calibrated page.")
 
         # The old dwell model needed a quantization-cliff guard here:
         # dose_hold_s had to stay below the poll interval or coverage
@@ -863,11 +866,13 @@ class PrintController:
 
         # BLE is deliberately NOT warned about up front: every drop is a
         # queued column, so the demanded column rate is drops_per_pixel *
-        # speed / mm_per_column, and even at the column-skipping edge above
-        # that is 3 * 43.5 / 0.087 = 1500 columns/s -- 125 writes/s at 12
-        # columns per write, under half the measured ~270 writes/s ceiling.
-        # The speed is not known here anyway; --profile reports the real
-        # update rate against that ceiling once a pass is running.
+        # speed / mm_per_column, and at the default dose even the
+        # column-skipping edge above is 1 * 43.5 / 0.087 = 500 columns/s --
+        # 42 writes/s at 12 columns per write, well under the measured
+        # ~270 writes/s ceiling. The speed is not known here anyway;
+        # --profile reports the real column rate against that ceiling once a
+        # pass is running, which is where a raised dose or a link stuck at
+        # one column per write would actually show up.
 
         # No boresight_quat on this calibration (every calibration saved
         # before this feature existed): PageMapper.project() therefore never

@@ -83,12 +83,37 @@ from .rendering import pack_nozzle_bits
 # 5.40 ms with a 5.00 ms interval) -- because a drop count has no relationship
 # to the polling rate at all.
 #
-# The value 3 is inherited from line mode's long-validated
-# ``BLE_DROPS_PER_COLUMN``: a drop spreads to roughly 60-120 um on paper, so
-# covering one column takes about three of them. It is a measured-once value
-# from real prints, not a finished calibration -- expect iteration, the same
-# way every other dose constant in this project needed several hardware
-# rounds.
+# CORRECTION: this shipped as 3, copied from line mode's firmware constant
+# ``BLE_DROPS_PER_COLUMN``, and it over-inked real prints by exactly that
+# factor -- reported from hardware as "jetzt kommt zu viel raus", against a
+# pre-conversion print that came out lighter AND sharper.
+#
+# The mistake was treating 3 as a property of the ink when it is a property
+# of the COLUMN WIDTH it was validated at. What the paper cares about is
+# drops per millimetre of travel, and this constant is divided by
+# ``mm_per_column`` to get there:
+#
+#     drops/mm = drops_per_pixel / mm_per_column
+#     3 / 0.200 = 15.0     line mode's validated 0.2 mm column
+#     3 / 0.087 = 34.5     the same 3 at today's 0.087 mm column  <- 2.3x
+#     1 / 0.087 = 11.5     this default
+#
+# 11.5 drops/mm is not a guess: it is exactly what the PRE-conversion client
+# delivered at low speed, i.e. the density the operator has actually judged
+# on paper. Simulated against the old "send only on pattern change" rule on
+# the fire-once firmware, a slow pass put down 120 columns over 120 columns
+# of travel -- 1.00 drops per column, 11.5 per mm. (It fell off a cliff
+# above that: 0.51 drops/pixel at 17.3 mm/s with 49% of pixels getting no
+# ink at all, 0.01 at 25 mm/s. Reproducing its DENSITY, not its
+# speed-dependence, is the goal.)
+#
+# The physics agrees: a drop spreads to roughly 60-120 um, so one drop
+# already covers an 87 um column. Three only made sense for a column two to
+# three times wider.
+#
+# Still a first calibration, not a finished one -- raise it if a print comes
+# out faint. Fractional values are accepted precisely so this can be tuned
+# in both directions without the column width having to move with it.
 #
 # Who supplies ``drops``: ``PrintController._print_freehand_pass`` converts
 # the cart's travel since the last send into a number of copies to queue
@@ -97,7 +122,7 @@ from .rendering import pack_nozzle_bits
 # to ``step()``. Ink per pixel is then independent of hand speed by
 # construction: move twice as fast and twice as many copies go out per
 # second, in half the time over the same pixel.
-DEFAULT_DROPS_PER_PIXEL = 3
+DEFAULT_DROPS_PER_PIXEL = 1.0
 
 # Slack on the "is this pixel fully dosed" comparison -- see step()'s Step 5
 # for why a float dose needs one at all.
@@ -143,7 +168,7 @@ class CoverageEngine:
     """
 
     def __init__(self, ink: np.ndarray, mm_per_column: float,
-                 drops_per_pixel: int = DEFAULT_DROPS_PER_PIXEL,
+                 drops_per_pixel: float = DEFAULT_DROPS_PER_PIXEL,
                  spray_radius_mm: float = 0.0,
                  spray_strength: float = 0.0,
                  nozzle_group: int = 1):
@@ -192,7 +217,12 @@ class CoverageEngine:
         # reason. See recording.render_coverage's THIN panel.
         self.fired = np.zeros_like(ink, dtype=bool)
         self.mm_per_column = mm_per_column
-        self.drops_per_pixel = max(1, int(drops_per_pixel))
+        # Fractional on purpose: the dose is a density (drops per mm, once
+        # divided by mm_per_column), and clamping it to whole drops would
+        # make the smallest step below the default a 100% jump. The floor is
+        # a hair above zero rather than zero, since a dose of 0 would mark
+        # every visited pixel printed without any ink going out at all.
+        self.drops_per_pixel = max(_DOSE_EPS, float(drops_per_pixel))
         self.spray_radius_mm = spray_radius_mm
         self.spray_strength = spray_strength
         # Ties nozzles nozzle_group*k .. nozzle_group*k+nozzle_group-1 into
@@ -579,11 +609,11 @@ class CoverageEngine:
             # crosses it sum to exactly `drops_per_pixel`, by construction,
             # at any speed; crediting the integer leaves it at the mercy of
             # where the rounding happened to land. Simulated over a
-            # 120-column solid block, the integer version reported 88.3% of
-            # columns printed at 25 mm/s and 96.7% at 28 (100% at every other
-            # speed in a 3-43.5 mm/s sweep) and delivered 550 columns/s at
-            # 17.3 mm/s against the budget's 597, where the fraction
-            # delivers 594. `drops = 0` (a stationary cart) credits nothing
+            # 120-column solid block at the default dose, the integer version
+            # reported 88.3% of columns printed at 25 mm/s, 75.0% at 30,
+            # 75.8% at 35 and 84.2% at 43.5 (against a flat 100% for the
+            # fraction), and delivered 257 columns/s at 30 mm/s against the
+            # budget's 343. `drops = 0` (a stationary cart) credits nothing
             # and fires nothing either way.
             treffer = self._pixel_drops.get(pixel, 0.0) + drops
 
@@ -627,10 +657,11 @@ class CoverageEngine:
             # because it does not release the nozzle -- that is what the two
             # thresholds buy. Reporting AND releasing on `melden` was tried
             # and is measurably wrong: it cuts each crossing short by up to a
-            # sample of real ink, dropping the delivered column rate from
-            # ~597/s (the 3-drops-per-column budget) to 455/s at 17.3 mm/s
-            # and to 483/s at 25 mm/s -- a 20-40% under-ink that also stops
-            # being monotonic in speed.
+            # sample of real ink. Measured at the default dose against the
+            # budget's column rate: 142/s instead of 199 at 17.3 mm/s, 74/s
+            # instead of 285 at 25, 189/s instead of 343 at 30 -- a 30-75%
+            # under-ink that also stops being monotonic in speed, while
+            # coverage still cheerfully reports 100%.
             #
             # The epsilon is float hygiene, not policy: a credit built from
             # summed fractions lands on its target only up to rounding (three

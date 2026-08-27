@@ -699,17 +699,42 @@ python main.py --pattern checkerboard --mode page --page-calibration page_calibr
 
 **Dosierung in `--mode page` (`--drops-per-pixel`):** Ein Pixel gilt als
 gedruckt, sobald es `--drops-per-pixel` Tropfen bekommen hat — Default
-`coverage.DEFAULT_DROPS_PER_PIXEL = 3`, übernommen aus dem im Zeilen-Modus
-seit Langem bewährten `BLE_DROPS_PER_COLUMN`. Wie viele Kopien einer Spalte
-dafür rausgehen, entscheidet **allein der zurückgelegte Weg**:
+`coverage.DEFAULT_DROPS_PER_PIXEL = 1`. Wie viele Kopien einer Spalte dafür
+rausgehen, entscheidet **allein der zurückgelegte Weg**:
 
 ```
 Kopien für dieses Sample = --drops-per-pixel × gefahrener Weg / --mm-per-column
 ```
 
 Der Bruchteil wird in einem Akkumulator über die Samples mitgeschleppt, damit
-nichts durch Abschneiden verlorengeht (bei 500 Hz und 17,3 mm/s ist ein Sample
-1,2 Tropfen wert — pro Sample abzuschneiden lieferte 1 statt 3 pro Spalte).
+nichts durch Abschneiden verlorengeht. Gebrochene Werte sind erlaubt — der
+Regler muss nach unten feiner sein als „ganz aus".
+
+⚠️ **Der Wert ist eine Dichte, keine Tropfenzahl.** Aufs Papier geht
+`--drops-per-pixel ÷ --mm-per-column`:
+
+```
+1 / 0,087 = 11,5 Tropfen/mm   <- Default, heutige Spaltenbreite
+3 / 0,200 = 15,0 Tropfen/mm   <- Zeilen-Modus, wofür die 3 validiert wurde
+3 / 0,087 = 34,5 Tropfen/mm   <- dieselbe 3 bei heutiger Spaltenbreite
+```
+
+Wird `--mm-per-column` geändert, ändert sich die Tintenmenge mit, auch wenn
+diese Zahl gleich bleibt. Das war ein echter Fehler in der ersten Fassung der
+Umstellung: der Default stand auf 3, kopiert aus dem Firmware-Konstanten
+`BLE_DROPS_PER_COLUMN` des Zeilen-Modus, ohne zu bemerken, dass die 3 zu einer
+**0,2 mm** breiten Spalte gehört. Bei 0,087 mm ergibt das gut die dreifache
+Tintenmenge — von der Hardware zurückgemeldet als „jetzt kommt zu viel raus",
+gegenüber einem vorherigen Druck, der heller **und schärfer** war. Die 11,5
+Tropfen/mm des heutigen Defaults sind genau das, was der Client **vor** der
+Umstellung bei langsamer Fahrt geliefert hat (simuliert: 120 Spalten Tinte auf
+120 Spalten Fahrweg), also die Dichte, die auf echtem Papier beurteilt wurde.
+
+Gegenprobe aus der Physik: ein Tropfen läuft auf ~60–120 µm aus, eine Spalte
+ist 87 µm breit — **ein** Tropfen deckt sie also bereits ab.
+
+Der Wert ist eine erste Kalibrierung, keine fertige: kommt ein Druck blass
+heraus, hochsetzen; kommt er verlaufen heraus, runter (z. B. `0.7`).
 
 Das ist **geschwindigkeitsunabhängig per Konstruktion**: doppeltes Tempo heißt
 doppelter Weg je Sample, also doppelt so viele Kopien in der halben Zeit — die
@@ -774,8 +799,10 @@ Papier fehlt, nicht bloß in der Buchhaltung.
 
 BLE ist dabei nicht die Grenze: jeder Tropfen ist eine gesendete Spalte, also
 `--drops-per-pixel × v / --mm-per-column` Spalten/s — selbst 43,5 mm/s
-verlangen 1500 Spalten/s = 125 Schreibvorgänge/s bei 12 Spalten je Vorgang,
-unter der Hälfte der gemessenen ~270/s.
+verlangen beim Default nur 500 Spalten/s = 42 Schreibvorgänge/s bei 12 Spalten
+je Vorgang, weit unter den gemessenen ~270/s. (Mit `--drops-per-pixel 3` wären
+es 1500 Spalten/s bzw. 125 Schreibvorgänge/s — immer noch drin, aber bei
+`--batch-cols 1` bereits über der Decke.)
 
 ⚠️ **Firmware-Kopplung:** Erfordert die Firmware mit dem
 Feuer-einmal-Seitenmodus (Branch `claude/ble-i2s-nozzle-frequency-axpot1` im
@@ -838,8 +865,9 @@ Streifen, deren Dichte sinnlos mit dem Tempo schwankt (gemessen: 70,0 % der
 Spalten bei 5 mm/s, 35,0 % bei 10, 51,7 % bei 17,3, 9,2 % bei 40 — gegen
 durchgehend 100 % `fired`). Die Düse **freizugeben** darf dagegen erst die
 strenge Schwelle: wer beides auf der lockeren Schwelle macht, kürzt jede
-Überquerung um bis zu eine Probe echte Tinte (gemessen: 455 statt 594
-Spalten/s bei 17,3 mm/s, 483 statt 862 bei 25).
+Überquerung um bis zu eine Probe echte Tinte — gemessen beim Default-Dose
+142 statt 199 Spalten/s bei 17,3 mm/s, 74 statt 285 bei 25 und 189 statt 343
+bei 30, also 30–75 % zu wenig, während die Deckung weiter 100 % meldet.
 
 **Neue Tests** (`tests/test_coverage.py`, `tests/test_freehand_pass.py`,
 `tests/test_pattern_sender.py`):

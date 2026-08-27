@@ -1889,6 +1889,22 @@ def test_latency_compensate_off_by_default_matches_omitting_it():
     assert ctrl_default.latency_compensate_s == ctrl_explicit.latency_compensate_s == 0.0
 
 
+def test_cli_drops_per_pixel_accepts_a_fraction_and_reaches_the_controller():
+    # The dose is a density (drops/mm once divided by --mm-per-column), so
+    # whole drops are too coarse a dial: parsing this as an int would make
+    # the only step below the default "no ink at all", and would silently
+    # truncate 0.5 to 0.
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "page",
+                           "--page-frame", "simple"])
+    assert args.drops_per_pixel is None      # unset -> the engine's default
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "page",
+                           "--page-frame", "simple",
+                           "--drops-per-pixel", "0.5"])
+    assert args.drops_per_pixel == 0.5
+    ctrl = cli.build_controller(args)
+    assert ctrl.drops_per_pixel == 0.5
+
+
 def test_cli_latency_compensate_s_defaults_to_none_and_parses():
     args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
     assert args.latency_compensate_s is None

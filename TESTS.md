@@ -42,7 +42,7 @@ später nicht mehr auswertbar.
 | Einstellung | Default (Stand dieser Datei) | benutzt |
 |---|---|---|
 | `--mm-per-column` | 0.087 | |
-| `--drops-per-pixel` | 3 | |
+| `--drops-per-pixel` | 1 | |
 | `--spray-radius-mm` | 0.15 | |
 | `--spray-strength` | 0.5 | |
 | `--poll-hz` | 500 | |
@@ -545,9 +545,9 @@ interpolierte Geschwindigkeit, bei der die Deckung unter die Schwelle fällt.
    zuerst `--poll-hz` und die tatsächliche Schreibrate (`--profile`) prüfen.
 2. **Gegen die BLE-Seite:** die Maximalgeschwindigkeit aus Vorflug V2. Jeder
    Tropfen ist eine gesendete Spalte, die geforderte Spaltenrate also
-   `--drops-per-pixel × v / --mm-per-column` — bei 43,5 mm/s sind das
-   1500 Spalten/s ≈ 125 Schreibvorgänge/s (12 Spalten je Schreibvorgang), gut
-   unterhalb der gemessenen ~270/s. BLE sollte hier also **nicht** die Grenze
+   `--drops-per-pixel × v / --mm-per-column` — beim Default (1) sind das bei
+   43,5 mm/s 500 Spalten/s ≈ 42 Schreibvorgänge/s (12 Spalten je
+   Schreibvorgang), weit unterhalb der gemessenen ~270/s. BLE sollte hier also **nicht** die Grenze
    sein; ist die gemessene Grenze trotzdem die aus V2, ist die Verbindung
    schlechter als angenommen.
 3. **Gegen die Warnschwelle:** der Default steht bei 25 mm/s

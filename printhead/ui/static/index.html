@@ -236,7 +236,8 @@
         <div class="field"><label>Abtastrate (--poll-hz)</label>
           <input id="poll" type="number" value="500"></div>
         <div class="field"><label>Tropfen je Pixel (--drops-per-pixel)</label>
-          <input id="dose" type="number" value="3" step="1" min="1"></div>
+          <input id="dose" type="number" value="1" step="0.1" min="0.1"
+                 title="Tinte je Spalte Fahrweg. Was aufs Papier geht, ist dieser Wert geteilt durch --mm-per-column: 1 / 0.087 = 11,5 Tropfen/mm. Kommt der Druck zu dunkel/verlaufen, runter; kommt er zu blass, rauf."></div>
         <div class="field"><label>Glättung (--smooth-ms)</label>
           <input id="smooth" type="number" value="0" step="1"></div>
         <div class="field"><label>Spray-Radius (mm)</label>

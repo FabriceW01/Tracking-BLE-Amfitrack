@@ -138,16 +138,19 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable tracking (forces time mode)")
     g.add_argument("--period", type=float, default=0.03,
                    help="Seconds per column in time mode (default 0.03)")
-    g.add_argument("--drops-per-pixel", type=int, default=None,
+    g.add_argument("--drops-per-pixel", type=float, default=None,
                    help="Page mode: how many drops a pixel must receive "
                         "before it counts as printed (default: "
-                        "coverage.DEFAULT_DROPS_PER_PIXEL = 3, inherited from "
-                        "line mode's long-validated BLE_DROPS_PER_COLUMN). "
-                        "The firmware fires each column it receives exactly "
-                        "once and never repeats, so ink is decided entirely "
-                        "here: this is the number of copies the client queues "
-                        "per column of travel. Replaces the old --dose-hold-s, "
-                        "which modelled a firmware repeat rate that no longer "
+                        "coverage.DEFAULT_DROPS_PER_PIXEL = 1). The firmware "
+                        "fires each column it receives exactly once and never "
+                        "repeats, so ink is decided entirely here: this is "
+                        "the number of copies the client queues per column of "
+                        "travel. What reaches the paper is this DIVIDED BY "
+                        "--mm-per-column, i.e. 1 / 0.087 = 11.5 drops/mm -- "
+                        "so raising --mm-per-column thins the print unless "
+                        "this is raised with it. Fractional values are "
+                        "allowed. Replaces the old --dose-hold-s, which "
+                        "modelled a firmware repeat rate that no longer "
                         "exists")
     g.add_argument("--spray-radius-mm", type=float, default=0.15,
                    help="Page mode ink-spread model: physical radius (mm) "
