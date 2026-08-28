@@ -110,6 +110,31 @@ def test_ruler_ticks_pattern_spacing_is_fixed_at_10mm_and_1mm():
         assert plain_col.sum() == 1 and plain_col[mid], col
 
 
+def test_ruler_ticks_pattern_major_ticks_land_on_the_minor_grid():
+    # Regression: major_step and minor_step used to be rounded INDEPENDENTLY
+    # from mm_per_column. At values that don't divide 10mm and 1mm onto a
+    # clean common ratio -- e.g. the real rig's ~0.087mm, where
+    # round(1/0.087) == 11 but round(10/0.087) == 115, not 11*10 == 110,
+    # and gcd(11, 115) == 1 -- the two grids drifted apart after column 0
+    # and a major tick essentially never landed on a minor one again for
+    # the rest of the print. Seen for real: a printed coverage.png where
+    # the long ticks visibly walked off the short ones. major_step must
+    # instead be an exact multiple of minor_step, so every major tick's
+    # column is divisible by minor_step, at EVERY mm_per_column -- not just
+    # the ones (0.1, 0.2) where the old independent rounding happened to
+    # agree by luck (which is exactly why this shipped unnoticed).
+    for mm_per_column in (0.087, 0.0868421, 0.13, 0.037, 0.29):
+        ink = patterns.ruler_ticks_pattern(300.0, mm_per_column, rows=2000)
+        minor_step = max(1, round(1.0 / mm_per_column))
+        minor_band_h = int(ink[:, minor_step].sum())
+        # A MAJOR tick's band is strictly taller than a MINOR-only column's
+        # (20mm > 6mm, see _RULER_MAJOR_LEN_MM/_RULER_MINOR_LEN_MM); every
+        # such column must sit on the minor grid.
+        offenders = [c for c in range(ink.shape[1])
+                    if int(ink[:, c].sum()) > minor_band_h and c % minor_step != 0]
+        assert offenders == [], (mm_per_column, offenders[:5])
+
+
 def test_ruler_ticks_pattern_line_mode_major_tick_clamps_to_full_height():
     # In --mode line/time, rows == IMAGE_HEIGHT (~13.1mm bar span): a
     # requested 20mm major tick cannot physically fit and must clamp to

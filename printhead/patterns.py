@@ -109,9 +109,37 @@ def ruler_ticks_pattern(length_mm: float, mm_per_column: float,
     --pattern-height-mm/``rows`` can exceed the bar span through vertical
     travel, does the requested 20mm/6mm print at its literal length.
 
+    Tick SPACING is derived so every major tick lands exactly on a minor
+    tick, rather than rounding ``_RULER_MAJOR_EVERY_MM / mm_per_column`` and
+    ``_RULER_MINOR_EVERY_MM / mm_per_column`` independently. Those two
+    roundings do NOT generally agree: at the real rig's ``mm_per_column``
+    (~0.087mm, see ``geometry.py``'s ``NOZZLE_PITCH_MM``/README),
+    ``round(1 / 0.087) == 11`` but ``round(10 / 0.087) == 115``, not
+    ``11 * 10 == 110`` -- two independently rounded grids with no common
+    factor (``gcd(11, 115) == 1``), so after the shared column 0 a major
+    tick essentially never falls on a minor one again for the rest of the
+    print. CONFIRMED on real hardware: a printed ``coverage.png`` where the
+    long ticks visibly walk off the short ones as the print progresses,
+    reported by the hardware owner. ``major_step`` below is instead an
+    EXACT integer multiple of ``minor_step`` (10, from
+    ``_RULER_MAJOR_EVERY_MM / _RULER_MINOR_EVERY_MM``), which guarantees the
+    two grids coincide by construction at every ``mm_per_column`` -- not
+    just the ones (0.1, 0.2, ...) where the two independent roundings
+    happen to land on a clean ratio, which is what let this ship unnoticed:
+    every value exercised by ``tests/test_patterns_and_mapping.py`` before
+    this fix was one of those lucky ones.
+
+    The cost: the major tick's real spacing can be up to ``10 *
+    minor_step``'s own quantisation error away from a literal 10.0mm
+    (bounded by construction, not drifting further with each tick) --
+    irrelevant to how a tape measure is actually read, which is by counting
+    minor ticks past a major one, not by trusting each major tick's
+    absolute position independently.
+
     The major tick is always drawn on top of (i.e. after) the minor one at
-    a shared column -- every 10mm is also a 1mm mark -- which is safe
-    without an explicit "skip if already major" check because
+    a shared column -- every major column is now also a minor column, by
+    the grid-alignment guarantee just above -- which is safe without an
+    explicit "skip if already major" check because
     ``_RULER_MAJOR_LEN_MM > _RULER_MINOR_LEN_MM`` makes the major band a
     strict superset of the minor one at every rows/mm_per_column
     combination, clamped or not.
@@ -130,7 +158,11 @@ def ruler_ticks_pattern(length_mm: float, mm_per_column: float,
     major_lo, major_hi = _tick_band(_RULER_MAJOR_LEN_MM)
 
     minor_step = max(1, round(_RULER_MINOR_EVERY_MM / mm_per_column))
-    major_step = max(1, round(_RULER_MAJOR_EVERY_MM / mm_per_column))
+    # NOT round(_RULER_MAJOR_EVERY_MM / mm_per_column) -- see the docstring's
+    # "Tick SPACING" paragraph for the real-hardware drift that rounding
+    # independently of minor_step causes. An exact multiple of minor_step
+    # instead guarantees every major column is also a minor column.
+    major_step = minor_step * round(_RULER_MAJOR_EVERY_MM / _RULER_MINOR_EVERY_MM)
 
     for col in range(0, width, minor_step):
         ink[minor_lo:minor_hi, col] = True
