@@ -137,13 +137,40 @@ def _coverage_event(u_mm, v_mm, pos, yaw_rad, roll_rad, pitch_rad,
     for that: it ends every line with `\r` instead of `\n` so it can
     overwrite itself in the terminal, which means a line-oriented reader
     never sees a line until the pass ends.
+
+    ``bar`` is the nozzle bar's two ENDPOINTS -- nozzle 0 and nozzle
+    ``NUM_NOZZLES - 1`` -- as ``[[row, col], [row, col]]`` in the target
+    image's own pixel grid, i.e. the same grid ``new_cells`` uses. The web
+    UI draws it as the red "you are here" line over the live coverage view;
+    without it you can see what has been inked but not where the head
+    currently is.
+
+    Computed HERE rather than in the browser on purpose. The endpoint
+    formula is ``bar_offset_uv`` -- the identical rotation
+    ``CoverageEngine.step()`` places every individual nozzle with -- so the
+    drawn line lands exactly where ink lands, at any yaw. Re-deriving it in
+    JavaScript would mean a second copy of that formula plus copies of
+    ``NOZZLE_PITCH_MM``/``NOZZLE_BAR_SPAN_MM``/``NUM_NOZZLES``, four things
+    that would then have to be kept in step with ``geometry.py`` by hand and
+    would drift silently the next time the bar is re-measured (which has
+    already happened twice, see ``geometry.py``'s own history).
+
+    Kept as FLOATS, unlike ``row``/``col`` above: those two are the integer
+    pixel a nozzle addresses, but these are the ends of a line to draw, and
+    rounding them would visibly quantise the line's angle on a zoomed view
+    for no benefit.
     """
+    du_end, dv_end = bar_offset_uv(NOZZLE_BAR_SPAN_MM, yaw_rad)
+    col0 = u_mm / mm_per_column if mm_per_column else 0.0
+    col1 = (u_mm + du_end) / mm_per_column if mm_per_column else 0.0
     return {
         "event": "coverage",
         "u": round(u_mm, 3),
         "v": round(v_mm, 3),
         "row": int(round(v_mm / NOZZLE_PITCH_MM)),
         "col": int(round(u_mm / mm_per_column)) if mm_per_column else 0,
+        "bar": [[round(v_mm / NOZZLE_PITCH_MM, 2), round(col0, 2)],
+                [round((v_mm + dv_end) / NOZZLE_PITCH_MM, 2), round(col1, 2)]],
         "x": round(float(pos[0]), 3),
         "y": round(float(pos[1]), 3),
         "z": round(float(pos[2]), 3),

@@ -115,6 +115,16 @@ from .rendering import pack_nozzle_bits
 # out faint. Fractional values are accepted precisely so this can be tuned
 # in both directions without the column width having to move with it.
 #
+# RAISED 1.0 -> 2.0 on the hardware owner's instruction, after they printed
+# with an explicit ``--drops-per-pixel 2`` on the command line for a run of
+# real prints and settled on it. That is 2 / 0.087 = 23.0 drops/mm against
+# the 11.5 the 1.0 above was derived for, i.e. deliberately twice the
+# density the pre-conversion client delivered -- their call on their paper
+# and ink, which is the only place this question can actually be settled.
+# The 11.5 reasoning above is kept rather than deleted: it is still the
+# measurement this constant is anchored to, and the multiple of it is what
+# changed, not the anchor.
+#
 # Who supplies ``drops``: ``PrintController._print_freehand_pass`` converts
 # the cart's travel since the last send into a number of copies to queue
 # (``drops = DROPS_PER_PIXEL * travel / mm_per_column``, carried across
@@ -122,7 +132,7 @@ from .rendering import pack_nozzle_bits
 # to ``step()``. Ink per pixel is then independent of hand speed by
 # construction: move twice as fast and twice as many copies go out per
 # second, in half the time over the same pixel.
-DEFAULT_DROPS_PER_PIXEL = 1.0
+DEFAULT_DROPS_PER_PIXEL = 2.0
 
 # Slack on the "is this pixel fully dosed" comparison -- see step()'s Step 5
 # for why a float dose needs one at all.

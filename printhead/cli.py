@@ -147,18 +147,18 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--drops-per-pixel", type=float, default=None,
                    help="Page mode: how many drops a pixel must receive "
                         "before it counts as printed (default: "
-                        "coverage.DEFAULT_DROPS_PER_PIXEL = 1). The firmware "
+                        "coverage.DEFAULT_DROPS_PER_PIXEL = 2). The firmware "
                         "fires each column it receives exactly once and never "
                         "repeats, so ink is decided entirely here: this is "
                         "the number of copies the client queues per column of "
                         "travel. What reaches the paper is this DIVIDED BY "
-                        "--mm-per-column, i.e. 1 / 0.087 = 11.5 drops/mm -- "
+                        "--mm-per-column, i.e. 2 / 0.087 = 23.0 drops/mm -- "
                         "so raising --mm-per-column thins the print unless "
                         "this is raised with it. Fractional values are "
                         "allowed. Replaces the old --dose-hold-s, which "
                         "modelled a firmware repeat rate that no longer "
                         "exists")
-    g.add_argument("--spray-radius-mm", type=float, default=0.15,
+    g.add_argument("--spray-radius-mm", type=float, default=0.0,
                    help="Page mode ink-spread model: physical radius (mm) "
                         "around a completed pixel that also receives a "
                         "partial dose, since a real drop wets more than its "
@@ -170,7 +170,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "--spray-strength, both must be > 0 to take effect. "
                         "Reduces re-printing when a return pass lands a "
                         "fraction of a mm off the outbound one")
-    g.add_argument("--spray-strength", type=float, default=0.5,
+    g.add_argument("--spray-strength", type=float, default=0.0,
                    help="Page mode ink-spread model: how much dose a "
                         "neighbour just next to a completed pixel picks up, "
                         "0.0..1.0, falling off linearly to 0 at "

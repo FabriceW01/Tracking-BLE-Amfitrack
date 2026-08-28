@@ -83,6 +83,58 @@ def test_coverage_event_traegt_die_verbose_felder():
     assert "speed_mm_s" in ereignis          # darf None sein, muss aber da sein
     assert ereignis["total"] > 0
     assert 0 <= ereignis["covered"] <= ereignis["total"]
+    # Die rote Druckkopf-Linie der Live-Ansicht: zwei Endpunkte im
+    # Pixelraster des Zielbilds.
+    assert "bar" in ereignis, ereignis
+    assert len(ereignis["bar"]) == 2 and len(ereignis["bar"][0]) == 2
+
+
+def test_bar_endpunkte_treffen_die_echte_duesenplatzierung():
+    """Die rote Linie muss dort liegen, wo auch Tinte landet.
+
+    ``_coverage_event`` rechnet die Endpunkte mit ``bar_offset_uv`` --
+    derselben Formel, mit der ``CoverageEngine.step()`` jede einzelne Düse
+    platziert. Hier gegen genau diese Platzierung nachgerechnet, bei
+    mehreren Gierwinkeln, statt nur die Formel gegen sich selbst zu
+    prüfen. Ein in JavaScript nachgebauter Zweitrechenweg (der Grund,
+    warum das serverseitig passiert) würde hier auffallen.
+    """
+    import math
+    import numpy as np
+    from printhead.controller import _coverage_event
+    from printhead.geometry import NOZZLE_PITCH_MM, NUM_NOZZLES
+
+    mm_per_column = 0.087
+    u_mm, v_mm = 10.0, 5.0
+    for yaw_deg in (0.0, 45.0, 90.0, -45.0, -90.0, 137.5):
+        yaw = math.radians(yaw_deg)
+        ereignis = _coverage_event(u_mm, v_mm, np.zeros(3), yaw, 0.0, 0.0,
+                                   mm_per_column, 1.0, 0, 1, [])
+        sin_y, cos_y = math.sin(yaw), math.cos(yaw)
+        for duese, (row, col) in zip((0, NUM_NOZZLES - 1), ereignis["bar"]):
+            versatz = duese * NOZZLE_PITCH_MM
+            soll_row = (v_mm + versatz * cos_y) / NOZZLE_PITCH_MM
+            soll_col = (u_mm - versatz * sin_y) / mm_per_column
+            assert abs(row - soll_row) < 0.01, (yaw_deg, duese, row, soll_row)
+            assert abs(col - soll_col) < 0.01, (yaw_deg, duese, col, soll_col)
+
+
+def test_bar_endpunkte_fallen_bei_null_gier_auf_row_col_zusammen():
+    """Bei yaw = 0 steht die Leiste senkrecht: beide Endpunkte teilen sich
+    die Spalte, und der erste ist genau das gemeldete row/col -- die
+    Verankerung, ohne die die Linie um eine halbe Leiste versetzt läge."""
+    import numpy as np
+    from printhead.controller import _coverage_event
+    from printhead.geometry import NUM_NOZZLES
+
+    ereignis = _coverage_event(10.0, 5.0, np.zeros(3), 0.0, 0.0, 0.0,
+                               0.087, None, 0, 1, [])
+    (row0, col0), (row1, col1) = ereignis["bar"]
+    assert abs(col0 - col1) < 0.01, ereignis["bar"]
+    assert round(row0) == ereignis["row"]
+    assert round(col0) == ereignis["col"]
+    assert row1 > row0                      # Leiste laeuft in +v / +Zeile
+    assert round(row1 - row0) == NUM_NOZZLES - 1
 
 
 def test_deckung_waechst_ueber_den_durchgang():
@@ -162,6 +214,59 @@ def test_ui_zeichnet_die_zellen_auch_wirklich():
                    "/api/preview.png"):
         assert aufruf in quelle, f"index.html ruft {aufruf!r} nicht auf"
     assert "<canvas" in quelle
+
+
+def test_ui_zeichnet_die_druckkopf_marke():
+    """Dieselbe Verdrahtungsprüfung für die Kopfanzeige: die Endpunkte
+    werden serverseitig mitgeschickt, das Zeichnen kann trotzdem fehlen.
+    Wieder auf AUFRUFSTELLEN geprüft, nicht auf Wortvorkommen."""
+    quelle = (pathlib.Path(__file__).resolve().parent.parent
+              / "printhead" / "ui" / "static" / "index.html").read_text()
+    for aufruf in ("covHead(m.bar)",          # Ereignis -> Zustand
+                   "covHead(null)",           # am Durchgangsende geloescht
+                   "covDrawHead()",           # je Bild neu gezeichnet
+                   'id="cov-ov"'):            # eigenes Overlay-Canvas
+        assert aufruf in quelle, f"index.html ruft {aufruf!r} nicht auf"
+    # Das Overlay MUSS ein zweites Canvas sein: das Deckungs-Canvas wird
+    # nur ergaenzt und nie geloescht, eine dort gezeichnete Kopflinie
+    # bliebe als Schleifspur stehen.
+    assert quelle.count("<canvas") >= 2, "Kopfmarke braucht ein eigenes Canvas"
+    assert "clearRect" in quelle, "Overlay wird nie geleert"
+
+
+# ============================================== Standardwerte Dosis/Spray
+def test_ui_standardwerte_fuer_dosis_und_spray():
+    """Vom Anlagenbesitzer festgelegt: Dosis 2, Spray aus. Die Felder der
+    Oberfläche müssen dieselben Werte tragen wie die CLI-Defaults, sonst
+    druckt ein Klick in der UI anders als derselbe Lauf im Terminal."""
+    quelle = (pathlib.Path(__file__).resolve().parent.parent
+              / "printhead" / "ui" / "static" / "index.html").read_text()
+    for feld, wert in (("dose", "2"), ("spray_r", "0"), ("spray_s", "0")):
+        muster = f'id="{feld}" type="number" value="{wert}"'
+        assert muster in quelle, f"Feld {feld!r} steht nicht auf {wert!r}"
+
+
+def test_cli_standardwerte_fuer_dosis_und_spray():
+    """Die andere Hälfte desselben Vertrags, auf der Python-Seite.
+
+    --spray-radius-mm/--spray-strength standen auf 0.15/0.5, obwohl BEIDE
+    Hilfetexte schon immer 'Default 0 (off)' behaupteten -- Spray war also
+    entgegen der eigenen Dokumentation standardmäßig an. Hier festgenagelt.
+    """
+    from printhead import cli
+    from printhead.coverage import DEFAULT_DROPS_PER_PIXEL
+
+    assert DEFAULT_DROPS_PER_PIXEL == 2.0
+    args = cli.parse_args(["Hi", "--dry-run", "--mode", "line"])
+    assert args.spray_radius_mm == 0.0
+    assert args.spray_strength == 0.0
+    # Und der Weg bis zur Engine, nicht nur der argparse-Wert: build_ink/
+    # build_controller reichen die Werte nur weiter, wenn sie nicht None
+    # sind -- 0.0 ist nicht None, muss also ankommen.
+    ctrl = cli.build_controller(args)
+    assert ctrl.spray_radius_mm == 0.0
+    assert ctrl.spray_strength == 0.0
+    assert ctrl.drops_per_pixel == DEFAULT_DROPS_PER_PIXEL
 
 
 # ====================================================== Sensor-Übergabe

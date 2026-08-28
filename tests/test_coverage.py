@@ -77,20 +77,32 @@ def test_default_dose_reproduces_the_ink_density_validated_on_paper():
     #
     #     3 / 0.200 = 15.0   line mode's validated column
     #     3 / 0.087 = 34.5   the same 3 at today's column   <- 3x over-inked
-    #     1 / 0.087 = 11.5   this default
+    #     1 / 0.087 = 11.5   the density this guard was written for
+    #     2 / 0.087 = 23.0   today's default
     #
     # 11.5/mm is exactly what the pre-conversion client delivered at low
     # speed (simulated on the fire-once firmware: 120 columns of ink over
     # 120 columns of travel), i.e. the density that was judged acceptable on
     # real paper.
+    #
+    # RE-CALIBRATED to 2.0 (23.0 drops/mm) on the hardware owner's
+    # instruction -- the provenance this assertion's own message demands:
+    # they printed a run of real sheets with an explicit
+    # `--drops-per-pixel 2` on the command line (the checkerboard passes
+    # from the sensor-offset investigation, among others) and asked for it
+    # as the default. The 11.5 figure stays documented above because it is
+    # still the measurement the constant is anchored to; what changed is
+    # the multiple of it, chosen on paper, which is the only place this
+    # question can be settled. This guard therefore keeps doing its real
+    # job -- forcing the DENSITY, not the raw number, to be stated and
+    # justified whenever either factor moves.
     rig_mm_per_column = 0.087
     dichte = DEFAULT_DROPS_PER_PIXEL / rig_mm_per_column
-    assert abs(dichte - 11.5) < 0.1, (
+    assert abs(dichte - 23.0) < 0.1, (
         f"the default lays down {dichte:.1f} drops/mm at "
-        f"{rig_mm_per_column} mm/column, not the ~11.5 that the "
-        f"pre-conversion client delivered and the operator accepted on "
-        f"paper -- if this is a deliberate re-calibration, say which print "
-        f"it came from")
+        f"{rig_mm_per_column} mm/column, not the ~23.0 the operator "
+        f"settled on from printed sheets -- if this is a deliberate "
+        f"re-calibration, say which print it came from")
 
 
 def test_the_dose_is_a_density_so_it_scales_with_the_column_width():
@@ -1260,13 +1272,32 @@ def test_MUTATION_check_crediting_integer_columns_reintroduces_speed_stripes():
     # the link actually carried that sample) instead of the exact share of a
     # dose, and requires that to come out visibly worse -- otherwise the
     # distinction the code makes is not being exercised here.
+    #
+    # The dose is pinned HERE rather than read from DEFAULT_DROPS_PER_PIXEL,
+    # which is what this used to do. That coupling was wrong: the default is
+    # an operator-tunable ink setting, while Step 4's rule is a property of
+    # the code, and the two have no reason to move together. It showed up
+    # the moment the default went 1.0 -> 2.0: at 25 mm/s a sample is then
+    # worth 2 * 0.5747 = 1.149 whole columns, so int() keeps returning >= 1
+    # every sample and integer credit happens to reach 100% too -- the guard
+    # silently stopped discriminating for a reason that has nothing to do
+    # with the rule it guards. Measured across doses at this speed:
+    #
+    #     dpp 0.5 -> integer credit 49.2%   (share/sample 0.29)
+    #     dpp 1.0 -> integer credit 88.3%   (share/sample 0.57)  <- used here
+    #     dpp 1.5 -> integer credit 93.3%
+    #     dpp 2.0 -> integer credit 100.0%  <- coincidence, no longer a test
+    #     dpp 3.0 -> integer credit 88.3%
+    #
+    # 1.0 keeps the sample's share below one whole column, which is exactly
+    # the regime the fractional rule exists for.
     mm_per_column, poll_hz, speed = 0.087, 500.0, 25.0
     dt = 1.0 / poll_hz
-    dpp = DEFAULT_DROPS_PER_PIXEL
+    dpp = 1.0
 
     def run(integer_credit):
         eng = CoverageEngine(np.ones((40, 120), dtype=bool),
-                             mm_per_column=mm_per_column)
+                             mm_per_column=mm_per_column, drops_per_pixel=dpp)
         schuld, vorher = 0.0, None
         n = int(120 * mm_per_column / (speed * dt)) + 1
         for i in range(n):
