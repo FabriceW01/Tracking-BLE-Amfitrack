@@ -18,15 +18,18 @@ from printhead.geometry import IMAGE_HEIGHT, NOZZLE_PITCH_MM  # noqa: E402
 from printhead.nozzle_map import parse_order, remap_rows     # noqa: E402
 from printhead.rendering import frames_from_ink              # noqa: E402
 
-# All PATTERNS presets except drill_pattern, plus ruler_pattern (which isn't
-# in that dict -- --calibrate reaches it directly, not through --pattern
-# NAME): six generators total that must honour an explicit rows= override
-# (Change 2). drill_pattern is intentionally EXCLUDED here: unlike the other
-# six, it rasterises an external image instead of drawing one proceduraly,
-# and no image ships with this repo (the hardware owner supplies their own,
-# see README) -- calling it with no --pattern-image would just hit its
-# "no image found" SystemExit by design, not exercise rows= at all. It gets
-# its own dedicated tests below, each supplying a throwaway temp image.
+# All PATTERNS presets except drill_pattern (this now includes "ruler" /
+# ruler_ticks_pattern), plus ruler_pattern (which isn't in that dict --
+# --calibrate reaches it directly, not through --pattern NAME -- and is a
+# different function from ruler_ticks_pattern despite the similar name, see
+# both docstrings): eight generators total that must honour an explicit
+# rows= override (Change 2). drill_pattern is intentionally EXCLUDED here:
+# unlike the other seven, it rasterises an external image instead of
+# drawing one proceduraly, and no image ships with this repo (the hardware
+# owner supplies their own, see README) -- calling it with no
+# --pattern-image would just hit its "no image found" SystemExit by design,
+# not exercise rows= at all. It gets its own dedicated tests below, each
+# supplying a throwaway temp image.
 _ALL_GENERATORS = [fn for name, fn in patterns.PATTERNS.items()
                    if name != "drill_pattern"] + [patterns.ruler_pattern]
 
@@ -68,6 +71,98 @@ def test_ruler_pattern_ticks():
     # A column between ticks (e.g. col 5, half a mm) is baseline-only.
     plain_col = ink[:, 5]
     assert plain_col.sum() == 1 and plain_col[mid]
+
+
+# ============================================================================
+# --pattern ruler (ruler_ticks_pattern) -- a fixed-geometry tape measure,
+# distinct from --calibrate's configurable ruler_pattern above
+# ============================================================================
+def test_ruler_ticks_pattern_is_registered():
+    assert "ruler" in patterns.PATTERNS
+    assert patterns.PATTERNS["ruler"] is patterns.ruler_ticks_pattern
+
+
+def test_ruler_ticks_pattern_shape_and_baseline():
+    mm_per_column = 0.1                      # 10 columns/mm -> easy to reason about
+    ink = patterns.ruler_ticks_pattern(30.0, mm_per_column)
+    assert ink.shape == (IMAGE_HEIGHT, 300)
+    mid = IMAGE_HEIGHT // 2
+    assert ink[mid, :].all(), "baseline row must be continuous across the width"
+
+
+def test_ruler_ticks_pattern_spacing_is_fixed_at_10mm_and_1mm():
+    # Spacing is NOT a parameter (see the module's _RULER_* constants) --
+    # every 10mm/100 columns is a major tick, every 1mm/10 columns a minor
+    # one, regardless of what a caller passes for square_mm/etc.
+    mm_per_column = 0.1
+    ink = patterns.ruler_ticks_pattern(30.0, mm_per_column, square_mm=999.0)
+    mid = IMAGE_HEIGHT // 2
+
+    for col in (0, 100, 200):
+        assert ink[:, col].all(), f"col {col} (10mm) should be a full-height major tick"
+
+    for col in (10, 20, 90, 110):               # 1mm marks that aren't also 10mm ones
+        minor_col = ink[:, col]
+        assert minor_col[mid] and not minor_col.all(), col
+
+    for col in (5, 15, 55):                      # half-mm -- neither major nor minor
+        plain_col = ink[:, col]
+        assert plain_col.sum() == 1 and plain_col[mid], col
+
+
+def test_ruler_ticks_pattern_line_mode_major_tick_clamps_to_full_height():
+    # In --mode line/time, rows == IMAGE_HEIGHT (~13.1mm bar span): a
+    # requested 20mm major tick cannot physically fit and must clamp to
+    # full height instead of raising or silently drawing a truncated band
+    # off one edge.
+    ink = patterns.ruler_ticks_pattern(15.0, 0.1)         # default rows=IMAGE_HEIGHT
+    assert ink[:, 0].all(), "major tick must clamp to full height, not overflow/underflow"
+
+
+def test_ruler_ticks_pattern_tick_lengths_at_a_tall_page_mode_height():
+    # With rows large enough that neither tick clamps, both must come out
+    # at (approximately, given the NOZZLE_PITCH_MM quantisation grid) their
+    # literal requested length: 20mm major, 6mm minor.
+    rows = 2000
+    ink = patterns.ruler_ticks_pattern(15.0, 0.1, rows=rows)
+    major_mm = ink[:, 0].sum() * NOZZLE_PITCH_MM
+    minor_mm = ink[:, 10].sum() * NOZZLE_PITCH_MM
+    assert abs(major_mm - 20.0) < NOZZLE_PITCH_MM * 2, major_mm
+    assert abs(minor_mm - 6.0) < NOZZLE_PITCH_MM * 2, minor_mm
+    assert major_mm > minor_mm
+
+
+def test_ruler_ticks_pattern_major_tick_is_a_superset_of_the_minor_one():
+    # Every 10mm column is also a 1mm column; the major band must cover at
+    # least everything the minor band would have drawn there, or the minor
+    # loop running first (see ruler_ticks_pattern) would leave a visible
+    # notch cut into the major tick.
+    rows = 2000
+    ink = patterns.ruler_ticks_pattern(15.0, 0.1, rows=rows)
+    major_rows = set(np.nonzero(ink[:, 0])[0].tolist())      # 0mm: major + minor
+    minor_only = patterns.ruler_ticks_pattern(15.0, 0.1, rows=rows)[:, 20]
+    minor_rows = set(np.nonzero(minor_only)[0].tolist())     # 2mm: minor only
+    assert minor_rows <= major_rows
+
+
+def test_ruler_ticks_pattern_only_length_mm_changes_the_output():
+    # "Ich will die Laenge von Pattern einstellen koennen, mehr nicht" --
+    # every other kwarg build_ink() might pass (square_mm/square_rows/
+    # line_cols/gap_start/pattern_image) must be silently ignored.
+    base = patterns.ruler_ticks_pattern(20.0, 0.1)
+    varied = patterns.ruler_ticks_pattern(
+        20.0, 0.1, square_mm=3.0, square_rows=7, line_cols=5, gap_start=9,
+        pattern_image="/does/not/exist.png")
+    assert np.array_equal(base, varied)
+
+
+def test_ruler_ticks_pattern_cli_registers_and_builds():
+    args = cli.parse_args(["--mode", "line", "--pattern", "ruler",
+                           "--pattern-length-mm", "30"])
+    assert args.pattern == "ruler"
+    ink, label = cli.build_ink(args, 0.1)
+    assert ink.shape == (IMAGE_HEIGHT, 300)
+    assert "ruler" in label
 
 
 # ============================================================================

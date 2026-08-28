@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .geometry import IMAGE_HEIGHT
+from .geometry import IMAGE_HEIGHT, NOZZLE_PITCH_MM
 
 # Default location drill_pattern looks for its source image: next to the
 # printhead/ PACKAGE, not wherever the process happens to be running from
@@ -70,6 +70,75 @@ def ruler_pattern(length_mm: float, mm_per_column: float,
 # ============================================================================
 # --pattern : general bring-up presets
 # ============================================================================
+
+# Fixed geometry for --pattern ruler (see ruler_ticks_pattern below):
+# unlike --calibrate's ruler_pattern() above -- configurable major/minor
+# SPACING via --calib-major-mm/--calib-minor-mm, tick LENGTH scaled from
+# rows as a fraction (major = full height, minor = 15%) -- this is
+# deliberately NOT configurable beyond the pattern's length. The operator
+# asked for one specific tape measure (10mm/1mm spacing, 20mm/6mm tick
+# length), not a family of rulers, so there is no --pattern-* flag for
+# step/tick-length at all: only --pattern-length-mm (already shared by
+# every --pattern preset) has any effect here.
+_RULER_MAJOR_EVERY_MM = 10.0
+_RULER_MINOR_EVERY_MM = 1.0
+_RULER_MAJOR_LEN_MM = 20.0
+_RULER_MINOR_LEN_MM = 6.0
+
+
+def ruler_ticks_pattern(length_mm: float, mm_per_column: float,
+                        rows: int = IMAGE_HEIGHT, **_) -> np.ndarray:
+    """
+    A 1/10mm tape measure: a continuous baseline, a MAJOR tick every 10mm
+    (20mm long) and a MINOR tick every 1mm (6mm long) -- the same shape as
+    --calibrate's ruler_pattern() above, reachable through --pattern instead
+    of needing --calibrate's own flag, so it can be combined with anything
+    --calibrate can't (--mode page, --record, --dry-run/--preview review,
+    ...). See _RULER_MAJOR_EVERY_MM et al. above for why the spacing/tick
+    length are fixed rather than exposed as CLI flags: --pattern-length-mm
+    is the only knob.
+
+    Tick length is measured ACROSS the baseline (the row axis, same as
+    ruler_pattern()'s ticks), centred on the middle row and clamped to
+    ``[0, rows)``. In --mode line/time (rows == IMAGE_HEIGHT, the fixed
+    152-nozzle bar span, ~13.1mm) a requested 20mm major tick is larger than
+    the entire printable height and simply clamps to full height --
+    visually identical to ruler_pattern()'s own major tick, which is
+    *always* full height for the same physical reason (a bar this narrow
+    cannot show a literal 20mm mark). Only in --mode page, whose
+    --pattern-height-mm/``rows`` can exceed the bar span through vertical
+    travel, does the requested 20mm/6mm print at its literal length.
+
+    The major tick is always drawn on top of (i.e. after) the minor one at
+    a shared column -- every 10mm is also a 1mm mark -- which is safe
+    without an explicit "skip if already major" check because
+    ``_RULER_MAJOR_LEN_MM > _RULER_MINOR_LEN_MM`` makes the major band a
+    strict superset of the minor one at every rows/mm_per_column
+    combination, clamped or not.
+    """
+    width = _columns(length_mm, mm_per_column)
+    ink = np.zeros((rows, width), dtype=bool)
+
+    mid = rows // 2
+    ink[mid, :] = True                                        # continuous baseline
+
+    def _tick_band(len_mm: float) -> "tuple[int, int]":
+        half = max(1, round(len_mm / NOZZLE_PITCH_MM / 2.0))
+        return max(0, mid - half), min(rows, mid + half + 1)
+
+    minor_lo, minor_hi = _tick_band(_RULER_MINOR_LEN_MM)
+    major_lo, major_hi = _tick_band(_RULER_MAJOR_LEN_MM)
+
+    minor_step = max(1, round(_RULER_MINOR_EVERY_MM / mm_per_column))
+    major_step = max(1, round(_RULER_MAJOR_EVERY_MM / mm_per_column))
+
+    for col in range(0, width, minor_step):
+        ink[minor_lo:minor_hi, col] = True
+    for col in range(0, width, major_step):
+        ink[major_lo:major_hi, col] = True
+    return ink
+
+
 def checkerboard_pattern(length_mm: float, mm_per_column: float,
                          square_mm: float = 10.0, square_rows: int = 20,
                          rows: int = IMAGE_HEIGHT, **_) -> np.ndarray:
@@ -287,4 +356,5 @@ PATTERNS = {
     "solid": solid_pattern,
     "precision-check": precision_check_pattern,
     "drill_pattern": drill_pattern,
+    "ruler": ruler_ticks_pattern,
 }

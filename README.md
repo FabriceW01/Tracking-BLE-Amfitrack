@@ -1255,6 +1255,7 @@ python main.py --calibrate --pattern-length-mm 200 --mm-per-column 0.2 --preview
 | `solid` | Vollfläche – prüft Ink-Deckung/Banding |
 | `precision-check` | Linien **parallel zur Düsenleiste** mit **verdoppelnden** Abständen entlang der Fahrtrichtung – Auflösungstest: ab welchem Abstand verschmieren zwei Linien zu einer? Siehe eigenen Abschnitt unten |
 | `drill_pattern` | Rastert eine externe Bilddatei (z. B. ein Bohr-/Fadenkreuz-Justiermuster) auf die gewünschte physische Größe, statt ein Muster zu berechnen – siehe `--pattern-image` unten |
+| `ruler` | 1/10mm-Maßband: durchgehende Grundlinie, alle 10mm ein langer Strich (20mm), jeden Millimeter ein kurzer Strich (6mm). Anders als `--calibrate` (konfigurierbarer Strichabstand/-länge) ist hier nur `--pattern-length-mm` einstellbar – siehe eigenen Abschnitt unten |
 
 ```bash
 python main.py --pattern checkerboard --pattern-square-mm 10 --pattern-square-rows 20
@@ -1393,6 +1394,29 @@ test_cli_mm_per_column_MUTATION_check_omitting_it_reintroduces_the_bug
 
 Mutationsgeprüft gegen die reale, alte Konstruktion (nicht nur eine
 Nachbildung im Test).
+
+#### `ruler`: 1/10mm-Maßband
+
+```bash
+python main.py --pattern ruler --pattern-length-mm 100 --mode line --preview lineal.png
+```
+
+Druckt eine durchgehende Grundlinie mit festem Strichraster: alle 10mm ein
+langer Strich (20mm), jeden Millimeter ein kurzer Strich (6mm) — quer zur
+Grundlinie gemessen, wie bei `--calibrate`s Lineal oben. Anders als dort ist
+hier nichts weiter einstellbar: kein `--calib-major-mm`/`--calib-minor-mm`-
+Äquivalent, nur `--pattern-length-mm`. Vorteil gegenüber `--calibrate`: läuft
+durch dieselbe `--pattern`-Pipeline wie jedes andere Preset, also auch mit
+`--mode page`, `--record` oder `--dry-run`/`--preview`, statt an das eigene
+`--calibrate`-Flag gebunden zu sein.
+
+Die Strichlänge ist quer zur Grundlinie gemessen und wird auf die
+verfügbaren Zeilen begrenzt: im `--mode line`/`time` (152 Düsen, ~13,1mm
+Leistenspannweite) passt ein 20mm-Strich nicht hinein und wird auf volle
+Leistenhöhe begrenzt — genau wie beim `--calibrate`-Lineal, dessen langer
+Strich aus demselben physischen Grund immer volle Höhe hat. Erst im
+`--mode page` mit `--pattern-height-mm` über ~13,1mm hinaus erscheinen
+20mm/6mm in tatsächlicher Länge.
 
 ## Düsen-Mapping
 
