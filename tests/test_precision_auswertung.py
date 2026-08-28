@@ -269,6 +269,40 @@ def test_bericht_warnt_bei_positionsabhaengigem_rest():
     assert "im Wesentlichen ein Faktor" not in text_stark
 
 
+def test_residuen_index_ueberspringt_luecken_mitten_in_der_liste():
+    # Regression: residuen ist kürzer als soll_mm, sobald eine Lücke NICHT
+    # am Ende der Liste steht. residuen_index muss die dazugehörigen
+    # ORIGINAL-Indizes tragen -- ohne ihn würde bericht() (siehe Test
+    # daneben) residuen[j] gegen soll_mm[j] anzeigen, also ab der ersten
+    # Lücke jede folgende Zeile mit der falschen Soll-Distanz beschriften.
+    soll = A.soll_abstaende_mm(6, 0.087)
+    gemessen = [soll[0], None, soll[2], soll[3], soll[4], soll[5]]
+    e = A.auswerten(gemessen, 0.087)
+    assert e["residuen_index"] == [0, 2, 3, 4, 5]
+    assert len(e["residuen"]) == len(e["residuen_index"])
+
+
+def test_bericht_zeigt_die_richtige_soll_distanz_neben_jeder_luecke():
+    # Der eigentliche sichtbare Fehler: mit einer Lücke mitten in der Liste
+    # (hier Linie 1 nicht gemessen) muss "Linie 2" mit SEINEM eigenen
+    # Soll-Wert erscheinen, nicht mit dem von Linie 1 (das wäre die alte,
+    # positionsgleiche zip()-Verzerrung -- die Zahlen sind hier absichtlich
+    # so gewählt, dass Linie 1 und Linie 2 unterschiedliche Soll-Werte
+    # haben, sonst würde der Fehler unsichtbar bleiben).
+    soll = A.soll_abstaende_mm(6, 0.087)
+    assert soll[1] != soll[2]                    # sonst würde der Test nichts zeigen
+    gemessen = [soll[0], None, soll[2] + 0.05, soll[3] - 0.05, soll[4], soll[5]]
+    text = A.bericht(A.auswerten(gemessen, 0.087))
+
+    assert f"Linie  2  soll {soll[2]:8.3f} mm" in text, text
+    assert f"Linie  3  soll {soll[3]:8.3f} mm" in text, text
+    # Die alte, falsche Paarung (Linie 2 faelschlich mit Linie 1s Soll-Wert)
+    # darf nirgends auftauchen.
+    assert f"Linie  2  soll {soll[1]:8.3f} mm" not in text, text
+    # Linie 1 selbst wurde nicht gemessen und darf gar nicht erscheinen.
+    assert "Linie  1 " not in text, text
+
+
 def test_bericht_traegt_immer_die_einschraenkungen():
     # Die Faktor-2-Grenze und "das ist eine Summe" dürfen nie fehlen --
     # ohne sie liest sich jede Zahl genauer, als sie ist.

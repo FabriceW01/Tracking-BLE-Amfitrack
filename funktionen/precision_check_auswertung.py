@@ -229,6 +229,18 @@ def auswerten(gemessen_mm, mm_per_column, line_cols=1, gap_start=1,
         return {"fehler": ("Zu wenige gemessene Werte für eine Anpassung "
                            "(mindestens zwei Linien mit Abstand > 0).")}
 
+    # Welcher Linien-INDEX zu residuen[j] gehört: massstab_fit lässt jede
+    # Linie mit gemessen_mm[i] is None einfach aus, residuen ist also KÜRZER
+    # als soll/gemessen_mm, sobald irgendwo mitten in der Liste eine Lücke
+    # steht (nicht nur am Ende). residuen selbst trägt diesen Index nicht --
+    # ohne ihn hier separat mitzuführen, würde bericht()'s Zeilentabelle
+    # residuen[j] gegen soll_mm[j] statt gegen soll_mm[den richtigen Index]
+    # anzeigen, also ab der ersten Lücke systematisch falsche Soll-Werte
+    # (und damit falsche "Linie N"-Beschriftungen) neben jeden Rest stellen.
+    # soll[i] ist nie None (soll_abstaende_mm liefert immer eine Zahl), der
+    # Filter hier ist also exakt derselbe wie in massstab_fit.
+    residuen_index = [i for i, m in enumerate(gemessen_mm) if m is not None]
+
     rms, maxabs = kennzahlen(residuen)
     ausbreitung = tintenausbreitung_mm(linienbreite_mm, line_cols,
                                        mm_per_column)
@@ -245,6 +257,7 @@ def auswerten(gemessen_mm, mm_per_column, line_cols=1, gap_start=1,
         "mm_per_column_korrigiert": mm_per_column * k,
         "abweichung_prozent": (k - 1.0) * 100.0,
         "residuen": residuen,
+        "residuen_index": residuen_index,
         "residuum_rms_mm": rms,
         "residuum_max_mm": maxabs,
         "linienbreite_soll_mm": max(1, int(line_cols)) * mm_per_column,
@@ -290,8 +303,15 @@ def bericht(ergebnis):
     zeilen.append(f"     Residuum max         : "
                   f"{ergebnis['residuum_max_mm']:.4f} mm")
     zeilen.append("     je Linie (soll -> gemessen-soll*k):")
-    for linie, (soll, rest) in enumerate(zip(ergebnis["soll_mm"],
-                                             ergebnis["residuen"])):
+    # Über residuen_index gehen, NICHT blind über soll_mm in Reihenfolge:
+    # residuen ist kürzer als soll_mm, sobald irgendwo mitten in der Liste
+    # eine nicht gemessene Linie steht (nicht nur am Ende) -- ein
+    # positionsgleiches zip() würde ab dort jede folgende Zeile mit der
+    # falschen Soll-Distanz und der falschen Linien-Nummer beschriften,
+    # obwohl "Rest" selbst korrekt berechnet ist. Siehe auswerten()s
+    # residuen_index-Kommentar.
+    for linie, rest in zip(ergebnis["residuen_index"], ergebnis["residuen"]):
+        soll = ergebnis["soll_mm"][linie]
         zeilen.append(f"       Linie {linie:>2}  soll {soll:8.3f} mm   "
                       f"Rest {rest:+8.4f} mm")
 
