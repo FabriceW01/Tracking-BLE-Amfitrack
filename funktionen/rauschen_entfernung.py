@@ -53,12 +53,13 @@ Zusätzlich Test 2b (Maßstabsfehler über Entfernung):
 
     ... --massstab 10=99.4,20=99.1,30=98.2 --referenz 100
 
-Tabelle und Grafik zeigen standardmäßig die x-Achse; mit ``--achse y`` oder
-``--achse z`` wird eine andere gewählt. Statt aller drei Achsen als
-Standardabweichung nebeneinander zeigt die gewählte Achse drei Kennzahlen --
-Durchschnitt, p95 und p99 der Abweichung vom Mittelwert je Sample, wie bei
-Latenzmessungen üblich. Das FAZIT (Grenzabstand gegen eine Düsenreihe) bleibt
-unabhängig davon: es basiert auf dem 3D-RMS aller drei Achsen zusammen.
+Tabelle und Grafik zeigen genau EINE Achse (``--achse x``/``y``/``z``,
+Default x) -- die anderen beiden werden nicht mit eingerechnet. Statt einer
+Standardabweichung zeigt die gewählte Achse drei Kennzahlen: Durchschnitt,
+p95 und p99 der Abweichung vom Mittelwert je Sample, wie bei
+Latenzmessungen üblich. Der Grenzabstand im FAZIT basiert auf dem
+**p95-Wert der gewählten Achse** -- ``--achse`` bestimmt also nicht nur die
+Anzeige, sondern auch, wogegen die Düsenreihen-Schwelle geprüft wird.
 
     python funktionen/rauschen_entfernung.py rausch_d*.jsonl --achse y
 """
@@ -76,6 +77,11 @@ DUESENTEILUNG_MM = 13.2 / 152
 
 # Abtastrate von --pos (diagnostics.monitor_position, hz=15.0).
 STANDARD_HZ = 15.0
+
+# Von auswerten() (welche Achse ausgewertet wird), bericht() und
+# zeichne_plot() (welcher Tupel-Index zu welcher Achse gehört) gemeinsam
+# benutzt -- deshalb hier oben statt in einem der drei Abschnitte.
+_ACHS_INDEX = {"x": 0, "y": 1, "z": 2}
 
 
 # ===========================================================================
@@ -218,36 +224,43 @@ def rauschen_kennzahlen(werte):
 
 
 def werte_einer_datei(xs, ys, zs, fenster):
-    """Kennzahlen einer einzelnen Aufzeichnung."""
+    """
+    Kennzahlen einer einzelnen Aufzeichnung.
+
+    Bewusst KEIN 3D-kombinierter Wert mehr (das frühere ``rms3d``, RMS-Abstand
+    vom 3D-Mittelpunkt über alle drei Achsen): dieses Werkzeug wertet genau
+    EINE gewählte Achse aus (siehe ``--achse``), die anderen beiden sind für
+    diese Auswertung nicht relevant und sollen auch keine Zahl mehr
+    beeinflussen, die diese eine Achse betrifft.
+    """
     mx, my, mz = _mittel(xs), _mittel(ys), _mittel(zs)
-    # 3D-Streuung: RMS-Abstand vom Mittelpunkt. Eine einzige Zahl, die alle
-    # drei Achsen zusammenfasst -- das ist die Größe, die mit der
-    # Düsenteilung verglichen wird (unabhängig von --achse, siehe
-    # grenzabstand()/_urteil()).
-    rms3d = math.sqrt(_mittel([(x - mx) ** 2 + (y - my) ** 2 + (z - mz) ** 2
-                               for x, y, z in zip(xs, ys, zs)])) if xs else 0.0
     return {
         "punkte": len(xs),
         "mittel": (mx, my, mz),
         "sigma": (_stdabw(xs), _stdabw(ys), _stdabw(zs)),
         "spitze": (_spitze(xs), _spitze(ys), _spitze(zs)),
-        "rms3d": rms3d,
         "fenster": (fenster_streuung(xs, fenster), fenster_streuung(ys, fenster),
                     fenster_streuung(zs, fenster)),
         # Je Achse avg/p95/p99 (siehe rauschen_kennzahlen) -- das, was
-        # --achse im Bericht/Plot tatsächlich zeigt. Für alle drei Achsen
-        # berechnet, nicht nur die gewählte: einmalige Kosten beim Einlesen,
-        # damit ein späterer Aufruf mit anderer --achse nicht neu einlesen
-        # muss (siehe main()).
+        # --achse im Bericht/Plot tatsächlich zeigt, UND die Grundlage des
+        # Grenzabstands (siehe auswerten(): p95 der gewählten Achse). Für
+        # alle drei Achsen berechnet, nicht nur die gewählte: einmalige
+        # Kosten beim Einlesen, damit ein späterer Aufruf mit anderer
+        # --achse nicht neu einlesen muss (siehe main()).
         "rauschen": {"x": rauschen_kennzahlen(xs), "y": rauschen_kennzahlen(ys),
                      "z": rauschen_kennzahlen(zs)},
     }
 
 
-def grenzabstand(punkte, schwelle=DUESENTEILUNG_MM):
+def grenzabstand(punkte, schwelle=DUESENTEILUNG_MM, wert_key="wert"):
     """
-    Abstand, bei dem die 3D-Streuung ``schwelle`` überschreitet — linear
-    zwischen den beiden Messpunkten interpoliert, die sie einrahmen.
+    Abstand, bei dem ``punkte[i][wert_key]`` die ``schwelle`` überschreitet —
+    linear zwischen den beiden Messpunkten interpoliert, die sie einrahmen.
+
+    Bewusst allgemein über ``wert_key`` statt fest auf eine bestimmte
+    Kennzahl verdrahtet: welcher Wert das ist (früher die 3D-Streuung,
+    heute ``auswerten()``s p95 der gewählten Achse, siehe dort), ist eine
+    Entscheidung des Aufrufers, nicht dieser Funktion.
 
     Rückgabe ``(abstand, art)`` mit ``art``:
       * ``"interpoliert"`` -- die Schwelle liegt zwischen zwei Messpunkten,
@@ -257,26 +270,39 @@ def grenzabstand(punkte, schwelle=DUESENTEILUNG_MM):
     sortiert = sorted(punkte, key=lambda p: p["abstand"])
     if not sortiert:
         return None, "oberhalb"
-    if sortiert[0]["rms3d"] >= schwelle:
+    if sortiert[0][wert_key] >= schwelle:
         return sortiert[0]["abstand"], "unterhalb"
     for vorher, nachher in zip(sortiert, sortiert[1:]):
-        if nachher["rms3d"] >= schwelle:
-            spanne = nachher["rms3d"] - vorher["rms3d"]
+        if nachher[wert_key] >= schwelle:
+            spanne = nachher[wert_key] - vorher[wert_key]
             if spanne <= 0:
                 return nachher["abstand"], "interpoliert"
-            anteil = (schwelle - vorher["rms3d"]) / spanne
+            anteil = (schwelle - vorher[wert_key]) / spanne
             return (vorher["abstand"]
                     + anteil * (nachher["abstand"] - vorher["abstand"])), "interpoliert"
     return None, "oberhalb"
 
 
-def auswerten(messungen, fenster=15):
+def auswerten(messungen, fenster=15, achse="x"):
     """
     ``messungen`` ist eine Liste von ``(abstand_cm, name, xs, ys, zs)``.
 
-    Rückgabe: dict mit ``fehler`` oder mit ``punkte`` (je Abstand ein Eintrag,
-    nach Abstand sortiert) und dem Grenzabstand.
+    ``achse`` (``"x"``/``"y"``/``"z"``, Default ``"x"``) legt fest, WELCHE
+    Achse ausgewertet wird -- nicht nur für Tabelle/Grafik (siehe
+    ``bericht``/``zeichne_plot``, die beide ``ergebnis["achse"]`` lesen
+    statt eine eigene Achse entgegenzunehmen, damit Anzeige und Grenzwert
+    niemals auseinanderlaufen können), sondern auch für den Grenzabstand
+    selbst: der basiert auf dem **p95-Wert dieser einen Achse**
+    (``rauschen_kennzahlen``), nicht mehr auf einer alle drei Achsen
+    kombinierenden 3D-Größe. Die anderen beiden Achsen fließen in dieses
+    Ergebnis an keiner Stelle mehr ein.
+
+    Rückgabe: dict mit ``fehler`` oder mit ``punkte`` (je Abstand ein
+    Eintrag, nach Abstand sortiert, mit ``punkt["wert"]`` = p95 der
+    gewählten Achse), der gewählten ``achse`` und dem Grenzabstand.
     """
+    if achse not in _ACHS_INDEX:
+        raise ValueError(f"achse muss x/y/z sein, nicht {achse!r}")
     punkte = []
     for abstand, name, xs, ys, zs in messungen:
         if len(xs) < 2:
@@ -289,8 +315,15 @@ def auswerten(messungen, fenster=15):
         return {"fehler": "Keine Aufzeichnung mit mindestens zwei Punkten."}
 
     punkte.sort(key=lambda p: p["abstand"])
-    grenze, art = grenzabstand(punkte)
-    return {"punkte": punkte, "fenster": fenster,
+    for p in punkte:
+        # p95, nicht avg oder p99: auf Wunsch des Anlagenbesitzers die Basis
+        # des Grenzabstands. avg wäre zu optimistisch (die Hälfte der
+        # Samples liegt bereits darüber), p99 zu konservativ für diesen
+        # Zweck -- p95 ist der Mittelweg, den auch die Latenz-Konvention
+        # dafür üblicherweise nimmt.
+        p["wert"] = p["rauschen"][achse]["p95"]
+    grenze, art = grenzabstand(punkte, wert_key="wert")
+    return {"punkte": punkte, "fenster": fenster, "achse": achse,
             "grenzabstand": grenze, "grenzart": art}
 
 
@@ -315,65 +348,53 @@ def massstab_auswerten(paare, referenz_mm):
 # ===========================================================================
 # Bericht
 # ===========================================================================
-_ACHS_INDEX = {"x": 0, "y": 1, "z": 2}
-
-
 def _reihen(mm):
     return mm / DUESENTEILUNG_MM
 
 
-def bericht(ergebnis, hz=STANDARD_HZ, massstab=None, achse="x"):
+def bericht(ergebnis, hz=STANDARD_HZ, massstab=None):
     """
-    ``achse`` (``"x"``/``"y"``/``"z"``) wählt, WELCHE Achse die Tabelle und
-    die Düsenreihen-Zeile zeigen -- vorher zeigte die Tabelle alle drei
-    Achsen als sigma nebeneinander; jetzt genau eine, dafür mit drei echten
-    Kennzahlen (avg/p95/p99 statt nur der einen Standardabweichung), siehe
-    ``rauschen_kennzahlen``.
+    Liest die auszuwertende Achse aus ``ergebnis["achse"]`` (gesetzt von
+    ``auswerten()``) statt sie hier ein zweites Mal entgegenzunehmen --
+    sonst könnten Anzeige und Grenzabstand versehentlich zu verschiedenen
+    Achsen gehören. Um eine andere Achse zu sehen, ``auswerten(...,
+    achse=...)`` mit der gewünschten Achse aufrufen, nicht diese Funktion.
 
-    Das 3D-RMS und damit das FAZIT/der Grenzabstand bleiben unabhängig von
-    ``achse`` -- das ist die kombinierte Streuung aller drei Achsen (siehe
-    ``werte_einer_datei``), die den nutzbaren Arbeitsbereich tatsächlich
-    festlegt, unabhängig davon, welche einzelne Achse gerade betrachtet
-    wird.
+    Kein 3D-kombinierter Wert mehr in der Ausgabe (siehe
+    ``werte_einer_datei``s Docstring): jede gezeigte Zahl gehört zur EINEN
+    gewählten Achse, inklusive des Grenzabstands im FAZIT.
     """
     if "fehler" in ergebnis:
         return f"[rauschen] {ergebnis['fehler']}"
-    if achse not in _ACHS_INDEX:
-        raise ValueError(f"achse muss x/y/z sein, nicht {achse!r}")
+    achse = ergebnis["achse"]
     idx = _ACHS_INDEX[achse]
 
     zeilen = ["---- Sensorrauschen über die Entfernung ----"]
-    zeilen.append(f"  Achse: {achse}  (mit --achse x/y/z wählbar)")
+    zeilen.append(f"  Achse: {achse}  (mit --achse x/y/z wählbar; bestimmt "
+                  f"auch den Grenzabstand im FAZIT unten)")
     zeilen.append(f"  Fenster für die Kurzzeit-Streuung: "
                   f"{ergebnis['fenster']} Samples "
                   f"(~{ergebnis['fenster'] / hz:.1f} s bei {hz:g} Hz)")
     zeilen.append("")
     zeilen.append(f"  Abstand  Punkte    ~Dauer   {achse}-avg   {achse}-p95   "
-                  f"{achse}-p99   3D-RMS  Spitze-Sp.  kurzfr.")
-    zeilen.append("     (cm)                (s)      (mm)     (mm)     (mm)     "
-                  "(mm)        (mm)     (mm)")
+                  f"{achse}-p99  Spitze-Sp.  kurzfr.")
+    zeilen.append("     (cm)                (s)      (mm)     (mm)     (mm)        "
+                  "(mm)     (mm)")
     for p in ergebnis["punkte"]:
         r = p["rauschen"][achse]
         zeilen.append(
             f"  {p['abstand']:7.1f} {p['punkte']:7d} {p['punkte'] / hz:9.1f} "
-            f"{r['avg']:9.4f} {r['p95']:8.4f} {r['p99']:8.4f} {p['rms3d']:8.4f} "
+            f"{r['avg']:9.4f} {r['p95']:8.4f} {r['p99']:8.4f} "
             f"{p['spitze'][idx]:11.4f} {p['fenster'][idx]:8.4f}")
 
     zeilen.append("")
-    zeilen.append("  3D-RMS in Düsenreihen (0,087 mm je Reihe):")
+    zeilen.append(f"  {achse}-Rauschen in Düsenreihen (0,087 mm je Reihe) -- "
+                  f"p95 ist die Grundlage des FAZITs unten:")
     for p in ergebnis["punkte"]:
-        marke = "  <-- über einer Düsenreihe" if p["rms3d"] >= DUESENTEILUNG_MM else ""
-        zeilen.append(f"  {p['abstand']:7.1f} cm : {_reihen(p['rms3d']):6.2f} "
-                      f"Reihen{marke}")
-
-    zeilen.append("")
-    zeilen.append(f"  {achse}-Rauschen (p99) in Düsenreihen -- der Wert, den ein "
-                  f"einzelnes Sample auf dieser Achse fast nie überschreitet:")
-    for p in ergebnis["punkte"]:
-        p99 = p["rauschen"][achse]["p99"]
-        marke = "  <-- über einer Düsenreihe" if p99 >= DUESENTEILUNG_MM else ""
-        zeilen.append(f"  {p['abstand']:7.1f} cm : {_reihen(p99):6.2f} "
-                      f"Reihen{marke}")
+        p95, p99 = p["rauschen"][achse]["p95"], p["rauschen"][achse]["p99"]
+        marke = "  <-- über einer Düsenreihe" if p95 >= DUESENTEILUNG_MM else ""
+        zeilen.append(f"  {p['abstand']:7.1f} cm : p95 {_reihen(p95):6.2f} Reihen"
+                      f"{marke}   ·   p99 {_reihen(p99):6.2f} Reihen")
 
     zeilen.append("")
     zeilen.extend(_urteil(ergebnis))
@@ -386,44 +407,53 @@ def bericht(ergebnis, hz=STANDARD_HZ, massstab=None, achse="x"):
 
 def _urteil(ergebnis):
     zeilen = []
+    achse = ergebnis["achse"]
+    idx = _ACHS_INDEX[achse]
     grenze, art = ergebnis["grenzabstand"], ergebnis["grenzart"]
     schwelle = DUESENTEILUNG_MM
 
     if art == "oberhalb":
         groesster = max(p["abstand"] for p in ergebnis["punkte"])
-        zeilen.append(f"  FAZIT: Bis {groesster:.0f} cm bleibt das Rauschen unter "
-                      f"einer Düsenreihe ({schwelle:.4f} mm) — in diesem ganzen "
-                      f"Bereich begrenzt der Sensor die Druckqualität nicht.")
+        zeilen.append(f"  FAZIT: Bis {groesster:.0f} cm bleibt das {achse}-p95-"
+                      f"Rauschen unter einer Düsenreihe ({schwelle:.4f} mm) — in "
+                      f"diesem ganzen Bereich begrenzt der Sensor die "
+                      f"Druckqualität auf dieser Achse nicht.")
         zeilen.append("         Wo die Grenze wirklich liegt, ist damit noch "
                       "offen: dafür bei größeren Abständen weitermessen.")
     elif art == "unterhalb":
         kleinster = min(p["abstand"] for p in ergebnis["punkte"])
-        zeilen.append(f"  FAZIT: Schon bei {kleinster:.0f} cm liegt das Rauschen "
-                      f"über einer Düsenreihe ({schwelle:.4f} mm). Die brauchbare "
-                      f"Grenze liegt darunter und ist mit dieser Messreihe nicht "
-                      f"erfasst — näher am Sender nachmessen.")
+        zeilen.append(f"  FAZIT: Schon bei {kleinster:.0f} cm liegt das "
+                      f"{achse}-p95-Rauschen über einer Düsenreihe "
+                      f"({schwelle:.4f} mm). Die brauchbare Grenze liegt "
+                      f"darunter und ist mit dieser Messreihe nicht erfasst "
+                      f"— näher am Sender nachmessen.")
     else:
-        zeilen.append(f"  FAZIT: Das Rauschen erreicht eine Düsenreihe "
-                      f"({schwelle:.4f} mm) bei etwa **{grenze:.0f} cm**.")
+        zeilen.append(f"  FAZIT: Das {achse}-p95-Rauschen erreicht eine "
+                      f"Düsenreihe ({schwelle:.4f} mm) bei etwa "
+                      f"**{grenze:.0f} cm**.")
         zeilen.append(f"         Darunter arbeiten. Jenseits davon begrenzt der "
-                      f"Sensor die Druckqualität, unabhängig von Dosierung, "
-                      f"BLE und Kalibrierung.")
+                      f"Sensor die Druckqualität auf der Achse {achse}, "
+                      f"unabhängig von Dosierung, BLE und Kalibrierung.")
 
     # Drift getrennt melden -- nur dort, wo die Kurzzeit-Streuung deutlich
-    # unter der Gesamtstreuung liegt, ist wirklich Drift im Spiel.
+    # unter der Gesamtstreuung liegt, ist wirklich Drift im Spiel. Beide
+    # Größen nur noch von der gewählten Achse, nicht mehr 3D-kombiniert
+    # (siehe werte_einer_datei()s Docstring): die anderen Achsen sind für
+    # diese Auswertung nicht relevant, also auch nicht für die Drift-Frage.
     driftend = []
     for p in ergebnis["punkte"]:
-        kurz = math.sqrt(sum(f ** 2 for f in p["fenster"]))
-        if kurz > 0 and p["rms3d"] > 2.0 * kurz:
+        kurz = p["fenster"][idx]
+        if kurz > 0 and p["sigma"][idx] > 2.0 * kurz:
             driftend.append(p["abstand"])
     if driftend:
         liste = ", ".join(f"{a:.0f}" for a in driftend)
-        zeilen.append(f"         DRIFT bei {liste} cm: die Gesamtstreuung ist "
-                      f"dort mehr als doppelt so groß wie die Streuung "
-                      f"innerhalb kurzer Fenster. Der Sensor läuft langsam weg, "
-                      f"statt nur zu rauschen — das mittelt sich NICHT heraus. "
-                      f"Prüfen, ob der Wagen wirklich fest saß und ob sich in "
-                      f"der Nähe etwas bewegt hat.")
+        zeilen.append(f"         DRIFT bei {liste} cm (Achse {achse}): die "
+                      f"Gesamtstreuung ist dort mehr als doppelt so groß wie "
+                      f"die Streuung innerhalb kurzer Fenster. Der Sensor "
+                      f"läuft langsam weg, statt nur zu rauschen — das "
+                      f"mittelt sich NICHT heraus. Prüfen, ob der Wagen "
+                      f"wirklich fest saß und ob sich in der Nähe etwas "
+                      f"bewegt hat.")
 
     zeilen.append("         Einschränkung: gemessen wird alles, was den Sensor "
                   "zappeln lässt — auch ein nicht ganz fest sitzender Wagen "
@@ -461,32 +491,32 @@ def _massstab_zeilen(massstab):
 # ===========================================================================
 _ACHSEN = (60, 60, 60)
 _GITTER = (216, 216, 216)
-_FARBE_3D = (200, 30, 30)
 # Drei Linien EINER Achse (avg/p95/p99), nicht mehr drei Achsen -- siehe
-# zeichne_plot()'s ``achse``-Parameter. Dieselben drei Farben wie vorher,
-# jetzt mit neuer Bedeutung, damit sich an Legende/Konstanten sonst nichts
-# ändern musste.
+# zeichne_plot()'s Docstring. Dieselben drei Farben wie vorher, jetzt mit
+# neuer Bedeutung, damit sich an Legende/Konstanten sonst nichts ändern
+# musste.
 _FARBEN_KENNZAHL = [(70, 130, 200), (220, 140, 40), (90, 170, 90)]
 _REIHE_FARBE = (150, 150, 150)
 
 
-def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, achse="x"):
+def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
     """
-    Rauschen gegen Entfernung als PNG, für EINE gewählte Achse (``achse``,
-    ``"x"``/``"y"``/``"z"``).
+    Rauschen gegen Entfernung als PNG, für die in ``ergebnis["achse"]``
+    gewählte Achse (siehe ``auswerten``).
 
     Zeichnet drei Linien -- Durchschnitt, p95 und p99 der absoluten
-    Abweichung dieser Achse (siehe ``rauschen_kennzahlen``) -- plus die
-    3D-Streuung fett (unabhängig von ``achse``, siehe ``bericht``'s
-    Docstring für das Warum) und eine gestrichelte Linie bei einer
-    Düsenreihe — die Marke, gegen die das Ergebnis gelesen wird.
+    Abweichung dieser Achse (siehe ``rauschen_kennzahlen``) -- plus eine
+    gestrichelte Linie bei einer Düsenreihe, die Marke, gegen die das
+    Ergebnis gelesen wird. KEINE 3D-kombinierte Linie mehr: die anderen
+    beiden Achsen fließen nirgends mehr ein, auch nicht als Referenz (siehe
+    ``werte_einer_datei``s Docstring). Der Grenzabstand-Marker gehört zur
+    p95-Linie -- das ist die Kennzahl, die ``auswerten()`` dafür benutzt.
     """
     from PIL import Image, ImageDraw
 
     if "fehler" in ergebnis:
         return False
-    if achse not in _ACHS_INDEX:
-        raise ValueError(f"achse muss x/y/z sein, nicht {achse!r}")
+    achse = ergebnis["achse"]
 
     punkte = ergebnis["punkte"]
     rand_l, rand_r, rand_o, rand_u = 85, 175, 50, 66
@@ -496,7 +526,10 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, achse="x"):
     x_max = max(p["abstand"] for p in punkte)
     if x_max - x_min < 1e-9:
         x_min, x_max = x_min - 1.0, x_max + 1.0
-    y_max = max(max(p["rms3d"], p["rauschen"][achse]["p99"]) for p in punkte)
+    # p99 ist immer die höchste der drei Linien (per Konstruktion, siehe
+    # test_rauschen_kennzahlen_p99_ist_nie_kleiner_als_avg), also reicht sie
+    # allein für die y-Achsen-Obergrenze.
+    y_max = max(p["rauschen"][achse]["p99"] for p in punkte)
     y_max = max(y_max, DUESENTEILUNG_MM * 1.4) * 1.12
 
     def px(a):
@@ -536,15 +569,7 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, achse="x"):
         for pt in pts:
             z.ellipse([pt[0] - 2, pt[1] - 2, pt[0] + 2, pt[1] + 2], fill=farbe)
 
-    # 3D-Streuung fett -- unabhängig von --achse, siehe bericht()
-    pts = [(px(p["abstand"]), py(p["rms3d"])) for p in punkte]
-    if len(pts) >= 2:
-        z.line(pts, fill=_FARBE_3D, width=3)
-    for pt in pts:
-        z.ellipse([pt[0] - 4, pt[1] - 4, pt[0] + 4, pt[1] + 4],
-                  fill=_FARBE_3D, outline=(255, 255, 255))
-
-    # Grenzabstand markieren
+    # Grenzabstand markieren -- gehört zur p95-Linie, siehe auswerten()
     if ergebnis["grenzart"] == "interpoliert" and ergebnis["grenzabstand"]:
         gx = px(ergebnis["grenzabstand"])
         if rand_l <= gx <= rand_l + pl_b:
@@ -562,15 +587,13 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, achse="x"):
     z.text((8, rand_o - 22), "Streuung (mm)", fill=_ACHSEN, font=klein)
 
     lx, ly = rand_l + pl_b + 14, rand_o + 4
-    for index, name in enumerate((f"{achse}-avg", f"{achse}-p95", f"{achse}-p99")):
+    namen = (f"{achse}-avg", f"{achse}-p95 (Grenzwert)", f"{achse}-p99")
+    for index, name in enumerate(namen):
         z.line([(lx, ly + 6), (lx + 20, ly + 6)], fill=_FARBEN_KENNZAHL[index],
                width=index + 1)
         z.text((lx + 26, ly), name, fill=(40, 40, 40), font=klein)
         ly += 18
     ly += 4
-    z.line([(lx, ly + 6), (lx + 20, ly + 6)], fill=_FARBE_3D, width=3)
-    z.text((lx + 26, ly), "3D-RMS", fill=(40, 40, 40), font=klein)
-    ly += 22
     _gestrichelt(z, lx, ly + 6, lx + 20, _REIHE_FARBE)
     z.text((lx + 26, ly), "1 Düsenreihe", fill=(40, 40, 40), font=klein)
 
@@ -643,15 +666,13 @@ def main(argv=None):
                     help="Fensterlänge in Samples für die Kurzzeit-Streuung "
                          "(Default 15 = ~1 s bei 15 Hz)")
     ap.add_argument("--achse", choices=("x", "y", "z"), default="x",
-                    help="Welche Achse Tabelle und Grafik zeigen (Default x). "
-                         "Statt aller drei Achsen als sigma nebeneinander "
-                         "zeigt die gewählte Achse drei Kennzahlen: "
-                         "Durchschnitt, p95 und p99 der Abweichung vom "
-                         "Mittelwert (siehe rauschen_kennzahlen). Das 3D-RMS "
-                         "und der Grenzabstand im FAZIT bleiben davon "
-                         "unabhängig -- die kombinierte Streuung aller drei "
-                         "Achsen, die den Arbeitsbereich tatsächlich "
-                         "festlegt.")
+                    help="Welche Achse ausgewertet wird (Default x) -- Tabelle, "
+                         "Grafik UND der Grenzabstand im FAZIT. Zeigt drei "
+                         "Kennzahlen dieser einen Achse: Durchschnitt, p95 und "
+                         "p99 der Abweichung vom Mittelwert (siehe "
+                         "rauschen_kennzahlen). Der Grenzabstand basiert auf "
+                         "dem p95-Wert dieser Achse; die anderen beiden Achsen "
+                         "fließen an keiner Stelle mehr ein (kein 3D-RMS mehr).")
     ap.add_argument("--hz", type=float, default=STANDARD_HZ,
                     help=f"Abtastrate von --pos, nur für die Sekundenangaben "
                          f"(Default {STANDARD_HZ:g})")
@@ -703,7 +724,7 @@ def main(argv=None):
         print("[rauschen] Keine auswertbare Datei.")
         return 2
 
-    ergebnis = auswerten(messungen, fenster=args.fenster)
+    ergebnis = auswerten(messungen, fenster=args.fenster, achse=args.achse)
     massstab = None
     if args.massstab:
         try:
@@ -712,11 +733,11 @@ def main(argv=None):
             print(f"[rauschen] --massstab: {fehler}")
             return 2
 
-    print(bericht(ergebnis, hz=args.hz, massstab=massstab, achse=args.achse))
+    print(bericht(ergebnis, hz=args.hz, massstab=massstab))
 
     if not args.kein_plot and "fehler" not in ergebnis:
         try:
-            if zeichne_plot(ergebnis, args.png, achse=args.achse):
+            if zeichne_plot(ergebnis, args.png):
                 print(f"\n  Grafik geschrieben: {args.png}")
         except ImportError:
             print("\n[rauschen] Pillow (PIL) fehlt — der Textbericht oben ist "
