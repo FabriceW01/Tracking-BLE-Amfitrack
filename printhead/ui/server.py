@@ -5,6 +5,10 @@ Web server
 FastAPI app behind the UI. Endpoints:
 
   ``GET  /``                    the UI
+  ``GET  /view``                the print-view page: large live coverage
+                                 canvas + position/pixel-count/percent,
+                                 meant for its own tab while a print runs
+  ``GET  /coverage_view.js``    canvas logic shared by / and /view
   ``WS   /ws``                  live stream: log lines, position, coverage, status
   ``GET  /api/state``           what is running right now
   ``POST /api/run``             run an action (print / test / diagnostic)
@@ -260,12 +264,29 @@ class Hub:
         # stream was not running when the action started, so nothing is
         # resumed -- an action must never silently turn the tracker on.
         self._sensor_resume: Optional[List[str]] = None
+        # The most recent `coverage_start` event's payload, kept only while
+        # that pass is still running (cleared on `coverage_done`). Lets a
+        # client that connects or reconnects MID-PASS -- the whole point of
+        # /view, opened after a print has already started -- initialise its
+        # canvas immediately instead of sitting blank until the NEXT pass's
+        # coverage_start, which may be minutes away or may never come if
+        # this is the only pass. See register() below.
+        self._last_coverage_start: Optional[dict] = None
 
     # -- websocket fan-out --------------------------------------------------
     async def register(self, ws: WebSocket) -> None:
         await ws.accept()
         self.clients.add(ws)
         await ws.send_json({"type": "status", **self.status()})
+        if self._last_coverage_start is not None:
+            # `replay` marks this apart from a live coverage_start so the
+            # client can say "opened mid-pass" instead of implying it saw
+            # the pass from the start -- cells inked before this connection
+            # existed are NOT recoverable (the hub never buffers them, a
+            # full-resolution print can be millions of pixels) and will
+            # never appear on this client's canvas, only from here on.
+            await ws.send_json({"type": "coverage_event",
+                                **self._last_coverage_start, "replay": True})
 
     def unregister(self, ws: WebSocket) -> None:
         self.clients.discard(ws)
@@ -307,6 +328,12 @@ class Hub:
         if self.action and self.action.running:
             return {"ok": False, "error": "es läuft bereits eine Aktion"}
 
+        # A previous action's coverage_start could otherwise leak into a
+        # client that connects during THIS action, before it has (or ever
+        # has, if this isn't page mode) sent its own coverage_start -- wrong
+        # width/height, or claiming a pass is running when none is.
+        self._last_coverage_start = None
+
         # Remember whether to bring the sensor back, then release the device.
         if self.sensor and self.sensor.running:
             self._sensor_resume = list(self._sensor_args or [])
@@ -319,11 +346,23 @@ class Hub:
             if isinstance(obj, dict) and obj.get("event") == "position":
                 await self.broadcast({"type": "position", **obj})
             elif isinstance(obj, dict) and obj.get("event") in _COVERAGE_EVENTS:
+                # Tracked so register() can replay it into a client that
+                # connects mid-pass -- see _last_coverage_start's docstring.
+                if obj["event"] == "coverage_start":
+                    self._last_coverage_start = dict(obj)
+                elif obj["event"] == "coverage_done":
+                    self._last_coverage_start = None
                 await self.broadcast({"type": "coverage_event", **obj})
             else:
                 await self._log(line)
 
         async def on_exit(code: int) -> None:
+            # Safety net for a process that dies mid-pass (crash, kill)
+            # without ever emitting coverage_done: without this, a start
+            # payload from a pass that no longer exists would keep getting
+            # replayed into new connections after the action has already
+            # ended.
+            self._last_coverage_start = None
             await self.broadcast({"type": "action_done", "code": code})
             await self._status_broadcast()
             if self._sensor_resume is not None:
@@ -458,6 +497,27 @@ app = FastAPI(title="Printhead")
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/view", response_class=HTMLResponse)
+async def view() -> str:
+    """The print-view page: a large live coverage canvas plus position and
+    pixel-count/percent readouts, meant to be opened in its own tab/window
+    while a print runs (see index.html's "Druckansicht" link) -- unlike the
+    main page it carries no print controls, only the live monitor."""
+    return (STATIC_DIR / "view.html").read_text(encoding="utf-8")
+
+
+@app.get("/coverage_view.js")
+async def coverage_view_js():
+    """The canvas logic shared by index.html and view.html (see that file's
+    own doc comment for why it is factored out). A dedicated route, not a
+    generic StaticFiles mount, matching how every other static asset here
+    (index.html, view.html) is served -- this app has exactly three static
+    files and no build step; a mount would be infrastructure for a fourth
+    that will not arrive."""
+    return FileResponse(str(STATIC_DIR / "coverage_view.js"),
+                        media_type="application/javascript")
 
 
 @app.get("/api/state")
