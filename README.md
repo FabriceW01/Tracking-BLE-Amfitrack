@@ -1097,6 +1097,45 @@ Der gebaute Befehl steht immer im Klartext unter den Druckknöpfen — die UI
 führt echte `main.py`-Unterprozesse aus und kann deshalb nicht davon
 abweichen, was die CLI tut.
 
+### Druckansicht: `/view`
+
+Kopfzeilen-Knopf **„Druckansicht ↗"** öffnet `/view` in einem eigenen
+Tab/Fenster — eine schlanke, reine Beobachtungsseite ohne Druck-Formular,
+Konsole oder Kalibrierung, gedacht dafür, sie neben (oder auf einem zweiten
+Bildschirm über) der Anlage offen zu lassen, während ein Durchgang läuft:
+
+- **Hauptfokus die Druckpreview** — dieselbe live wachsende Deckungsansicht
+  wie auf der Steuerseite (Zielbild blass darunter, rote Kopflinie/orange
+  Randmarke), nur deutlich größer statt in einer schmalen Seitenspalte.
+- **Position** — dieselben Felder wie im Live-Positions-Panel der
+  Steuerseite (x/y/z, Seite u/v, Spalte/Zeile, Gier, Geschwindigkeit).
+- **Deckung mit Prozent** — die Steuerseite zeigt „7483 / 9939 Pixel" plus
+  Balken; hier steht zusätzlich eine große Prozentzahl davor, auf einen
+  Blick aus der Entfernung lesbar, ohne die beiden Zahlen erst dividieren
+  zu müssen.
+
+Läuft über **denselben** `/ws`, den auch die Steuerseite benutzt — der Hub
+sendet an alle verbundenen Clients dasselbe, ganz ohne Extra-Serverlogik für
+ein zweites Fenster (`server.py`'s `Hub.broadcast`). Die Canvas-Zeichenlogik
+(`covStart`/`covCells`/`covHead`) liegt seit dieser Seite in einer geteilten
+`coverage_view.js` statt zweimal in beiden HTML-Dateien — dieselbe
+Begründung wie für die serverseitige `bar`-Berechnung weiter oben: zwei
+Kopien derselben Skalierungs-/Geometrierechnung würden beim nächsten Umbau
+still auseinanderlaufen, und hier geht es nicht nur um Optik, sondern um die
+Stelle, an der die Kopfmarke dem Bediener das Papier zeigt.
+
+**Mitten im Durchgang geöffnet oder neu verbunden?** Der Hub merkt sich den
+letzten `coverage_start` einer noch laufenden Aktion und schickt ihn beim
+Verbinden sofort nach (`replay: true`), statt das Fenster bis zum
+NÄCHSTEN Durchgang leer zu lassen — bei einem einzelnen `--once`-Lauf käme
+der nie. Zellen, die vor dieser Verbindung schon gedruckt wurden, fehlen auf
+dieser einen Leinwand trotzdem für immer (der Hub puffert sie nicht,
+ein Druck kann Millionen Pixel haben) — die Ansicht sagt das dann auch,
+statt eine augenscheinlich vollständige, aber lückenhafte Deckung zu zeigen.
+Dieselbe Reparatur kommt der Steuerseite selbst zugute: ein Neuladen
+mitten im Durchgang zeigte vorher ebenfalls nur eine leere Leinwand bis zum
+nächsten Pass.
+
 ### ⚠️ Behoben: die Buchführung pro Sample war das eigentliche Tempolimit
 
 Die UI fährt jeden Druck mit `--progress-json`. Dieser Stream schickte ein

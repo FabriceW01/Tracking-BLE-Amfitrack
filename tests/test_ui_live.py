@@ -41,6 +41,9 @@ class _FakeWS:
     def __init__(self):
         self.messages = []
 
+    async def accept(self):
+        pass          # echte Registrierung braucht das (Hub.register), Tests bisher nicht
+
     async def send_json(self, msg):
         self.messages.append(msg)
 
@@ -198,35 +201,61 @@ def test_zellen_erreichen_den_client_genau_einmal():
         "finale Flush fehlt oder die Drosselung verwirft")
 
 
+_STATIC = pathlib.Path(__file__).resolve().parent.parent / "printhead" / "ui" / "static"
+
+
 def test_ui_zeichnet_die_zellen_auch_wirklich():
     """Schwacher, aber gezielter Verdrahtungstest: die Zellen wurden lange
     berechnet, serialisiert und gesendet — und im Browser verworfen, weil es
-    gar kein Canvas gab. Genau diese Lücke sichert das hier ab."""
-    quelle = (pathlib.Path(__file__).resolve().parent.parent
-              / "printhead" / "ui" / "static" / "index.html").read_text()
+    gar kein Canvas gab. Genau diese Lücke sichert das hier ab.
+
+    Die eigentliche Canvas-Logik (getContext, das Canvas-Markup) liegt seit
+    der Druckansicht in coverage_view.js, geteilt zwischen index.html und
+    view.html -- siehe test_beide_seiten_laden_coverage_view_js für die
+    Einbindung und test_coverage_view_js_zeichnet_die_zellen_und_die_marke
+    für den Inhalt. Hier bleibt nur, was WIRKLICH noch in index.html steht:
+    die AUFRUFSTELLEN in dessen eigenem Inline-Skript."""
+    quelle = (_STATIC / "index.html").read_text()
     # Auf die AUFRUFSTELLEN geprüft, nicht auf das blosse Vorkommen der
     # Wörter: ein Kommentar, der "new_cells" erwähnt, erfüllt eine
     # Vorkommensprüfung auch dann noch, wenn die Verdrahtung entfernt wurde
     # (genau so ist diese Prüfung beim Mutationstest zuerst durchgerutscht).
     for aufruf in ("covStart(m.width, m.height)",
                    "covCells(m.new_cells)",
-                   "getContext(\"2d\")",
                    "/api/preview.png"):
         assert aufruf in quelle, f"index.html ruft {aufruf!r} nicht auf"
-    assert "<canvas" in quelle
 
 
 def test_ui_zeichnet_die_druckkopf_marke():
-    """Dieselbe Verdrahtungsprüfung für die Kopfanzeige: die Endpunkte
-    werden serverseitig mitgeschickt, das Zeichnen kann trotzdem fehlen.
-    Wieder auf AUFRUFSTELLEN geprüft, nicht auf Wortvorkommen."""
-    quelle = (pathlib.Path(__file__).resolve().parent.parent
-              / "printhead" / "ui" / "static" / "index.html").read_text()
+    """Dieselbe Verdrahtungsprüfung für die Kopfanzeige, auf index.html's
+    eigene AUFRUFSTELLEN beschränkt -- das Zeichnen selbst prüft
+    test_coverage_view_js_zeichnet_die_zellen_und_die_marke."""
+    quelle = (_STATIC / "index.html").read_text()
     for aufruf in ("covHead(m.bar)",          # Ereignis -> Zustand
-                   "covHead(null)",           # am Durchgangsende geloescht
+                   "covHead(null)"):          # am Durchgangsende geloescht
+        assert aufruf in quelle, f"index.html ruft {aufruf!r} nicht auf"
+
+
+def test_beide_seiten_laden_coverage_view_js():
+    """Die eine Zeile, die index.html und view.html überhaupt erst an die
+    geteilte Canvas-Logik anschließt. Ohne sie rufen beide Seiten covStart/
+    covCells/covHead auf undefinierte Funktionen auf -- ein Fehler, den
+    keiner der Aufrufstellen-Tests oben oder unten für sich allein fängt,
+    weil jeder nur seine eigene Datei liest."""
+    for name in ("index.html", "view.html"):
+        quelle = (_STATIC / name).read_text()
+        assert '<script src="/coverage_view.js">' in quelle, name
+
+
+def test_coverage_view_js_zeichnet_die_zellen_und_die_marke():
+    """Der Inhalt der ausgelagerten Datei: dieselben Aufrufstellen-Prüfungen
+    wie zuvor direkt in index.html, jetzt hier, weil hier die eigentliche
+    Zeichenarbeit passiert."""
+    quelle = (_STATIC / "coverage_view.js").read_text()
+    for aufruf in ("getContext(\"2d\")",
                    "covDrawHead()",           # je Bild neu gezeichnet
                    'id="cov-ov"'):            # eigenes Overlay-Canvas
-        assert aufruf in quelle, f"index.html ruft {aufruf!r} nicht auf"
+        assert aufruf in quelle, f"coverage_view.js enthaelt {aufruf!r} nicht"
     # Das Overlay MUSS ein zweites Canvas sein: das Deckungs-Canvas wird
     # nur ergaenzt und nie geloescht, eine dort gezeichnete Kopflinie
     # bliebe als Schleifspur stehen.
@@ -234,13 +263,24 @@ def test_ui_zeichnet_die_druckkopf_marke():
     assert "clearRect" in quelle, "Overlay wird nie geleert"
 
 
+def test_view_html_ruft_dieselben_funktionen_auf():
+    """Die Druckansicht-Seite muss dieselben drei Einstiegspunkte in
+    coverage_view.js benutzen wie index.html -- sonst bekäme sie zwar die
+    Ereignisse über denselben /ws, würde aber nichts zeichnen."""
+    quelle = (_STATIC / "view.html").read_text()
+    for aufruf in ("covStart(m.width, m.height)",
+                   "covCells(m.new_cells)",
+                   "covHead(m.bar)",
+                   "covHead(null)"):
+        assert aufruf in quelle, f"view.html ruft {aufruf!r} nicht auf"
+
+
 # ============================================== Standardwerte Dosis/Spray
 def test_ui_standardwerte_fuer_dosis_und_spray():
     """Vom Anlagenbesitzer festgelegt: Dosis 2, Spray aus. Die Felder der
     Oberfläche müssen dieselben Werte tragen wie die CLI-Defaults, sonst
     druckt ein Klick in der UI anders als derselbe Lauf im Terminal."""
-    quelle = (pathlib.Path(__file__).resolve().parent.parent
-              / "printhead" / "ui" / "static" / "index.html").read_text()
+    quelle = (_STATIC / "index.html").read_text()
     for feld, wert in (("dose", "2"), ("spray_r", "0"), ("spray_s", "0")):
         muster = f'id="{feld}" type="number" value="{wert}"'
         assert muster in quelle, f"Feld {feld!r} steht nicht auf {wert!r}"
@@ -476,6 +516,125 @@ def test_testknoepfe_ohne_kalibrierung_laufen_auch_allein():
                 f"Testknopf {t['id']!r} ist als needs_calibration=False "
                 f"markiert, braucht aber doch einen Seitenrahmen ({exc})"
             ) from None
+
+
+# ==================================================== Druckansicht (/view)
+def test_view_route_liefert_view_html():
+    """Dieselbe Herangehensweise wie beim bestehenden `/`-Test wäre (dieses
+    Projekt hat kein httpx/TestClient, siehe test_ui_calibration.py's
+    Modul-Doku) -- der async-Routenhandler wird direkt aufgerufen, nicht
+    über einen echten HTTP-Request."""
+    from printhead.ui.server import view
+
+    html = asyncio.run(view())
+    assert "Druckansicht" in html
+    assert '<script src="/coverage_view.js">' in html
+    # Muss vom selben Server-Text stammen wie die Datei auf der Platte,
+    # nicht eine eingebettete Kopie -- sonst laufen Route und Datei
+    # irgendwann auseinander.
+    assert html == (_STATIC / "view.html").read_text(encoding="utf-8")
+
+
+def test_coverage_view_js_route_liefert_die_datei_mit_dem_richtigen_typ():
+    from printhead.ui.server import coverage_view_js
+
+    resp = asyncio.run(coverage_view_js())
+    assert resp.media_type == "application/javascript"
+    assert str(_STATIC / "coverage_view.js") in str(resp.path)
+
+
+# ========================================== Replay eines laufenden Durchgangs
+def test_registrierung_ohne_laufenden_durchgang_bekommt_keinen_replay():
+    """Der Normalfall: nichts läuft, ein neu verbundener Client bekommt nur
+    den Status, keinen erfundenen coverage_event."""
+    async def run():
+        hub = Hub()
+        fake = _FakeWS()
+        await hub.register(fake)
+        return fake.messages
+
+    nachrichten = asyncio.run(run())
+    assert len(nachrichten) == 1
+    assert nachrichten[0]["type"] == "status"
+
+
+def test_registrierung_waehrend_eines_durchgangs_bekommt_den_replay():
+    """Der Vertrag, den /view überhaupt erst nutzbar macht: ein Fenster, das
+    MITTEN in einem laufenden Durchgang verbunden wird, muss sofort wissen,
+    wie groß das Zielbild ist -- sonst bliebe seine Leinwand bis zum
+    NÄCHSTEN Durchgang leer, der bei einem einzelnen `--once`-Lauf nie
+    kommt. Deterministisch geprüft, ohne echten Durchgang/Timing-Rennen:
+    _last_coverage_start wird direkt gesetzt, wie es on_line während eines
+    echten Laufs auch täte (siehe die End-zu-Ende-Gegenprobe unten)."""
+    async def run():
+        hub = Hub()
+        hub._last_coverage_start = {"event": "coverage_start",
+                                    "width": 42, "height": 7}
+        fake = _FakeWS()
+        await hub.register(fake)
+        return fake.messages
+
+    nachrichten = asyncio.run(run())
+    assert len(nachrichten) == 2
+    assert nachrichten[0]["type"] == "status"
+    replay = nachrichten[1]
+    assert replay["type"] == "coverage_event"
+    assert replay["event"] == "coverage_start"
+    assert replay["width"] == 42 and replay["height"] == 7
+    assert replay["replay"] is True
+
+
+def test_ein_echter_durchgang_setzt_und_loescht_last_coverage_start():
+    """Die End-zu-Ende-Gegenprobe zum Test oben: dass on_line
+    _last_coverage_start während eines ECHTEN Durchgangs wirklich pflegt,
+    nicht nur, dass register() es korrekt weiterreicht, wenn es gesetzt
+    ist. Gepollt statt auf ein exaktes Zeitfenster gewettet -- run_action
+    läuft asynchron neben der Poll-Schleife, und ein `--once`-Durchgang mit
+    mehreren Metern Fahrweg braucht durchweg mehr als einen 20ms-Tick."""
+    async def run():
+        hub = Hub()
+        fake = _FakeWS()
+        hub.clients.add(fake)
+        gesehen_waehrend_aktiv = []
+        await hub.run_action([
+            "--pattern", "solid", "--pattern-length-mm", "40",
+            "--pattern-height-mm", "40", "--mode", "page",
+            "--page-frame", "simple", "--dry-run", "--simulate",
+            "--progress-json", "--auto-start", "--once", "--timeout", "5",
+        ])
+        for _ in range(500):
+            if hub.action is None or not hub.action.running:
+                break
+            if hub._last_coverage_start is not None:
+                gesehen_waehrend_aktiv.append(dict(hub._last_coverage_start))
+            await asyncio.sleep(0.02)
+        await _bis_fertig(hub)
+        return gesehen_waehrend_aktiv, hub._last_coverage_start, fake.messages
+
+    gesehen, danach, nachrichten = asyncio.run(run())
+    echter_start = next(m for m in nachrichten if m.get("event") == "coverage_start")
+    assert gesehen, "on_line hat _last_coverage_start waehrend des Durchgangs nie gesetzt"
+    assert gesehen[0]["width"] == echter_start["width"]
+    assert gesehen[0]["height"] == echter_start["height"]
+    assert danach is None, "coverage_done/on_exit muessen _last_coverage_start wieder loeschen"
+
+
+def test_neue_aktion_verwirft_last_coverage_start_der_vorigen():
+    """Ohne das würde eine Aktion, die selbst gar keine Deckung meldet (z.B.
+    line/time-Modus, oder eine, die vor dem ersten coverage_start endet),
+    einem mitten in ihr verbindenden Client fälschlich die Geometrie DES
+    VORIGEN Durchgangs als angeblich laufend unterschieben."""
+    async def run():
+        hub = Hub()
+        hub._last_coverage_start = {"event": "coverage_start",
+                                    "width": 999, "height": 999}
+        fake = _FakeWS()
+        hub.clients.add(fake)
+        await hub.run_action(["Hi", "--dry-run", "--mode", "line",
+                              "--simulate", "--once", "--timeout", "1"])
+        return hub._last_coverage_start
+
+    assert asyncio.run(run()) is None
 
 
 if __name__ == "__main__":
