@@ -714,7 +714,7 @@ python main.py --pattern checkerboard --mode page --page-calibration page_calibr
 
 **Dosierung in `--mode page` (`--drops-per-pixel`):** Ein Pixel gilt als
 gedruckt, sobald es `--drops-per-pixel` Tropfen bekommen hat — Default
-`coverage.DEFAULT_DROPS_PER_PIXEL = 1`. Wie viele Kopien einer Spalte dafür
+`coverage.DEFAULT_DROPS_PER_PIXEL = 2`. Wie viele Kopien einer Spalte dafür
 rausgehen, entscheidet **allein der zurückgelegte Weg**:
 
 ```
@@ -729,7 +729,8 @@ Regler muss nach unten feiner sein als „ganz aus".
 `--drops-per-pixel ÷ --mm-per-column`:
 
 ```
-1 / 0,087 = 11,5 Tropfen/mm   <- Default, heutige Spaltenbreite
+2 / 0,087 = 23,0 Tropfen/mm   <- Default, heutige Spaltenbreite
+1 / 0,087 = 11,5 Tropfen/mm   <- Dichte, an der der Default verankert ist
 3 / 0,200 = 15,0 Tropfen/mm   <- Zeilen-Modus, wofür die 3 validiert wurde
 3 / 0,087 = 34,5 Tropfen/mm   <- dieselbe 3 bei heutiger Spaltenbreite
 ```
@@ -741,9 +742,17 @@ Umstellung: der Default stand auf 3, kopiert aus dem Firmware-Konstanten
 **0,2 mm** breiten Spalte gehört. Bei 0,087 mm ergibt das gut die dreifache
 Tintenmenge — von der Hardware zurückgemeldet als „jetzt kommt zu viel raus",
 gegenüber einem vorherigen Druck, der heller **und schärfer** war. Die 11,5
-Tropfen/mm des heutigen Defaults sind genau das, was der Client **vor** der
-Umstellung bei langsamer Fahrt geliefert hat (simuliert: 120 Spalten Tinte auf
-120 Spalten Fahrweg), also die Dichte, die auf echtem Papier beurteilt wurde.
+Tropfen/mm sind genau das, was der Client **vor** der Umstellung bei langsamer
+Fahrt geliefert hat (simuliert: 120 Spalten Tinte auf 120 Spalten Fahrweg),
+also die Dichte, die auf echtem Papier beurteilt wurde — daran ist dieser
+Wert verankert.
+
+Der Default steht inzwischen auf **2** (23,0 Tropfen/mm), also bewusst auf
+dem Doppelten dieser Dichte: nach einer Reihe echter Drucke mit explizitem
+`--drops-per-pixel 2` auf der Kommandozeile vom Anlagenbesitzer so
+festgelegt. Auf Papier entschieden, was der einzige Ort ist, an dem sich
+diese Frage entscheiden lässt. Kommt der Druck zu dunkel oder verlaufen,
+ist das der Regler.
 
 Gegenprobe aus der Physik: ein Tropfen läuft auf ~60–120 µm aus, eine Spalte
 ist 87 µm breit — **ein** Tropfen deckt sie also bereits ab.
@@ -1051,6 +1060,24 @@ Zwei Anzeigen sind **immer** sichtbar, egal was man gerade tut:
   also ist auf einen Blick sichtbar, was noch **fehlt**. Klick schaltet auf
   1:1-Pixel um (die Seitenspalte verkleinert ein 2299 Spalten breites Ziel
   sonst 6-fach, wobei einzelne Spaltenstriche untergehen).
+
+  **Wo der Druckkopf gerade steht**, zeigt eine rote Linie: die Düsenleiste
+  in ihrer aktuellen Gierlage, mit einem Punkt am Ende von Düse 0, damit die
+  Leiste eine erkennbare Richtung hat. Ohne die sieht man zwar, was schon
+  Tinte hat, aber nicht, wo man sich befindet. Ist der Kopf **komplett
+  außerhalb** des Druckbilds, entfällt die Linie und stattdessen sitzt ein
+  oranger Punkt am Bildrand in seiner Richtung — man weiß dann, wohin
+  zurückzufahren ist. Die Unterscheidung läuft über die Balkenmitte: ragt
+  bei Schräglage ein Ende ins Bild, bleibt die Linie, weil sie dann die
+  bessere Auskunft ist.
+
+  Die beiden Endpunkte kommen fertig aus `controller._coverage_event`, mit
+  derselben Formel gerechnet (`coverage.bar_offset_uv`), mit der
+  `CoverageEngine.step()` jede einzelne Düse platziert — die Linie liegt
+  also da, wo auch wirklich Tinte landet. Bewusst nicht im Browser
+  nachgerechnet: das wären eine zweite Kopie der Formel plus Kopien von
+  `NOZZLE_PITCH_MM`/`NOZZLE_BAR_SPAN_MM`/`NUM_NOZZLES`, die beim nächsten
+  Neuvermessen der Leiste still auseinanderlaufen würden.
 
   Ein Klotz-Pixel = eine Zelle des Zielbilds, dieselbe Konvention wie
   `record.png`. Reißt die WebSocket-Verbindung mitten im Durchgang, fehlen
