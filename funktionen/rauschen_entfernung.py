@@ -52,6 +52,15 @@ Der Abstand wird aus dem Dateinamen gelesen (erste Zahl darin), oder explizit:
 Zusätzlich Test 2b (Maßstabsfehler über Entfernung):
 
     ... --massstab 10=99.4,20=99.1,30=98.2 --referenz 100
+
+Tabelle und Grafik zeigen standardmäßig die x-Achse; mit ``--achse y`` oder
+``--achse z`` wird eine andere gewählt. Statt aller drei Achsen als
+Standardabweichung nebeneinander zeigt die gewählte Achse drei Kennzahlen --
+Durchschnitt, p95 und p99 der Abweichung vom Mittelwert je Sample, wie bei
+Latenzmessungen üblich. Das FAZIT (Grenzabstand gegen eine Düsenreihe) bleibt
+unabhängig davon: es basiert auf dem 3D-RMS aller drei Achsen zusammen.
+
+    python funktionen/rauschen_entfernung.py rausch_d*.jsonl --achse y
 """
 
 import argparse
@@ -162,12 +171,59 @@ def fenster_streuung(werte, fenster):
     return math.sqrt(sum(varianzen) / len(varianzen))
 
 
+def _perzentil(werte, p):
+    """
+    p-tes Perzentil (0..100) per linearer Interpolation zwischen den
+    beiden umgebenden Rängen -- dieselbe Konvention wie NumPy's Default
+    (``interpolation="linear"``), von Hand nachrechenbar ohne NumPy als
+    Abhängigkeit (siehe Moduldocstring: dieses Werkzeug bleibt bewusst
+    eigenständig).
+    """
+    if not werte:
+        return 0.0
+    s = sorted(werte)
+    if len(s) == 1:
+        return s[0]
+    rang = (p / 100.0) * (len(s) - 1)
+    unten = int(math.floor(rang))
+    oben = int(math.ceil(rang))
+    if unten == oben:
+        return s[unten]
+    anteil = rang - unten
+    return s[unten] + anteil * (s[oben] - s[unten])
+
+
+def rauschen_kennzahlen(werte):
+    """
+    Rauschen EINER Achse als drei Zahlen statt einer: Durchschnitt, p95, p99
+    der absoluten Abweichung jedes einzelnen Samples vom Mittelwert der
+    Aufzeichnung (``|wert_i - mittel|``) -- dieselbe Art Kennzahl wie bei
+    Latenzen üblich (avg/p95/p99), hier auf die Sensorposition angewandt.
+
+    Anders als ``_stdabw`` (die klassische Standardabweichung, quadratisch
+    gewichtet und damit von einzelnen Ausreißern überproportional
+    beeinflusst) zeigen p95/p99 direkt, wie schlecht der SCHLECHTESTE
+    typische Moment ist -- die Zahl, die für "reicht die Genauigkeit noch"
+    eigentlich zählt, nicht nur der Durchschnitt.
+    """
+    if not werte:
+        return {"avg": 0.0, "p95": 0.0, "p99": 0.0}
+    m = _mittel(werte)
+    abweichungen = [abs(w - m) for w in werte]
+    return {
+        "avg": _mittel(abweichungen),
+        "p95": _perzentil(abweichungen, 95),
+        "p99": _perzentil(abweichungen, 99),
+    }
+
+
 def werte_einer_datei(xs, ys, zs, fenster):
     """Kennzahlen einer einzelnen Aufzeichnung."""
     mx, my, mz = _mittel(xs), _mittel(ys), _mittel(zs)
     # 3D-Streuung: RMS-Abstand vom Mittelpunkt. Eine einzige Zahl, die alle
     # drei Achsen zusammenfasst -- das ist die Größe, die mit der
-    # Düsenteilung verglichen wird.
+    # Düsenteilung verglichen wird (unabhängig von --achse, siehe
+    # grenzabstand()/_urteil()).
     rms3d = math.sqrt(_mittel([(x - mx) ** 2 + (y - my) ** 2 + (z - mz) ** 2
                                for x, y, z in zip(xs, ys, zs)])) if xs else 0.0
     return {
@@ -178,6 +234,13 @@ def werte_einer_datei(xs, ys, zs, fenster):
         "rms3d": rms3d,
         "fenster": (fenster_streuung(xs, fenster), fenster_streuung(ys, fenster),
                     fenster_streuung(zs, fenster)),
+        # Je Achse avg/p95/p99 (siehe rauschen_kennzahlen) -- das, was
+        # --achse im Bericht/Plot tatsächlich zeigt. Für alle drei Achsen
+        # berechnet, nicht nur die gewählte: einmalige Kosten beim Einlesen,
+        # damit ein späterer Aufruf mit anderer --achse nicht neu einlesen
+        # muss (siehe main()).
+        "rauschen": {"x": rauschen_kennzahlen(xs), "y": rauschen_kennzahlen(ys),
+                     "z": rauschen_kennzahlen(zs)},
     }
 
 
@@ -252,37 +315,64 @@ def massstab_auswerten(paare, referenz_mm):
 # ===========================================================================
 # Bericht
 # ===========================================================================
+_ACHS_INDEX = {"x": 0, "y": 1, "z": 2}
+
+
 def _reihen(mm):
     return mm / DUESENTEILUNG_MM
 
 
-def bericht(ergebnis, hz=STANDARD_HZ, massstab=None):
+def bericht(ergebnis, hz=STANDARD_HZ, massstab=None, achse="x"):
+    """
+    ``achse`` (``"x"``/``"y"``/``"z"``) wählt, WELCHE Achse die Tabelle und
+    die Düsenreihen-Zeile zeigen -- vorher zeigte die Tabelle alle drei
+    Achsen als sigma nebeneinander; jetzt genau eine, dafür mit drei echten
+    Kennzahlen (avg/p95/p99 statt nur der einen Standardabweichung), siehe
+    ``rauschen_kennzahlen``.
+
+    Das 3D-RMS und damit das FAZIT/der Grenzabstand bleiben unabhängig von
+    ``achse`` -- das ist die kombinierte Streuung aller drei Achsen (siehe
+    ``werte_einer_datei``), die den nutzbaren Arbeitsbereich tatsächlich
+    festlegt, unabhängig davon, welche einzelne Achse gerade betrachtet
+    wird.
+    """
     if "fehler" in ergebnis:
         return f"[rauschen] {ergebnis['fehler']}"
+    if achse not in _ACHS_INDEX:
+        raise ValueError(f"achse muss x/y/z sein, nicht {achse!r}")
+    idx = _ACHS_INDEX[achse]
 
     zeilen = ["---- Sensorrauschen über die Entfernung ----"]
+    zeilen.append(f"  Achse: {achse}  (mit --achse x/y/z wählbar)")
     zeilen.append(f"  Fenster für die Kurzzeit-Streuung: "
                   f"{ergebnis['fenster']} Samples "
                   f"(~{ergebnis['fenster'] / hz:.1f} s bei {hz:g} Hz)")
     zeilen.append("")
-    zeilen.append("  Abstand  Punkte    ~Dauer   sigma_x  sigma_y  sigma_z   "
-                  "3D-RMS  Spitze-Sp.  kurzfr.")
+    zeilen.append(f"  Abstand  Punkte    ~Dauer   {achse}-avg   {achse}-p95   "
+                  f"{achse}-p99   3D-RMS  Spitze-Sp.  kurzfr.")
     zeilen.append("     (cm)                (s)      (mm)     (mm)     (mm)     "
                   "(mm)        (mm)     (mm)")
     for p in ergebnis["punkte"]:
-        sx, sy, sz = p["sigma"]
-        fx, fy, fz = p["fenster"]
-        kurz = math.sqrt((fx ** 2 + fy ** 2 + fz ** 2))
+        r = p["rauschen"][achse]
         zeilen.append(
             f"  {p['abstand']:7.1f} {p['punkte']:7d} {p['punkte'] / hz:9.1f} "
-            f"{sx:9.4f} {sy:8.4f} {sz:8.4f} {p['rms3d']:8.4f} "
-            f"{max(p['spitze']):11.4f} {kurz:8.4f}")
+            f"{r['avg']:9.4f} {r['p95']:8.4f} {r['p99']:8.4f} {p['rms3d']:8.4f} "
+            f"{p['spitze'][idx]:11.4f} {p['fenster'][idx]:8.4f}")
 
     zeilen.append("")
     zeilen.append("  3D-RMS in Düsenreihen (0,087 mm je Reihe):")
     for p in ergebnis["punkte"]:
         marke = "  <-- über einer Düsenreihe" if p["rms3d"] >= DUESENTEILUNG_MM else ""
         zeilen.append(f"  {p['abstand']:7.1f} cm : {_reihen(p['rms3d']):6.2f} "
+                      f"Reihen{marke}")
+
+    zeilen.append("")
+    zeilen.append(f"  {achse}-Rauschen (p99) in Düsenreihen -- der Wert, den ein "
+                  f"einzelnes Sample auf dieser Achse fast nie überschreitet:")
+    for p in ergebnis["punkte"]:
+        p99 = p["rauschen"][achse]["p99"]
+        marke = "  <-- über einer Düsenreihe" if p99 >= DUESENTEILUNG_MM else ""
+        zeilen.append(f"  {p['abstand']:7.1f} cm : {_reihen(p99):6.2f} "
                       f"Reihen{marke}")
 
     zeilen.append("")
@@ -372,22 +462,31 @@ def _massstab_zeilen(massstab):
 _ACHSEN = (60, 60, 60)
 _GITTER = (216, 216, 216)
 _FARBE_3D = (200, 30, 30)
-_FARBEN_ACHSE = [(70, 130, 200), (220, 140, 40), (90, 170, 90)]
+# Drei Linien EINER Achse (avg/p95/p99), nicht mehr drei Achsen -- siehe
+# zeichne_plot()'s ``achse``-Parameter. Dieselben drei Farben wie vorher,
+# jetzt mit neuer Bedeutung, damit sich an Legende/Konstanten sonst nichts
+# ändern musste.
+_FARBEN_KENNZAHL = [(70, 130, 200), (220, 140, 40), (90, 170, 90)]
 _REIHE_FARBE = (150, 150, 150)
 
 
-def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
+def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, achse="x"):
     """
-    Rauschen gegen Entfernung als PNG.
+    Rauschen gegen Entfernung als PNG, für EINE gewählte Achse (``achse``,
+    ``"x"``/``"y"``/``"z"``).
 
-    Zeichnet die drei Achsen einzeln und die 3D-Streuung fett, dazu eine
-    gestrichelte Linie bei einer Düsenreihe — die Marke, gegen die das
-    Ergebnis gelesen wird.
+    Zeichnet drei Linien -- Durchschnitt, p95 und p99 der absoluten
+    Abweichung dieser Achse (siehe ``rauschen_kennzahlen``) -- plus die
+    3D-Streuung fett (unabhängig von ``achse``, siehe ``bericht``'s
+    Docstring für das Warum) und eine gestrichelte Linie bei einer
+    Düsenreihe — die Marke, gegen die das Ergebnis gelesen wird.
     """
     from PIL import Image, ImageDraw
 
     if "fehler" in ergebnis:
         return False
+    if achse not in _ACHS_INDEX:
+        raise ValueError(f"achse muss x/y/z sein, nicht {achse!r}")
 
     punkte = ergebnis["punkte"]
     rand_l, rand_r, rand_o, rand_u = 85, 175, 50, 66
@@ -397,7 +496,7 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
     x_max = max(p["abstand"] for p in punkte)
     if x_max - x_min < 1e-9:
         x_min, x_max = x_min - 1.0, x_max + 1.0
-    y_max = max(max(p["rms3d"], max(p["sigma"])) for p in punkte)
+    y_max = max(max(p["rms3d"], p["rauschen"][achse]["p99"]) for p in punkte)
     y_max = max(y_max, DUESENTEILUNG_MM * 1.4) * 1.12
 
     def px(a):
@@ -426,16 +525,18 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
     if rand_o <= y_reihe <= rand_o + pl_h:
         _gestrichelt(z, rand_l, y_reihe, rand_l + pl_b, _REIHE_FARBE)
 
-    # Achsenkurven
-    for index, name in enumerate(("x", "y", "z")):
-        farbe = _FARBEN_ACHSE[index]
-        pts = [(px(p["abstand"]), py(p["sigma"][index])) for p in punkte]
+    # avg/p95/p99 der gewählten Achse -- steigende Linienstärke, weil p99
+    # der Wert ist, der am meisten zählt (der seltene schlechte Moment).
+    for kennzahl, breite_linie in (("avg", 1), ("p95", 2), ("p99", 3)):
+        index = ("avg", "p95", "p99").index(kennzahl)
+        farbe = _FARBEN_KENNZAHL[index]
+        pts = [(px(p["abstand"]), py(p["rauschen"][achse][kennzahl])) for p in punkte]
         if len(pts) >= 2:
-            z.line(pts, fill=farbe, width=1)
+            z.line(pts, fill=farbe, width=breite_linie)
         for pt in pts:
             z.ellipse([pt[0] - 2, pt[1] - 2, pt[0] + 2, pt[1] + 2], fill=farbe)
 
-    # 3D-Streuung fett
+    # 3D-Streuung fett -- unabhängig von --achse, siehe bericht()
     pts = [(px(p["abstand"]), py(p["rms3d"])) for p in punkte]
     if len(pts) >= 2:
         z.line(pts, fill=_FARBE_3D, width=3)
@@ -453,16 +554,17 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
                    font=klein)
 
     z.rectangle([rand_l, rand_o, rand_l + pl_b, rand_o + pl_h], outline=_ACHSEN)
-    z.text((rand_l, 16), "Sensorrauschen über die Entfernung zum Sender",
+    z.text((rand_l, 16),
+           f"Sensorrauschen über die Entfernung zum Sender (Achse {achse})",
            fill=(20, 20, 20), font=schrift)
     z.text((rand_l + pl_b / 2 - 55, hoehe - 24), "Abstand zum Sender (cm)",
            fill=_ACHSEN, font=klein)
     z.text((8, rand_o - 22), "Streuung (mm)", fill=_ACHSEN, font=klein)
 
     lx, ly = rand_l + pl_b + 14, rand_o + 4
-    for index, name in enumerate(("sigma x", "sigma y", "sigma z")):
-        z.line([(lx, ly + 6), (lx + 20, ly + 6)], fill=_FARBEN_ACHSE[index],
-               width=2)
+    for index, name in enumerate((f"{achse}-avg", f"{achse}-p95", f"{achse}-p99")):
+        z.line([(lx, ly + 6), (lx + 20, ly + 6)], fill=_FARBEN_KENNZAHL[index],
+               width=index + 1)
         z.text((lx + 26, ly), name, fill=(40, 40, 40), font=klein)
         ly += 18
     ly += 4
@@ -540,6 +642,16 @@ def main(argv=None):
     ap.add_argument("--fenster", type=int, default=15,
                     help="Fensterlänge in Samples für die Kurzzeit-Streuung "
                          "(Default 15 = ~1 s bei 15 Hz)")
+    ap.add_argument("--achse", choices=("x", "y", "z"), default="x",
+                    help="Welche Achse Tabelle und Grafik zeigen (Default x). "
+                         "Statt aller drei Achsen als sigma nebeneinander "
+                         "zeigt die gewählte Achse drei Kennzahlen: "
+                         "Durchschnitt, p95 und p99 der Abweichung vom "
+                         "Mittelwert (siehe rauschen_kennzahlen). Das 3D-RMS "
+                         "und der Grenzabstand im FAZIT bleiben davon "
+                         "unabhängig -- die kombinierte Streuung aller drei "
+                         "Achsen, die den Arbeitsbereich tatsächlich "
+                         "festlegt.")
     ap.add_argument("--hz", type=float, default=STANDARD_HZ,
                     help=f"Abtastrate von --pos, nur für die Sekundenangaben "
                          f"(Default {STANDARD_HZ:g})")
@@ -600,11 +712,11 @@ def main(argv=None):
             print(f"[rauschen] --massstab: {fehler}")
             return 2
 
-    print(bericht(ergebnis, hz=args.hz, massstab=massstab))
+    print(bericht(ergebnis, hz=args.hz, massstab=massstab, achse=args.achse))
 
     if not args.kein_plot and "fehler" not in ergebnis:
         try:
-            if zeichne_plot(ergebnis, args.png):
+            if zeichne_plot(ergebnis, args.png, achse=args.achse):
                 print(f"\n  Grafik geschrieben: {args.png}")
         except ImportError:
             print("\n[rauschen] Pillow (PIL) fehlt — der Textbericht oben ist "

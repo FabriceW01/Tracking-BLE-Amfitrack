@@ -75,6 +75,149 @@ def test_rms3d_fasst_die_drei_achsen_zusammen():
     assert abs(w["rms3d"] - math.sqrt(3) * sigma) < 0.004
 
 
+# =========================================================== Rauschen: --achse
+def test_perzentil_gegen_handrechnung():
+    # [10,20,30,40,50], n=5 (Indizes 0..4), lineare Interpolation zwischen
+    # den Rängen (NumPy-Default "linear"):
+    #   p90: Rang=0.9*4=3.6 -> 40 + 0.6*(50-40) = 46.0
+    #   p99: Rang=0.99*4=3.96 -> 40 + 0.96*(50-40) = 49.6
+    werte = [30.0, 10.0, 50.0, 20.0, 40.0]      # unsortiert -- muss selbst sortieren
+    assert R._perzentil(werte, 0) == 10.0
+    assert R._perzentil(werte, 50) == 30.0
+    assert R._perzentil(werte, 100) == 50.0
+    assert abs(R._perzentil(werte, 90) - 46.0) < 1e-12
+    assert abs(R._perzentil(werte, 99) - 49.6) < 1e-12
+    assert R._perzentil([], 50) == 0.0
+    assert R._perzentil([7.0], 95) == 7.0
+
+
+def test_rauschen_kennzahlen_gegen_handrechnung():
+    # Mittel von [0,0,0,0,10] ist 2 -> Abweichungen [2,2,2,2,8], n=5.
+    #   avg = (2+2+2+2+8)/5           = 3.2
+    #   p95: Rang=0.95*4=3.8 -> 2 + 0.8*(8-2) = 6.8
+    #   p99: Rang=0.99*4=3.96 -> 2 + 0.96*(8-2) = 7.76
+    r = R.rauschen_kennzahlen([0.0, 0.0, 0.0, 0.0, 10.0])
+    assert abs(r["avg"] - 3.2) < 1e-12
+    assert abs(r["p95"] - 6.8) < 1e-9
+    assert abs(r["p99"] - 7.76) < 1e-9
+
+
+def test_rauschen_kennzahlen_leer_und_konstant():
+    assert R.rauschen_kennzahlen([]) == {"avg": 0.0, "p95": 0.0, "p99": 0.0}
+    r = R.rauschen_kennzahlen([5.0, 5.0, 5.0])
+    assert r["avg"] == 0.0 and r["p95"] == 0.0 and r["p99"] == 0.0
+
+
+def test_rauschen_kennzahlen_p99_ist_nie_kleiner_als_avg():
+    # p99 muss den Schwanz der Verteilung zeigen -- bei echtem Rauschen
+    # (nicht nur zwei Punkten) darf es nie unter dem Durchschnitt liegen,
+    # sonst waere die Reihenfolge der drei Linien im Plot vertauscht.
+    rng = random.Random(9)
+    for _ in range(5):
+        werte = [rng.gauss(0, 0.05) for _ in range(500)]
+        r = R.rauschen_kennzahlen(werte)
+        assert r["avg"] <= r["p95"] <= r["p99"] + 1e-12
+
+
+def test_werte_einer_datei_liefert_rauschen_je_achse():
+    # Konstruiert: x rauscht stark, y/z stehen still -- die Achse muss den
+    # Unterschied zeigen, sonst waere --achse wirkungslos.
+    rng = random.Random(4)
+    xs = [rng.gauss(0.0, 0.5) for _ in range(400)]
+    ys = [0.0] * 400
+    zs = [0.0] * 400
+    w = R.werte_einer_datei(xs, ys, zs, 15)
+    assert w["rauschen"]["x"]["avg"] > 0.1
+    assert w["rauschen"]["y"]["avg"] == 0.0
+    assert w["rauschen"]["z"]["avg"] == 0.0
+
+
+def test_bericht_achse_waehlt_die_kennzahlen_aus():
+    # Dieselbe Konstruktion wie oben, jetzt durch den ganzen Bericht: mit
+    # --achse x muss die starke Achse auftauchen, mit --achse y die (fast)
+    # ruhige -- sonst waehlt --achse nichts wirklich aus.
+    rng = random.Random(6)
+    xs = [rng.gauss(0.0, 0.5) for _ in range(400)]
+    ys = [0.0] * 400
+    zs = [0.0] * 400
+    messungen = [(10, "m", xs, ys, zs)]
+    e = R.auswerten(messungen)
+    text_x = R.bericht(e, achse="x")
+    text_y = R.bericht(e, achse="y")
+    assert "Achse: x" in text_x and "Achse: y" in text_y
+    # Die x-avg-Zahl aus der Tabelle muss klar über der y-avg-Zahl liegen.
+    avg_x = e["punkte"][0]["rauschen"]["x"]["avg"]
+    avg_y = e["punkte"][0]["rauschen"]["y"]["avg"]
+    assert avg_x > 0.1 and avg_y == 0.0
+    assert f"{avg_x:.4f}" in text_x
+    assert f"{avg_y:.4f}" in text_y
+
+
+def test_bericht_achse_aendert_nicht_das_fazit():
+    # Das FAZIT/der Grenzabstand haengt am 3D-RMS, nicht an --achse -- muss
+    # bei jeder Achse gleich bleiben.
+    je_achse = R.DUESENTEILUNG_MM / math.sqrt(3)
+    messungen = [_messung(10, je_achse * 0.25, seed=1),
+                 _messung(20, je_achse * 0.55, seed=2),
+                 _messung(30, je_achse, seed=3),
+                 _messung(40, je_achse * 1.8, seed=4)]
+    e = R.auswerten(messungen)
+    fazit_x = [z for z in R.bericht(e, achse="x").splitlines() if "FAZIT" in z]
+    fazit_z = [z for z in R.bericht(e, achse="z").splitlines() if "FAZIT" in z]
+    assert fazit_x == fazit_z and fazit_x
+
+
+def test_bericht_lehnt_unbekannte_achse_ab():
+    e = R.auswerten([_messung(10, 0.01, seed=1)])
+    try:
+        R.bericht(e, achse="w")
+        assert False, "erwartete ValueError"
+    except ValueError:
+        pass
+
+
+def test_rausch_plot_mit_gewaehlter_achse():
+    from PIL import Image
+    e = R.auswerten([_messung(10, 0.01, seed=1), _messung(20, 0.05, seed=2),
+                     _messung(30, 0.12, seed=3)])
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        assert R.zeichne_plot(e, ziel, breite=800, hoehe=500, achse="z") is True
+        with Image.open(ziel) as bild:
+            assert bild.size == (800, 500) and bild.mode == "RGB"
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_cli_rauschen_achse_flag_waehlt_aus():
+    verzeichnis = tempfile.mkdtemp()
+    rng = random.Random(2)
+    dateien = []
+    for abstand in (10, 20, 30):
+        pfad = os.path.join(verzeichnis, f"rausch_d{abstand}.jsonl")
+        with open(pfad, "w", encoding="utf-8") as datei:
+            for _ in range(200):
+                datei.write(json.dumps({
+                    "event": "position", "x": rng.gauss(0, 0.5),
+                    "y": 0.0, "z": 0.0}) + "\n")
+        dateien.append(pfad)
+    ziel = os.path.join(verzeichnis, "out.png")
+    p = _lauf(W_RAUSCH, *dateien, "--achse", "y", "--png", ziel)
+    assert p.returncode == 0, p.stderr
+    assert "Achse: y" in p.stdout
+
+
+def test_cli_rauschen_achse_lehnt_unbekannten_wert_ab():
+    pfad = _schreib('{"event":"position","x":1,"y":2,"z":3}\n'
+                    '{"event":"position","x":1.1,"y":2.1,"z":3.1}\n')
+    try:
+        p = _lauf(W_RAUSCH, pfad, "--achse", "w", "--kein-plot")
+        assert p.returncode != 0
+    finally:
+        os.unlink(pfad)
+
+
 def test_fenster_streuung_trennt_drift_von_rauschen():
     # Gleiche Gesamtstreuung, einmal als Rauschen, einmal als reine Drift.
     # Die Fensterstreuung muss nur im ersten Fall groß sein -- sonst sähe
