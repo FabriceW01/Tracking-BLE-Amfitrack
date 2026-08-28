@@ -209,12 +209,14 @@ Der Abstand wird aus dem Dateinamen gelesen (erste Zahl darin), sonst
 `--abstaende 10,20,30,...` angeben. Ausgegeben werden die Tabelle oben, eine
 Grafik Rauschen gegen Entfernung und der **interpolierte Grenzabstand**.
 
-Tabelle und Grafik zeigen standardmäßig die x-Achse; mit `--achse y`/`--achse z`
-eine andere wählen. Statt aller drei Achsen als Standardabweichung nebeneinander
-zeigt die gewählte Achse drei Kennzahlen -- Durchschnitt, p95 und p99 der
-Abweichung vom Mittelwert je Sample (wie bei Latenzmessungen üblich). Der
-Grenzabstand im FAZIT bleibt davon unabhängig, er basiert weiter auf dem
-3D-RMS aller drei Achsen zusammen.
+Tabelle und Grafik werten standardmäßig die x-Achse aus; mit `--achse y`/
+`--achse z` eine andere wählen -- die anderen beiden Achsen fließen dann
+nirgends mehr ein, auch nicht als 3D-kombinierte Referenz. Statt einer
+Standardabweichung zeigt die gewählte Achse drei Kennzahlen: Durchschnitt,
+p95 und p99 der Abweichung vom Mittelwert je Sample (wie bei
+Latenzmessungen üblich). Der Grenzabstand im FAZIT basiert auf dem
+**p95-Wert der gewählten Achse** -- `--achse` bestimmt also nicht nur die
+Anzeige, sondern auch, wogegen die Düsenreihen-Schwelle geprüft wird.
 
 **Kriterium:** Ab wo überschreitet das Rauschen **eine Düsenreihe (0,087 mm)**?
 Jenseits dieses Abstands begrenzt der Sensor die Druckqualität, unabhängig von

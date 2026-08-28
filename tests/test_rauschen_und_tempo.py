@@ -63,16 +63,18 @@ def test_konstruiertes_rauschen_kommt_zurueck():
     assert abs(R._stdabw(xs) - sigma) < 0.003
 
 
-def test_rms3d_fasst_die_drei_achsen_zusammen():
-    # Drei Achsen mit je sigma -> 3D-RMS ist sqrt(3)*sigma.
-    rng = random.Random(5)
-    sigma = 0.04
-    n = 6000
-    xs = [rng.gauss(0, sigma) for _ in range(n)]
-    ys = [rng.gauss(0, sigma) for _ in range(n)]
-    zs = [rng.gauss(0, sigma) for _ in range(n)]
-    w = R.werte_einer_datei(xs, ys, zs, 15)
-    assert abs(w["rms3d"] - math.sqrt(3) * sigma) < 0.004
+def test_kein_3d_rms_mehr_als_datenfeld():
+    # Regression: auf Wunsch des Anlagenbesitzers entfernt, weil die
+    # anderen beiden Achsen für seine Auswertung nicht relevant sind.
+    # Erwähnungen in Docstrings/Hilfetexten (das WARUM es weg ist) sind
+    # erlaubt und sogar gewünscht -- verboten ist, dass es wieder als
+    # Wörterbuch-Schlüssel/Datenfeld oder als eigene Plot-Farbe auftaucht.
+    with open(W_RAUSCH, encoding="utf-8") as datei:
+        quelltext = datei.read()
+    assert '["rms3d"]' not in quelltext
+    assert "'rms3d'" not in quelltext
+    assert '"rms3d":' not in quelltext
+    assert "_FARBE_3D" not in quelltext
 
 
 # =========================================================== Rauschen: --achse
@@ -133,44 +135,62 @@ def test_werte_einer_datei_liefert_rauschen_je_achse():
 
 
 def test_bericht_achse_waehlt_die_kennzahlen_aus():
-    # Dieselbe Konstruktion wie oben, jetzt durch den ganzen Bericht: mit
-    # --achse x muss die starke Achse auftauchen, mit --achse y die (fast)
-    # ruhige -- sonst waehlt --achse nichts wirklich aus.
+    # Dieselbe Konstruktion wie oben, jetzt durch den ganzen Bericht:
+    # auswerten(..., achse="x") muss die starke Achse zeigen,
+    # auswerten(..., achse="y") die (fast) ruhige -- sonst waehlt --achse
+    # nichts wirklich aus. bericht() selbst nimmt keine Achse mehr entgegen
+    # (siehe dessen Docstring) -- sie kommt aus ergebnis["achse"].
     rng = random.Random(6)
     xs = [rng.gauss(0.0, 0.5) for _ in range(400)]
     ys = [0.0] * 400
     zs = [0.0] * 400
     messungen = [(10, "m", xs, ys, zs)]
-    e = R.auswerten(messungen)
-    text_x = R.bericht(e, achse="x")
-    text_y = R.bericht(e, achse="y")
+    ex = R.auswerten(messungen, achse="x")
+    ey = R.auswerten(messungen, achse="y")
+    text_x, text_y = R.bericht(ex), R.bericht(ey)
     assert "Achse: x" in text_x and "Achse: y" in text_y
     # Die x-avg-Zahl aus der Tabelle muss klar über der y-avg-Zahl liegen.
-    avg_x = e["punkte"][0]["rauschen"]["x"]["avg"]
-    avg_y = e["punkte"][0]["rauschen"]["y"]["avg"]
+    avg_x = ex["punkte"][0]["rauschen"]["x"]["avg"]
+    avg_y = ey["punkte"][0]["rauschen"]["y"]["avg"]
     assert avg_x > 0.1 and avg_y == 0.0
     assert f"{avg_x:.4f}" in text_x
     assert f"{avg_y:.4f}" in text_y
 
 
-def test_bericht_achse_aendert_nicht_das_fazit():
-    # Das FAZIT/der Grenzabstand haengt am 3D-RMS, nicht an --achse -- muss
-    # bei jeder Achse gleich bleiben.
-    je_achse = R.DUESENTEILUNG_MM / math.sqrt(3)
-    messungen = [_messung(10, je_achse * 0.25, seed=1),
-                 _messung(20, je_achse * 0.55, seed=2),
-                 _messung(30, je_achse, seed=3),
-                 _messung(40, je_achse * 1.8, seed=4)]
-    e = R.auswerten(messungen)
-    fazit_x = [z for z in R.bericht(e, achse="x").splitlines() if "FAZIT" in z]
-    fazit_z = [z for z in R.bericht(e, achse="z").splitlines() if "FAZIT" in z]
-    assert fazit_x == fazit_z and fazit_x
+def _messung_zwei_sigmas(abstand, sigma_x, sigma_still, n=400, seed=1):
+    """Wie ``_messung``, aber x und y/z bekommen UNTERSCHIEDLICHES Rauschen
+    -- gebraucht, um zu zeigen, dass der Grenzabstand jetzt wirklich von
+    --achse abhängt (vorher, am 3D-RMS, war er das nicht)."""
+    rng = random.Random(seed)
+    xs, ys, zs = [], [], []
+    for _ in range(n):
+        xs.append(rng.gauss(0, sigma_x))
+        ys.append(rng.gauss(0, sigma_still))
+        zs.append(rng.gauss(0, sigma_still))
+    return (abstand, f"d{abstand}", xs, ys, zs)
 
 
-def test_bericht_lehnt_unbekannte_achse_ab():
-    e = R.auswerten([_messung(10, 0.01, seed=1)])
+def test_grenzabstand_haengt_jetzt_von_der_achse_ab():
+    # Auf Wunsch des Anlagenbesitzers: kein 3D-RMS mehr, der Grenzabstand
+    # basiert auf dem p95 der GEWÄHLTEN Achse. x rauscht laut (überschreitet
+    # eine Düsenreihe), y/z bleiben praktisch still (nie) -- der
+    # Grenzabstand muss das widerspiegeln, nicht identisch bleiben.
+    je_achse = R.DUESENTEILUNG_MM / 1.96      # p95(|N(0,sigma)|) ~= 1.96*sigma
+    messungen = [_messung_zwei_sigmas(10, je_achse * 0.5, 0.001, seed=1),
+                 _messung_zwei_sigmas(20, je_achse, 0.001, seed=2),
+                 _messung_zwei_sigmas(30, je_achse * 2.0, 0.001, seed=3)]
+    ex = R.auswerten(messungen, achse="x")
+    ey = R.auswerten(messungen, achse="y")
+    assert ex["grenzart"] == "interpoliert"
+    assert 17.0 < ex["grenzabstand"] < 24.0, ex["grenzabstand"]
+    assert ey["grenzart"] == "oberhalb" and ey["grenzabstand"] is None
+
+
+def test_auswerten_lehnt_unbekannte_achse_ab():
+    # Die Achsen-Prüfung sitzt jetzt in auswerten() -- dort wird --achse
+    # tatsächlich verarbeitet, nicht erst in bericht()/zeichne_plot().
     try:
-        R.bericht(e, achse="w")
+        R.auswerten([_messung(10, 0.01, seed=1)], achse="w")
         assert False, "erwartete ValueError"
     except ValueError:
         pass
@@ -179,10 +199,10 @@ def test_bericht_lehnt_unbekannte_achse_ab():
 def test_rausch_plot_mit_gewaehlter_achse():
     from PIL import Image
     e = R.auswerten([_messung(10, 0.01, seed=1), _messung(20, 0.05, seed=2),
-                     _messung(30, 0.12, seed=3)])
+                     _messung(30, 0.12, seed=3)], achse="z")
     ziel = tempfile.mktemp(suffix=".png")
     try:
-        assert R.zeichne_plot(e, ziel, breite=800, hoehe=500, achse="z") is True
+        assert R.zeichne_plot(e, ziel, breite=800, hoehe=500) is True
         with Image.open(ziel) as bild:
             assert bild.size == (800, 500) and bild.mode == "RGB"
     finally:
@@ -258,8 +278,12 @@ def test_fenster_streuung_faellt_auf_gesamt_zurueck_wenn_zu_wenig_punkte():
 
 
 # ========================================================= Rauschen: Grenzwert
-def _punkt(abstand, rms):
-    return {"abstand": abstand, "rms3d": rms}
+def _punkt(abstand, wert):
+    # "wert" ist grenzabstand()'s Default-Schlüssel (siehe dessen
+    # Docstring) -- früher war das immer die 3D-Streuung, jetzt kann es
+    # jede Kennzahl sein, die der Aufrufer hineinlegt (auswerten() legt
+    # hier das p95 der gewählten Achse hinein).
+    return {"abstand": abstand, "wert": wert}
 
 
 def test_grenzabstand_interpoliert_von_hand_nachrechenbar():
@@ -286,6 +310,17 @@ def test_grenzabstand_meldet_wenn_keiner_die_schwelle_erreicht():
 def test_grenzabstand_sortiert_unsortierte_eingabe():
     punkte = [_punkt(30, 0.12), _punkt(10, 0.04), _punkt(20, 0.08)]
     grenze, art = R.grenzabstand(punkte, schwelle=0.10)
+    assert art == "interpoliert" and abs(grenze - 25.0) < 1e-12
+
+
+def test_grenzabstand_wert_key_ist_wirklich_allgemein():
+    # grenzabstand() ist nicht mehr fest auf "rms3d" verdrahtet -- mit einem
+    # anderen wert_key muss dieselbe Interpolation auf einer ganz anderen
+    # Kennzahl funktionieren.
+    punkte = [{"abstand": 10, "p95_beliebig": 0.04},
+             {"abstand": 20, "p95_beliebig": 0.08},
+             {"abstand": 30, "p95_beliebig": 0.12}]
+    grenze, art = R.grenzabstand(punkte, schwelle=0.10, wert_key="p95_beliebig")
     assert art == "interpoliert" and abs(grenze - 25.0) < 1e-12
 
 
@@ -332,13 +367,17 @@ def _messung(abstand, sigma, n=400, seed=1, drift=0.0):
 
 
 def test_auswerten_findet_die_konstruierte_grenze():
-    # Rauschen so gewählt, dass der 3D-RMS bei 30cm genau eine Düsenreihe ist.
-    je_achse = R.DUESENTEILUNG_MM / math.sqrt(3)
+    # Rauschen so gewählt, dass das p95 der x-Achse (Default-Achse) bei
+    # 30cm genau eine Düsenreihe ist. p95(|N(0,sigma)|) ~= 1,96*sigma für
+    # eine Normalverteilung -- daraus rückwärts das sigma gewählt, das bei
+    # 30cm ein empirisches p95 nahe der Schwelle ergibt.
+    je_achse = R.DUESENTEILUNG_MM / 1.96
     messungen = [_messung(10, je_achse * 0.25, seed=1),
                  _messung(20, je_achse * 0.55, seed=2),
                  _messung(30, je_achse, seed=3),
                  _messung(40, je_achse * 1.8, seed=4)]
     e = R.auswerten(messungen)
+    assert e["achse"] == "x"                    # Default, wie dokumentiert
     assert e["grenzart"] == "interpoliert"
     assert 27.0 < e["grenzabstand"] < 33.0, e["grenzabstand"]
 
@@ -355,6 +394,53 @@ def test_auswerten_meldet_keine_drift_bei_reinem_rauschen():
     messungen = [_messung(10, 0.05, seed=1), _messung(20, 0.05, seed=2)]
     text = R.bericht(R.auswerten(messungen))
     assert "DRIFT" not in text
+
+
+def _messung_drift_auf_y(abstand, sigma, n=400, seed=1, drift=0.0):
+    # Wie _messung, aber die Drift sitzt auf y statt x -- gebraucht, um zu
+    # zeigen, dass die DRIFT-Erkennung jetzt wirklich nur die GEWÄHLTE
+    # Achse anschaut (siehe _urteil()), nicht mehr alle drei 3D-kombiniert.
+    rng = random.Random(seed)
+    xs, ys, zs = [], [], []
+    for i in range(n):
+        t = i / (n - 1)
+        xs.append(rng.gauss(0, sigma))
+        ys.append(rng.gauss(0, sigma) + drift * t)
+        zs.append(rng.gauss(0, sigma))
+    return (abstand, f"d{abstand}", xs, ys, zs)
+
+
+def test_urteil_drift_ist_rein_achsenspezifisch_nicht_3d_kombiniert():
+    # Direkter, deterministischer Test von _urteil() statt über echtes
+    # Rauschen konstruiert: x/z bekommen ABSICHTLICH große Fensterwerte, so
+    # dass eine noch vorhandene 3D-Kombination (sqrt(fx²+fy²+fz²)) die
+    # y-Drift verdecken würde, während der reine y-gegen-y-Vergleich sie
+    # klar zeigt. Über echtes Rauschen (wie im Test daneben) reicht der
+    # Faktor sqrt(3) aus einer verbliebenen 3D-Kombination bei einem
+    # deutlichen Drift/Rauschen-Verhältnis oft nicht aus, um die 2x-Schwelle
+    # zu kippen -- das hier tut es garantiert, weil die Zahlen von Hand
+    # dafür gewählt sind.
+    ergebnis = {
+        "achse": "y", "grenzabstand": None, "grenzart": "oberhalb",
+        "punkte": [{"abstand": 20.0, "sigma": (0.01, 0.05, 0.01),
+                   "fenster": (0.5, 0.01, 0.5)}],
+    }
+    text = "\n".join(R._urteil(ergebnis))
+    assert "DRIFT bei 20 cm" in text, text
+
+
+def test_drift_wird_nur_auf_der_gewaehlten_achse_gemeldet():
+    # Drift sitzt auf y. Mit der Default-Achse x (die y nicht anschaut)
+    # darf NICHTS gemeldet werden; mit --achse y muss es erscheinen. Vorher
+    # (3D-kombiniert) waere die y-Drift auch bei --achse x sichtbar
+    # gewesen -- genau der Unterschied, den dieser Test absichert.
+    je_achse = 0.005
+    messungen = [_messung_drift_auf_y(10, je_achse, seed=1),
+                 _messung_drift_auf_y(20, je_achse, seed=2, drift=0.6)]
+    text_x = R.bericht(R.auswerten(messungen, achse="x"))
+    text_y = R.bericht(R.auswerten(messungen, achse="y"))
+    assert "DRIFT" not in text_x, text_x
+    assert "DRIFT bei 20 cm" in text_y, text_y
 
 
 def test_auswerten_meldet_fehler_statt_zu_raten():
