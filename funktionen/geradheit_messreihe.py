@@ -67,13 +67,16 @@ nicht je Fahrt eine eigene. Sonst bekäme jede Fahrt ihr eigenes Bezugssystem
 und die Fahrten wären untereinander nicht mehr vergleichbar — ein Versatz
 zwischen zwei Fahrten würde wegdefiniert statt sichtbar zu werden.
 
-Die **Position entlang der Geraden** (0 mm = Fahrtbeginn im Bericht/Plot) wird
+Die **Position entlang der Geraden** (``entlang == 0`` in Bericht/Plot) wird
 NICHT auf den gewichteten Mittelwert der Punkte gelegt (der wandert bei
 ungleichmäßiger Abtastung), sondern -- sofern die Fahrt überwiegend entlang
 der y-Achse verläuft -- auf die Stelle, an der die absolute y-Koordinate 0
-ist. Bei symmetrischem ``--y-min``/``--y-max`` (Default -90/90) liegt der
-benutzte Bereich damit automatisch symmetrisch um 0 im Plot, siehe
-``_verankere_bei_y_null``.
+ist (``_verankere_bei_y_null``). Das allein macht die Achse aber noch nicht
+symmetrisch, es legt nur fest, was 0 bedeutet -- die Plot-x-Achse selbst
+steht deshalb zusätzlich, wenn diese Verankerung gegriffen hat, IMMER genau
+auf ``--y-min``/``--y-max`` (Default -90/90) statt auf dem tatsächlich
+aufgezeichneten Ausschnitt (``zeichne_plot``): eine kürzere oder einseitige
+Fahrt bekäme sonst trotz korrekter Verankerung eine schiefe Achse.
 
 Der Balken darf zwischen den Fahrten **nicht bewegt** werden: die absoluten
 Sensorkoordinaten sind der gemeinsame Bezug, über den die Fahrten überhaupt
@@ -409,10 +412,7 @@ def _verankere_bei_y_null(fit):
     Y-Bereichs -- genau das beobachtete Symptom (Plot-Mittelpunkt bei -3
     mm statt 0, obwohl --y-min/--y-max symmetrisch bei -90/90 lagen).
     Mit dieser Verankerung bedeutet ``entlang == 0`` stattdessen immer
-    "absolutes y == 0", unabhängig von der Punktedichte -- bei einer
-    überwiegend y-achsigen Fahrt liegt der --y-min/--y-max-Bereich damit
-    automatisch symmetrisch um 0 im Plot, ohne die Achsengrenzen separat
-    festzunageln.
+    "absolutes y == 0", unabhängig von der Punktedichte.
 
     Geometrisch unbedenklich: der neue Mittelpunkt liegt per Konstruktion
     auf derselben Geraden (nur um ein Vielfaches von ``richtung``
@@ -422,14 +422,29 @@ def _verankere_bei_y_null(fit):
     sich um eine Konstante. RMS, Spanne, Überlappung zwischen Fahrten
     usw. bleiben also exakt gleich; nur der Nullpunkt der Positionsangabe
     ändert sich.
+
+    WICHTIG, und der Teil, der beim ersten Anlauf hier fehlte: diese
+    Funktion allein macht die geplottete Achse noch NICHT symmetrisch --
+    sie legt nur fest, was ``entlang == 0`` bedeutet. Ob der tatsächlich
+    AUFGEZEICHNETE Ausschnitt der Fahrt (``min(entlang)..max(entlang)``)
+    danach auch wirklich [-90, 90] trifft, hängt davon ab, ob die Fahrt
+    diesen Bereich vollständig UND einigermaßen gleichmäßig abgedeckt hat
+    -- bei einer kürzeren oder einseitigen Fahrt bliebe die Achse trotz
+    korrekter Verankerung schief. Die eigentlich feste Achse setzt erst
+    zeichne_plot() (siehe dort), indem es --y-min/--y-max direkt als
+    Achsengrenzen benutzt, statt sie aus den Daten abzuleiten.
+
+    Rückgabe: ``(neuer_fit, verankert)`` -- ``verankert`` ist ``False``
+    (und ``neuer_fit is fit``), wenn die Fahrt zu waagerecht ist, um eine
+    stabile y=0-Kreuzung zu haben.
     """
     (mx, my) = fit["mittelpunkt"]
     (rx, ry) = fit["richtung"]
     if abs(ry) < _MINDEST_RY_FUER_VERANKERUNG:
-        return fit
+        return fit, False
     t0 = -my / ry
     neuer_mittelpunkt = (mx + t0 * rx, my + t0 * ry)
-    return {**fit, "mittelpunkt": neuer_mittelpunkt}
+    return {**fit, "mittelpunkt": neuer_mittelpunkt}, True
 
 
 def auswerten(messreihen, anzahl_bins=30, y_min=Y_BEREICH_MIN_MM,
@@ -476,7 +491,7 @@ def auswerten(messreihen, anzahl_bins=30, y_min=Y_BEREICH_MIN_MM,
     if fit is None:
         return {"fehler": "Punkte liegen alle an derselben Stelle -- "
                           "keine Gerade bestimmbar."}
-    fit = _verankere_bei_y_null(fit)
+    fit, y_verankert = _verankere_bei_y_null(fit)
 
     fahrten = []
     for name, xs, ys, punkte_roh, entfernt in vorbereitet:
@@ -567,6 +582,7 @@ def auswerten(messreihen, anzahl_bins=30, y_min=Y_BEREICH_MIN_MM,
         "uebersprungen": uebersprungen,
         "y_min": y_min,
         "y_max": y_max,
+        "y_verankert": y_verankert,
         "ueberlappung": ueberlappung,
         "bin_mitten": mitten,
         "bin_kanten": kanten,
@@ -751,7 +767,19 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
 
     alle_e = [e for f in ergebnis["fahrten"] for e in f["entlang"]]
     alle_a = [a for f in ergebnis["fahrten"] for a in f["abweichung"]]
-    x_min, x_max = min(alle_e), max(alle_e)
+
+    # Die x-Achse zeigt, WENN entlang bei y=0 verankert ist (siehe
+    # _verankere_bei_y_null), immer genau den konfigurierten Y-Bereich
+    # (--y-min/--y-max) -- nicht bloß den tatsächlich aufgezeichneten
+    # Ausschnitt. Sonst wäre die Achse trotz korrekter Verankerung nur
+    # zufällig symmetrisch, nämlich nur dann, wenn die Fahrt den ganzen
+    # Bereich lückenlos abdeckt. Ohne Verankerung (z.B. eine überwiegend
+    # waagerechte Fahrt) bleibt es beim bisherigen datenbasierten Bereich,
+    # weil dort --y-min/--y-max keine sinnvolle x-Achse wäre.
+    if ergebnis.get("y_verankert") and ergebnis["y_max"] > ergebnis["y_min"]:
+        x_min, x_max = ergebnis["y_min"], ergebnis["y_max"]
+    else:
+        x_min, x_max = min(alle_e), max(alle_e)
     y_min, y_max = min(alle_a), max(alle_a)
     # Düsenreihen-Marken sollen immer sichtbar sein, auch wenn die Kurve
     # flacher verläuft -- sonst fehlt der Maßstab, gegen den man liest.
