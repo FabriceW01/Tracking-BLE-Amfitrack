@@ -105,7 +105,8 @@ def test_verankere_bei_y_null_schiebt_mittelpunkt_auf_die_gerade():
     # landen, x bleibt unveraendert (die Gerade ist ja x=5 konstant).
     fit = {"mittelpunkt": (5.0, 10.0), "richtung": (0.0, 1.0),
           "normale": (-1.0, 0.0)}
-    neu = G._verankere_bei_y_null(fit)
+    neu, verankert = G._verankere_bei_y_null(fit)
+    assert verankert is True
     assert abs(neu["mittelpunkt"][0] - 5.0) < 1e-9
     assert abs(neu["mittelpunkt"][1] - 0.0) < 1e-9
     assert neu["richtung"] == fit["richtung"]
@@ -118,18 +119,21 @@ def test_verankere_bei_y_null_mit_schraeger_richtung():
     # neuer Punkt = (2 + (-5)*0.6, 4 + (-5)*0.8) = (-1, 0).
     fit = {"mittelpunkt": (2.0, 4.0), "richtung": (0.6, 0.8),
           "normale": (-0.8, 0.6)}
-    neu = G._verankere_bei_y_null(fit)
+    neu, verankert = G._verankere_bei_y_null(fit)
+    assert verankert is True
     assert abs(neu["mittelpunkt"][0] - (-1.0)) < 1e-9
     assert abs(neu["mittelpunkt"][1] - 0.0) < 1e-9
 
 
 def test_verankere_bei_y_null_laesst_waagerechte_fahrt_unveraendert():
     # ry praktisch 0 -- keine stabile y=0-Kreuzung, der urspruengliche
-    # (datenbasierte) Bezugspunkt bleibt stehen.
+    # (datenbasierte) Bezugspunkt bleibt stehen, verankert=False.
     fit = {"mittelpunkt": (5.0, 10.0), "richtung": (1.0, 0.0),
           "normale": (0.0, 1.0)}
-    neu = G._verankere_bei_y_null(fit)
+    neu, verankert = G._verankere_bei_y_null(fit)
+    assert verankert is False
     assert neu["mittelpunkt"] == fit["mittelpunkt"]
+    assert neu is fit
 
 
 def test_auswerten_verankert_entlang_bei_absolutem_y_null_fuer_vertikale_fahrt():
@@ -162,6 +166,93 @@ def test_dichte_verzerrt_den_gewichteten_mittelwert_aber_nicht_die_verankerung()
     entlang = e["fahrten"][0]["entlang"]
     for entlang_wert, y_wert in zip(entlang, ys):
         assert abs(entlang_wert - y_wert) < 1e-9
+
+
+def test_auswerten_setzt_y_verankert_flag():
+    xs = [3.0] * 50
+    ys = [10.0 + s * 0.5 for s in range(50)]           # ueberwiegend vertikal
+    assert G.auswerten([("f1", xs, ys)], y_min=-1000, y_max=1000)["y_verankert"] is True
+
+    xs2 = [s * 0.5 for s in range(50)]
+    ys2 = [10.0] * 50                                   # rein waagerecht
+    assert G.auswerten([("f1", xs2, ys2)], y_min=-1000, y_max=1000)["y_verankert"] is False
+
+
+def test_zeichne_plot_achse_bleibt_bei_verankerung_am_konfigurierten_bereich():
+    # Regressionstest gegen genau das gemeldete Problem: eine Fahrt, die
+    # den Y-Bereich NICHT vollständig/symmetrisch abdeckt (hier nur y von
+    # 0 bis ~89, nicht -90 bis 90). _verankere_bei_y_null allein macht
+    # nur "entlang == 0" zu "y == 0" -- das reicht nicht, wenn die
+    # Plot-Achse trotzdem aus den (einseitigen) Daten abgeleitet würde:
+    # dann läge der Punkt bei y=0 am LINKEN Rand des Plots statt in der
+    # Mitte. Mit der jetzt fest auf --y-min/--y-max stehenden Achse muss
+    # er in der Mitte landen -- direkt an den tatsächlich gezeichneten
+    # Pixeln geprüft, nicht nur an der internen Formel.
+    xs = [3.0] * 100
+    ys = [i * 0.9 for i in range(100)]      # 0 .. ~89, NICHT -90..90
+    e = G.auswerten([("f1", xs, ys)])
+    assert e["y_verankert"] is True
+
+    from PIL import Image
+    breite, hoehe = 1200, 700
+    rand_l, rand_r = 90, 210
+    pl_b = breite - rand_l - rand_r
+    mitte_px = rand_l + 0.5 * pl_b
+    farbe = (70, 130, 200)   # G._FARBEN[0] -- die erste (und einzige) Fahrt
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        assert G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe) is True
+        with Image.open(ziel) as bild:
+            # Kurve muss nahe der PLOT-MITTE auftauchen (y=0-Punkt bei
+            # fester -90..90-Achse) ...
+            mitte_treffer = any(
+                bild.getpixel((int(mitte_px) + dx, y)) == farbe
+                for dx in range(-3, 4) for y in range(50, hoehe - 50))
+            assert mitte_treffer, "Kurve fehlt an der erwarteten Plot-Mitte"
+
+            # ... und NICHT mehr am linken Rand (wo sie ohne die feste
+            # Achse gelandet wäre, weil die Daten selbst bei entlang≈0
+            # anfangen).
+            rand_treffer = any(
+                bild.getpixel((rand_l + dx, y)) == farbe
+                for dx in range(0, 8) for y in range(50, hoehe - 50))
+            assert not rand_treffer, "Kurve haengt noch am linken Rand"
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_ohne_verankerung_bleibt_beim_datenbereich():
+    # Ohne Verankerung (ueberwiegend waagerechte Fahrt) muss die Achse
+    # weiterhin aus den Daten selbst kommen -- --y-min/--y-max waeren
+    # hier keine sinnvolle x-Achse (entlang hat nichts mit y zu tun).
+    xs = [s * 5.0 for s in range(101)]      # 0 .. 500 mm Fahrtstrecke
+    ys = [10.0] * 101
+    e = G.auswerten([("f1", xs, ys)], y_min=-1000.0, y_max=1000.0)
+    assert e["y_verankert"] is False
+
+    from PIL import Image
+    breite, hoehe = 1200, 700
+    rand_l, rand_r = 90, 210
+    pl_b = breite - rand_l - rand_r
+    farbe = (70, 130, 200)
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        assert G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe) is True
+        with Image.open(ziel) as bild:
+            # Kurve muss nahe dem RECHTEN Rand auftauchen -- nur
+            # möglich, wenn die Achse den vollen ~500mm-Datenbereich
+            # abdeckt statt der festen 180mm-Spanne von --y-min/--y-max.
+            rechter_rand_x = rand_l + pl_b
+            treffer = any(
+                bild.getpixel((rechter_rand_x - dx, y)) == farbe
+                for dx in range(0, 8) for y in range(50, hoehe - 50))
+            assert treffer, "Kurve deckt nicht den vollen Datenbereich ab"
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
 
 
 def test_verankerung_aendert_abweichung_und_spannen_nicht():
