@@ -753,6 +753,12 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
     bei ±1 Düsenreihe -- Letztere, damit auf einen Blick erkennbar ist, ob die
     Abweichung für den Druck überhaupt eine Rolle spielt.
 
+    BEIDE Achsen sind um 0 zentriert, jede aus einem eigenen Grund (siehe
+    die Kommentare unten): waagerecht steht der konfigurierte
+    ``--y-min``/``--y-max``-Bereich, senkrecht ein symmetrischer
+    Abweichungsbereich ``[-grenze, +grenze]``. Die Nulllinie ist damit
+    tatsächlich die Bildmitte und nicht nur zufällig in ihrer Nähe.
+
     PIL statt matplotlib, weil PIL im Projekt ohnehin gebraucht wird und diese
     Datei allein lauffähig bleiben soll.
     """
@@ -768,36 +774,48 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
     alle_e = [e for f in ergebnis["fahrten"] for e in f["entlang"]]
     alle_a = [a for f in ergebnis["fahrten"] for a in f["abweichung"]]
 
-    # Die x-Achse zeigt, WENN entlang bei y=0 verankert ist (siehe
-    # _verankere_bei_y_null), immer genau den konfigurierten Y-Bereich
-    # (--y-min/--y-max) -- nicht bloß den tatsächlich aufgezeichneten
-    # Ausschnitt. Sonst wäre die Achse trotz korrekter Verankerung nur
-    # zufällig symmetrisch, nämlich nur dann, wenn die Fahrt den ganzen
-    # Bereich lückenlos abdeckt. Ohne Verankerung (z.B. eine überwiegend
-    # waagerechte Fahrt) bleibt es beim bisherigen datenbasierten Bereich,
-    # weil dort --y-min/--y-max keine sinnvolle x-Achse wäre.
+    # Die Achsengrenzen heißen bewusst NICHT x_min/y_min: "y" ist in dieser
+    # Datei doppelt belegt -- ergebnis["y_min"]/["y_max"] sind der
+    # --y-min/--y-max-FILTER auf der Sensor-y-Koordinate, und die wird hier
+    # WAAGERECHT aufgetragen, während die SENKRECHTE Achse die Abweichung
+    # zeigt. Genau diese Doppelbedeutung hat schon zu einem Fix an der
+    # falschen Achse geführt; die Namen sagen ab jetzt, was sie zeigen.
+
+    # --- Waagerecht: Position entlang des Balkens ---
+    # Ist entlang bei y=0 verankert (siehe _verankere_bei_y_null), zeigt die
+    # Achse immer genau den konfigurierten Y-Bereich -- nicht bloß den
+    # tatsächlich aufgezeichneten Ausschnitt, sonst wäre sie nur zufällig
+    # symmetrisch (nämlich nur bei lückenloser Abdeckung). Ohne Verankerung
+    # (überwiegend waagerechte Fahrt) bleibt es beim datenbasierten Bereich,
+    # weil --y-min/--y-max dort keine sinnvolle Achse wäre.
     if ergebnis.get("y_verankert") and ergebnis["y_max"] > ergebnis["y_min"]:
-        x_min, x_max = ergebnis["y_min"], ergebnis["y_max"]
+        pos_min, pos_max = ergebnis["y_min"], ergebnis["y_max"]
     else:
-        x_min, x_max = min(alle_e), max(alle_e)
-    y_min, y_max = min(alle_a), max(alle_a)
-    # Düsenreihen-Marken sollen immer sichtbar sein, auch wenn die Kurve
-    # flacher verläuft -- sonst fehlt der Maßstab, gegen den man liest.
-    y_min = min(y_min, -DUESENTEILUNG_MM * 1.3)
-    y_max = max(y_max, DUESENTEILUNG_MM * 1.3)
-    if x_max - x_min < 1e-9:
-        x_max = x_min + 1.0
-    if y_max - y_min < 1e-9:
-        y_max = y_min + 1.0
-    spanne_y = y_max - y_min
-    y_min -= spanne_y * 0.08
-    y_max += spanne_y * 0.08
+        pos_min, pos_max = min(alle_e), max(alle_e)
+    if pos_max - pos_min < 1e-9:
+        pos_max = pos_min + 1.0
+
+    # --- Senkrecht: Abweichung, SYMMETRISCH um 0 ---
+    # Die Nulllinie ist der Bezug, gegen den diese Kurve gelesen wird, also
+    # muss sie die MITTE der Achse sein. Ein datenabhängiger Bereich
+    # (min..max der Abweichung) legt sie irgendwohin -- an den echten Daten
+    # hier auf 52.8 % der Höhe --, und eine Abweichung nach oben wäre dann
+    # anders skaliert als eine gleich große nach unten. Nebeneffekt der
+    # Symmetrie: bei 7 Gitterlinien fällt die mittlere exakt auf 0.000.
+    # Untergrenze DUESENTEILUNG_MM * 1.3, damit die Düsenreihen-Marken auch
+    # bei sehr flacher Kurve im Bild bleiben -- sonst fehlt der Maßstab,
+    # gegen den man liest.
+    grenze = max(abs(min(alle_a)), abs(max(alle_a)), DUESENTEILUNG_MM * 1.3)
+    if grenze < 1e-9:
+        grenze = 1.0
+    grenze *= 1.08                       # etwas Luft über und unter der Kurve
+    abw_min, abw_max = -grenze, grenze
 
     def px(e):
-        return rand_l + (e - x_min) / (x_max - x_min) * pl_b
+        return rand_l + (e - pos_min) / (pos_max - pos_min) * pl_b
 
     def py(a):
-        return rand_o + (y_max - a) / (y_max - y_min) * pl_h
+        return rand_o + (abw_max - a) / (abw_max - abw_min) * pl_h
 
     bild = Image.new("RGB", (breite, hoehe), (255, 255, 255))
     zeichnung = ImageDraw.Draw(bild)
@@ -808,13 +826,13 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
     for anteil in [i / 8.0 for i in range(9)]:
         x = rand_l + anteil * pl_b
         zeichnung.line([(x, rand_o), (x, rand_o + pl_h)], fill=_GITTER)
-        wert = x_min + anteil * (x_max - x_min)
+        wert = pos_min + anteil * (pos_max - pos_min)
         zeichnung.text((x - 18, rand_o + pl_h + 8), f"{wert:.0f}",
                        fill=_ACHSEN, font=schrift_klein)
     for anteil in [i / 6.0 for i in range(7)]:
         y = rand_o + anteil * pl_h
         zeichnung.line([(rand_l, y), (rand_l + pl_b, y)], fill=_GITTER)
-        wert = y_max - anteil * (y_max - y_min)
+        wert = abw_max - anteil * (abw_max - abw_min)
         zeichnung.text((8, y - 6), f"{wert:+.3f}", fill=_ACHSEN,
                        font=schrift_klein)
 

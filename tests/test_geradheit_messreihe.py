@@ -688,6 +688,240 @@ def test_plot_geht_auch_mit_einer_einzigen_fahrt():
             os.unlink(ziel)
 
 
+def _bogen_fahrt(bogen_mm):
+    """
+    Fahrt überwiegend entlang y, mit parabelförmigem Bogen quer dazu.
+
+    Die Ausgleichsgerade geht durch den Schwerpunkt, bei einer Parabel
+    liegt der aber NICHT in der Mitte zwischen Scheitel und Enden -- die
+    Abweichungen werden dadurch deutlich asymmetrisch (rund 0.67 zu 1.33
+    mm, Faktor ~2). Genau das braucht es, um eine datenabhängige von einer
+    um 0 symmetrischen senkrechten Achse unterscheiden zu können: bei
+    symmetrischen Daten sähen beide gleich aus.
+
+    Die leichte NEIGUNG (0.05) ist nicht kosmetisch: bei einer exakt
+    senkrechten Geraden ist ``rx == 0``, und dann entscheidet in
+    passe_gerade_an der Vorzeichen-Tie-Break über ``ry`` -- der kippt mit
+    dem Bogen mit, die Normale ebenfalls, und beide Bogenrichtungen
+    liefern am Ende dieselben Abweichungen. Mit Neigung ist ``rx > 0``,
+    die Richtung damit eindeutig festgelegt, und das Vorzeichen von
+    ``bogen_mm`` steuert tatsächlich, ob das Minimum oder das Maximum
+    betragsmäßig überwiegt.
+
+    ``bogen_mm > 0`` -> |min| überwiegt, ``< 0`` -> |max| überwiegt.
+    """
+    n = 201
+    ys = [-90.0 + 180.0 * i / (n - 1) for i in range(n)]
+    xs = [3.0 + 0.05 * y + bogen_mm * (y / 90.0) ** 2 for y in ys]
+    return xs, ys
+
+
+def _nulllinien_pixel(bild, rand_l, rand_o, pl_h, spalten=range(2, 40)):
+    """y-Pixel der Nulllinie (_MITTEL-Grau (120,120,120), 2px breit).
+
+    Sie hat eine eigene Farbe: Gitter ist (216,216,216), die
+    Düsenreihen-Marken sind (150,150,150), die Kurve (70,130,200) --
+    ein Treffer auf (120,120,120) kann also nur die Nulllinie sein.
+    """
+    treffer = set()
+    for dx in spalten:
+        for y in range(rand_o, rand_o + pl_h + 1):
+            if bild.getpixel((rand_l + dx, y)) == (120, 120, 120):
+                treffer.add(y)
+    return sorted(treffer)
+
+
+def test_zeichne_plot_nulllinie_liegt_senkrecht_genau_in_der_mitte():
+    # Der gemeldete Fehler: der Nullpunkt der senkrechten Achse war nicht
+    # die Mitte der Achse, sondern dorthin verschoben, wo die Daten
+    # zufällig lagen. Mit den asymmetrischen Abweichungen unten läge die
+    # Nulllinie bei einer datenabhängigen Achse auf rund 64 % der Höhe --
+    # geprüft wird an den tatsächlichen Pixeln im gespeicherten PNG, nicht
+    # an derselben Formel, die die Implementierung benutzt.
+    xs, ys = _bogen_fahrt(-2.0)          # |max| ueberwiegt
+    e = G.auswerten([("f1", xs, ys)])
+
+    alle_a = [v for f in e["fahrten"] for v in f["abweichung"]]
+    # Absicherung, dass der Fixture überhaupt etwas zeigen kann.
+    assert abs(max(alle_a)) > 1.5 * abs(min(alle_a)), (min(alle_a), max(alle_a))
+
+    from PIL import Image
+    breite, hoehe = 1200, 700
+    rand_l, rand_r, rand_o, rand_u = 90, 210, 50, 70
+    pl_h = hoehe - rand_o - rand_u
+    mitte = rand_o + pl_h / 2.0
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        assert G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe) is True
+        with Image.open(ziel) as bild:
+            null_y = _nulllinien_pixel(bild, rand_l, rand_o, pl_h)
+            assert null_y, "Nulllinie nicht gefunden"
+            # Die Linie ist 2px breit, liegt also auf mitte und mitte+1.
+            assert max(abs(y - mitte) for y in null_y) <= 1.5, (null_y, mitte)
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_senkrechte_achse_reicht_oben_und_unten_gleich_weit():
+    # Dieselbe Aussage von der anderen Seite: der Abstand der Nulllinie zum
+    # oberen und zum unteren Rahmen muss gleich sein. Ohne symmetrische
+    # Achse wären das bei diesem Fixture rund 64 % zu 36 %.
+    xs, ys = _bogen_fahrt(-2.0)
+    e = G.auswerten([("f1", xs, ys)])
+
+    from PIL import Image
+    breite, hoehe = 1200, 700
+    rand_l, rand_r, rand_o, rand_u = 90, 210, 50, 70
+    pl_h = hoehe - rand_o - rand_u
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe)
+        with Image.open(ziel) as bild:
+            null_y = _nulllinien_pixel(bild, rand_l, rand_o, pl_h)
+            assert null_y
+            oben = min(null_y) - rand_o
+            unten = (rand_o + pl_h) - max(null_y)
+            assert abs(oben - unten) <= 2, (oben, unten)
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_zeigt_duesenreihen_marken_auch_bei_flacher_kurve():
+    # Die symmetrische Achse darf die Untergrenze nicht wegoptimieren: bei
+    # einer sehr geraden Fahrt muss der Maßstab ±1 Düsenreihe weiterhin im
+    # Bild sein, sonst fehlt der Bezug, gegen den die Kurve gelesen wird.
+    #
+    # Die Abweichung ist hier absichtlich winzig, aber NICHT exakt 0: bei
+    # exakt 0 greift der Entartungs-Schutz (grenze = 1.0) und die
+    # Untergrenze wäre gar nicht beteiligt -- der Test würde dann auch
+    # bestehen, wenn man sie entfernt (genau so ist die Mutation zuerst
+    # durchgerutscht).
+    ys = [-90.0 + 180.0 * i / 199 for i in range(200)]
+    xs = [3.0 + 0.002 * (y / 90.0) ** 2 for y in ys]
+    e = G.auswerten([("f1", xs, ys)])
+    alle_a = [v for f in e["fahrten"] for v in f["abweichung"]]
+    groesste = max(abs(a) for a in alle_a)
+    assert 0.0 < groesste < G.DUESENTEILUNG_MM / 10.0, groesste
+
+    from PIL import Image
+    breite, hoehe = 1200, 700
+    rand_l, rand_o, rand_u = 90, 50, 70
+    pl_h = hoehe - rand_o - rand_u
+    mitte = rand_o + pl_h / 2.0
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe)
+        with Image.open(ziel) as bild:
+            marken = set()
+            for dx in range(2, 60):
+                for y in range(rand_o, rand_o + pl_h + 1):
+                    if bild.getpixel((rand_l + dx, y)) == (150, 150, 150):
+                        marken.add(y)
+            assert marken, "Düsenreihen-Marken fehlen"
+            oberhalb = [y for y in marken if y < mitte - 2]
+            unterhalb = [y for y in marken if y > mitte + 2]
+            assert oberhalb and unterhalb, sorted(marken)
+            # ... und beide gleich weit von der Nulllinie entfernt.
+            assert abs((mitte - max(oberhalb)) - (min(unterhalb) - mitte)) <= 2
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_schneidet_die_kurve_in_keiner_richtung_ab():
+    # Die Achsengrenze muss aus BEIDEN Extremen gebildet werden. Deshalb
+    # beide Bogenrichtungen: einmal überwiegt betragsmäßig das Minimum,
+    # einmal das Maximum. Würde nur eines von beiden benutzt, wäre die
+    # Achse im jeweils anderen Fall rund halb so groß wie nötig und die
+    # Kurve liefe aus dem Rahmen -- mit nur einer Richtung im Test bliebe
+    # genau die Hälfte davon unbemerkt.
+    from PIL import Image
+    breite, hoehe = 1200, 700
+    rand_l, rand_r, rand_o, rand_u = 90, 210, 50, 70
+    pl_b = breite - rand_l - rand_r
+    pl_h = hoehe - rand_o - rand_u
+    farbe = (70, 130, 200)
+
+    for bogen, wer in ((2.0, "min"), (-2.0, "max")):
+        xs, ys = _bogen_fahrt(bogen)
+        e = G.auswerten([("f1", xs, ys)])
+        alle_a = [v for f in e["fahrten"] for v in f["abweichung"]]
+
+        # Absicherung, dass der Fixture wirklich das prüft, was er soll.
+        if wer == "min":
+            assert abs(min(alle_a)) > 1.5 * abs(max(alle_a)), alle_a[:3]
+        else:
+            assert abs(max(alle_a)) > 1.5 * abs(min(alle_a)), alle_a[:3]
+
+        ziel = tempfile.mktemp(suffix=".png")
+        try:
+            G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe)
+            with Image.open(ziel) as bild:
+                innen = ausserhalb = 0
+                for x in range(rand_l + 1, rand_l + pl_b):
+                    for y in range(0, hoehe):
+                        if bild.getpixel((x, y)) == farbe:
+                            if rand_o <= y <= rand_o + pl_h:
+                                innen += 1
+                            else:
+                                ausserhalb += 1
+                assert innen > 0, f"Kurve gar nicht gezeichnet (Bogen {bogen})"
+                assert ausserhalb == 0, (
+                    f"Bogen {bogen}: {ausserhalb} Kurvenpixel ausserhalb des "
+                    f"Rahmens -- die senkrechte Achse ist zu klein (|{wer}| "
+                    f"nicht beruecksichtigt?)")
+        finally:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_zeichne_plot_beschriftet_die_senkrechte_achse_mit_der_abweichung():
+    # Die senkrechte Achse muss mit der ABWEICHUNG beschriftet sein, nicht
+    # versehentlich mit der Positionsachse -- genau diese Verwechslung der
+    # beiden Achsen ist der Kern des ursprünglichen Fehlers gewesen, und
+    # sie wäre an den Kurvenpixeln allein nicht zu sehen (die Beschriftung
+    # ändert kein einziges davon).
+    #
+    # Geprüft wird ohne Texterkennung: dieselbe Zeichenkette wird mit
+    # derselben Schrift frisch gerendert und der Bildausschnitt bitweise
+    # verglichen. Das ist deterministisch und hängt an keiner Schätzung.
+    xs, ys = _bogen_fahrt(-2.0)
+    e = G.auswerten([("f1", xs, ys)])
+    alle_a = [v for f in e["fahrten"] for v in f["abweichung"]]
+    grenze = max(abs(min(alle_a)), abs(max(alle_a)),
+                 G.DUESENTEILUNG_MM * 1.3) * 1.08
+    erwartet = f"{grenze:+.3f}"
+
+    # Gegenprobe: die Positionsachse trüge hier eine völlig andere Zahl --
+    # ohne das könnte der Test versehentlich beide gleich bewerten.
+    assert erwartet != f"{e['y_max']:+.3f}"
+
+    from PIL import Image, ImageDraw
+    rand_o = 50                       # oberste Gitterlinie, Text bei y-6
+    kasten = (8, rand_o - 6, 78, rand_o + 10)
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=1200, hoehe=700)
+        with Image.open(ziel) as bild:
+            ist = bild.convert("RGB").crop(kasten)
+        soll = Image.new("RGB", (kasten[2] - kasten[0],
+                                 kasten[3] - kasten[1]), (255, 255, 255))
+        ImageDraw.Draw(soll).text((0, 0), erwartet, fill=(60, 60, 60),
+                                  font=G._schrift(11))
+        assert ist.tobytes() == soll.tobytes(), (
+            "oberste Beschriftung der senkrechten Achse ist nicht "
+            f"{erwartet!r}")
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
 def test_plot_zeichnet_nichts_bei_fehlerhaftem_ergebnis():
     ziel = tempfile.mktemp(suffix=".png")
     assert G.zeichne_plot({"fehler": "x"}, ziel) is False
