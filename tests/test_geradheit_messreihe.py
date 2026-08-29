@@ -195,7 +195,7 @@ def test_zeichne_plot_achse_bleibt_bei_verankerung_am_konfigurierten_bereich():
 
     from PIL import Image
     breite, hoehe = 1200, 700
-    rand_l, rand_r = 90, 210
+    rand_l, rand_r = 90, 20
     pl_b = breite - rand_l - rand_r
     mitte_px = rand_l + 0.5 * pl_b
     farbe = (70, 130, 200)   # G._FARBEN[0] -- die erste (und einzige) Fahrt
@@ -234,7 +234,7 @@ def test_zeichne_plot_ohne_verankerung_bleibt_beim_datenbereich():
 
     from PIL import Image
     breite, hoehe = 1200, 700
-    rand_l, rand_r = 90, 210
+    rand_l, rand_r = 90, 20
     pl_b = breite - rand_l - rand_r
     farbe = (70, 130, 200)
 
@@ -747,7 +747,7 @@ def test_zeichne_plot_nulllinie_liegt_senkrecht_genau_in_der_mitte():
 
     from PIL import Image
     breite, hoehe = 1200, 700
-    rand_l, rand_r, rand_o, rand_u = 90, 210, 50, 70
+    rand_l, rand_r, rand_o, rand_u = 90, 20, 50, 70
     pl_h = hoehe - rand_o - rand_u
     mitte = rand_o + pl_h / 2.0
 
@@ -773,7 +773,7 @@ def test_zeichne_plot_senkrechte_achse_reicht_oben_und_unten_gleich_weit():
 
     from PIL import Image
     breite, hoehe = 1200, 700
-    rand_l, rand_r, rand_o, rand_u = 90, 210, 50, 70
+    rand_l, rand_r, rand_o, rand_u = 90, 20, 50, 70
     pl_h = hoehe - rand_o - rand_u
 
     ziel = tempfile.mktemp(suffix=".png")
@@ -842,7 +842,7 @@ def test_zeichne_plot_schneidet_die_kurve_in_keiner_richtung_ab():
     # genau die Hälfte davon unbemerkt.
     from PIL import Image
     breite, hoehe = 1200, 700
-    rand_l, rand_r, rand_o, rand_u = 90, 210, 50, 70
+    rand_l, rand_r, rand_o, rand_u = 90, 20, 50, 70
     pl_b = breite - rand_l - rand_r
     pl_h = hoehe - rand_o - rand_u
     farbe = (70, 130, 200)
@@ -917,6 +917,187 @@ def test_zeichne_plot_beschriftet_die_senkrechte_achse_mit_der_abweichung():
         assert ist.tobytes() == soll.tobytes(), (
             "oberste Beschriftung der senkrechten Achse ist nicht "
             f"{erwartet!r}")
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+# ============================================== Optische Anpassungen (Plot)
+def test_zeichne_plot_hat_keine_ueberschrift_mehr():
+    # "Abweichung quer zur Fahrt (...)" soll komplett weg sein -- geprüft
+    # per Byte-Vergleich an genau der Stelle, an der sie früher stand
+    # (nicht per Leerflächen-Annahme: direkt daneben lebt weiterhin die
+    # unveränderte "Abweichung (mm)"-Achsenbeschriftung, die zufällig bis
+    # in denselben Bereich hineinreicht).
+    xs, ys = _fahrt(rausch_mm=0.01)
+    e = G.auswerten([("f1", xs, ys)])
+
+    from PIL import Image, ImageDraw
+    alter_titel = (f"Abweichung quer zur Fahrt  ({e['anzahl_fahrten']} "
+                  f"Fahrt(en), Balken {e['winkel_grad']:+.2f} deg gegen +x)")
+    schrift13 = G._schrift(13)
+    dummy = Image.new("RGB", (10, 10))
+    bbox = ImageDraw.Draw(dummy).textbbox((90, 16), alter_titel, font=schrift13)
+    soll = Image.new("RGB", (bbox[2] - bbox[0], bbox[3] - bbox[1]),
+                     (255, 255, 255))
+    ImageDraw.Draw(soll).text((90 - bbox[0], 16 - bbox[1]), alter_titel,
+                              fill=(20, 20, 20), font=schrift13)
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=1200, hoehe=700)
+        with Image.open(ziel) as bild:
+            crop = bild.convert("RGB").crop(bbox)
+        ist, soll_bytes = crop.tobytes(), soll.tobytes()
+        # Toleranz statt strikter Ungleichheit: selbst wenn der alte Titel
+        # unverändert dort steht, weichen ein paar Bytes an den
+        # Buchstaben-Rändern minimal ab (Kantenglättung reagiert leicht
+        # anders, je nachdem, worauf gerade gezeichnet wird) -- hier
+        # gemessen: 15 von 19194 Bytes. Fehlt der Titel dagegen wirklich
+        # (die Fläche ist weiß statt beschriftet), weichen tausende Bytes
+        # ab. Die Schwelle liegt weit dazwischen.
+        diff = sum(1 for a, b in zip(ist, soll_bytes) if a != b)
+        assert diff > 500, (
+            f"die alte Überschrift steht (fast) unverändert dort "
+            f"({diff} von {len(ist)} Bytes weichen ab)")
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_legende_liegt_innerhalb_der_plotflaeche():
+    # Die Legende stand früher rechts NEBEN der Plotfläche (im breiten
+    # rand_r-Streifen) -- der ist jetzt schmal, und der Streifen muss
+    # komplett leer (weiß) sein, weil die Legende in einen Kasten
+    # INNERHALB der Plotfläche gewandert ist.
+    xs, ys = _fahrt(rausch_mm=0.01)
+    e = G.auswerten([("f1", xs, ys)])
+
+    from PIL import Image
+    breite, hoehe = 1200, 700
+    rand_l, rand_r = 90, 20
+    pl_b = breite - rand_l - rand_r
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe)
+        with Image.open(ziel) as bild:
+            bild = bild.convert("RGB")
+            rand_frei = all(
+                bild.getpixel((x, y)) == (255, 255, 255)
+                for x in range(rand_l + pl_b + 1, breite)
+                for y in range(0, hoehe, 5))
+        assert rand_frei, "im rechten Rand steht noch etwas -- alte Legende?"
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_legende_hat_einen_eigenen_hintergrundkasten():
+    # Innerhalb der Plotfläche sitzend braucht die Legende einen sichtbar
+    # abgesetzten Kasten -- sonst verschwimmt ihr Text mit der Kurve
+    # dahinter. Geprüft an der oberen Kante: die muss über ihre volle
+    # Breite in der Rahmenfarbe gezeichnet sein.
+    xs, ys = _fahrt(rausch_mm=0.01)
+    e = G.auswerten([("f1", xs, ys)])
+
+    from PIL import Image, ImageDraw
+    breite, hoehe = 1200, 700
+    rand_l, rand_o = 90, 50
+    pl_b = breite - rand_l - 20
+    schrift = G._schrift(11)
+    dummy = Image.new("RGB", (10, 10))
+    draw = ImageDraw.Draw(dummy)
+    text_breite = max(
+        draw.textbbox((0, 0), t, font=schrift)[2]
+        for t in ("Messwert", "1 Düsenreihe"))
+    legende_b = 8 * 2 + 22 + 6 + text_breite
+    lx0 = rand_l + pl_b - legende_b - 10
+    ly0 = rand_o + 10
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe)
+        with Image.open(ziel) as bild:
+            bild = bild.convert("RGB")
+            obere_kante = sum(
+                1 for x in range(lx0, lx0 + legende_b)
+                if bild.getpixel((x, ly0)) == (60, 60, 60))
+        assert obere_kante == legende_b, (
+            f"nur {obere_kante} von {legende_b} Randpixeln gesetzt -- "
+            f"Legendenkasten fehlt oder ist verschoben")
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_legende_zeigt_messwert_nicht_den_dateinamen():
+    # Statt des (potenziell langen/kryptischen) Dateinamens soll die
+    # Legende schlicht "Messwert" zeigen -- der Dateiname steht ohnehin
+    # schon im Textbericht. Byte-Vergleich wie beim Achsentitel-Test.
+    xs, ys = _fahrt(rausch_mm=0.01)
+    dateiname = "ein_sehr_langer_dateiname_der_so_nicht_erscheinen_darf.csv"
+    e = G.auswerten([(dateiname, xs, ys)])
+
+    from PIL import Image, ImageDraw
+    breite, hoehe = 1200, 700
+    rand_l, rand_o, rand_u = 90, 50, 70
+    pl_b = breite - rand_l - 20
+    schrift = G._schrift(11)
+
+    dummy = Image.new("RGB", (10, 10))
+    draw = ImageDraw.Draw(dummy)
+    text_breite = max(
+        draw.textbbox((0, 0), t, font=schrift)[2]
+        for t in ("Messwert", "1 Düsenreihe"))
+    legende_b = 8 * 2 + 22 + 6 + text_breite
+    lx0 = rand_l + pl_b - legende_b - 10
+    ly0 = rand_o + 10
+    text_pos = (lx0 + 8 + 22 + 6, ly0 + 8)
+
+    soll = Image.new("RGB", (text_breite, 16), (255, 255, 255))
+    ImageDraw.Draw(soll).text((0, 0), "Messwert", fill=(40, 40, 40),
+                              font=schrift)
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe)
+        with Image.open(ziel) as bild:
+            crop = bild.convert("RGB").crop(
+                (text_pos[0], text_pos[1],
+                 text_pos[0] + text_breite, text_pos[1] + 16))
+        assert crop.tobytes() == soll.tobytes(), (
+            "Legende zeigt nicht 'Messwert' an der erwarteten Stelle")
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_zeichne_plot_achsenbeschriftung_lautet_entlang_der_y_achse():
+    xs, ys = _fahrt(rausch_mm=0.01)
+    e = G.auswerten([("f1", xs, ys)])
+
+    from PIL import Image, ImageDraw
+    breite, hoehe = 1200, 700
+    rand_l, rand_r = 90, 20
+    pl_b = breite - rand_l - rand_r
+    schrift = G._schrift(11)
+    text = "entlang der y-Achse (mm)"
+    pos = (int(rand_l + pl_b / 2 - 60), hoehe - 26)
+
+    dummy = Image.new("RGB", (10, 10))
+    bbox = ImageDraw.Draw(dummy).textbbox(pos, text, font=schrift)
+    soll = Image.new("RGB", (bbox[2] - bbox[0], bbox[3] - bbox[1]),
+                     (255, 255, 255))
+    ImageDraw.Draw(soll).text((pos[0] - bbox[0], pos[1] - bbox[1]), text,
+                              fill=G._ACHSEN, font=schrift)
+
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe)
+        with Image.open(ziel) as bild:
+            crop = bild.convert("RGB").crop(bbox)
+        assert crop.tobytes() == soll.tobytes()
     finally:
         if os.path.exists(ziel):
             os.unlink(ziel)

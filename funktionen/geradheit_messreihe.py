@@ -767,7 +767,10 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
     if "fehler" in ergebnis:
         return False
 
-    rand_l, rand_r, rand_o, rand_u = 90, 210, 50, 70
+    # rand_r braucht keinen Platz mehr für eine Legende daneben -- die
+    # Legende sitzt jetzt als eigener Kasten INNERHALB der Plotfläche
+    # (siehe unten).
+    rand_l, rand_r, rand_o, rand_u = 90, 20, 50, 70
     pl_b = breite - rand_l - rand_r
     pl_h = hoehe - rand_o - rand_u
 
@@ -819,7 +822,6 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
 
     bild = Image.new("RGB", (breite, hoehe), (255, 255, 255))
     zeichnung = ImageDraw.Draw(bild)
-    schrift = _schrift(13)
     schrift_klein = _schrift(11)
 
     # --- Gitter und Achsenbeschriftung ---
@@ -878,45 +880,62 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
     zeichnung.rectangle([rand_l, rand_o, rand_l + pl_b, rand_o + pl_h],
                         outline=_ACHSEN)
 
-    # --- Titel und Achsentitel ---
-    zeichnung.text((rand_l, 16),
-                   f"Abweichung quer zur Fahrt  ({ergebnis['anzahl_fahrten']} "
-                   f"Fahrt(en), Balken {ergebnis['winkel_grad']:+.2f} deg "
-                   f"gegen +x)", fill=(20, 20, 20), font=schrift)
+    # --- Achsentitel (kein Bildtitel mehr -- siehe Moduldocstring/Anfrage:
+    #     der Kopf "Abweichung quer zur Fahrt ..." ist bewusst weg) ---
     zeichnung.text((rand_l + pl_b / 2 - 60, hoehe - 26),
-                   "Strecke entlang des Balkens (mm)", fill=_ACHSEN,
+                   "entlang der y-Achse (mm)", fill=_ACHSEN,
                    font=schrift_klein)
     zeichnung.text((8, rand_o - 22), "Abweichung (mm)", fill=_ACHSEN,
                    font=schrift_klein)
 
-    # --- Legende ---
-    lx = rand_l + pl_b + 16
-    ly = rand_o + 4
-    for index, fahrt in enumerate(ergebnis["fahrten"]):
+    # --- Legende -- als eigener Kasten INNERHALB der Plotfläche, nicht
+    # mehr daneben (dafür ist rand_r oben auf ein schmales Randmaß
+    # geschrumpft). Jede Fahrt heißt hier "Messwert" (bzw. "Messwert N"
+    # bei mehreren) statt ihres Dateinamens -- der ist für die Grafik
+    # selbst nicht relevant und steht ohnehin schon im Textbericht.
+    eintraege = []
+    for index in range(ergebnis["anzahl_fahrten"]):
         farbe = _FARBEN[index % len(_FARBEN)]
-        zeichnung.line([(lx, ly + 6), (lx + 22, ly + 6)], fill=farbe, width=2)
-        name = os.path.basename(fahrt["name"])
-        if len(name) > 20:
-            name = name[:17] + "..."
-        zeichnung.text((lx + 28, ly), name, fill=(40, 40, 40),
-                       font=schrift_klein)
-        ly += 18
+        label = ("Messwert" if ergebnis["anzahl_fahrten"] == 1
+                else f"Messwert {index + 1}")
+        eintraege.append(("linie", farbe, label))
     if ergebnis["anzahl_fahrten"] >= 2:
-        ly += 6
-        zeichnung.line([(lx, ly + 6), (lx + 22, ly + 6)],
-                       fill=_MITTEL_FARBE, width=3)
-        zeichnung.text((lx + 28, ly), "Mittelwert", fill=(40, 40, 40),
+        eintraege.append(("linie_dick", _MITTEL_FARBE, "Mittelwert"))
+        eintraege.append(("kasten", (255, 225, 225), "Streuung"))
+    eintraege.append(("gestrichelt", _REIHE_FARBE, "1 Düsenreihe"))
+
+    zeilenhoehe = 18
+    swatch_breite = 22
+    innen_abstand = 8
+    text_breite = max(
+        zeichnung.textbbox((0, 0), text, font=schrift_klein)[2]
+        for _, _, text in eintraege)
+    legende_b = innen_abstand * 2 + swatch_breite + 6 + text_breite
+    legende_h = innen_abstand * 2 + len(eintraege) * zeilenhoehe - 4
+
+    lx0 = rand_l + pl_b - legende_b - 10
+    ly0 = rand_o + 10
+    zeichnung.rectangle([lx0, ly0, lx0 + legende_b, ly0 + legende_h],
+                        fill=(255, 255, 255), outline=_ACHSEN)
+
+    lx = lx0 + innen_abstand
+    ly = ly0 + innen_abstand
+    for art, farbe, text in eintraege:
+        if art == "linie":
+            zeichnung.line([(lx, ly + 6), (lx + swatch_breite, ly + 6)],
+                           fill=farbe, width=2)
+        elif art == "linie_dick":
+            zeichnung.line([(lx, ly + 6), (lx + swatch_breite, ly + 6)],
+                           fill=farbe, width=3)
+        elif art == "kasten":
+            zeichnung.rectangle(
+                [lx, ly + 2, lx + swatch_breite, ly + 10],
+                fill=farbe, outline=(230, 190, 190))
+        elif art == "gestrichelt":
+            _gestrichelt(zeichnung, lx, ly + 6, lx + swatch_breite, farbe)
+        zeichnung.text((lx + swatch_breite + 6, ly), text, fill=(40, 40, 40),
                        font=schrift_klein)
-        ly += 18
-        zeichnung.rectangle([lx, ly + 2, lx + 22, ly + 10],
-                            fill=(255, 225, 225), outline=(230, 190, 190))
-        zeichnung.text((lx + 28, ly), "Streuung", fill=(40, 40, 40),
-                       font=schrift_klein)
-        ly += 18
-    ly += 6
-    _gestrichelt(zeichnung, lx, ly + 6, lx + 22, _REIHE_FARBE)
-    zeichnung.text((lx + 28, ly), "1 Düsenreihe", fill=(40, 40, 40),
-                   font=schrift_klein)
+        ly += zeilenhoehe
 
     bild.save(pfad_png)
     return True
