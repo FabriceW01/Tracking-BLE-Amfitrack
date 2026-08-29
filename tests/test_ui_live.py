@@ -275,6 +275,37 @@ def test_view_html_ruft_dieselben_funktionen_auf():
         assert aufruf in quelle, f"view.html ruft {aufruf!r} nicht auf"
 
 
+def test_index_oeffnet_view_in_neuem_tab():
+    """Grundlage für den Zurück-Button-Test unten: window.close() darf
+    dort nur benutzt werden, WEIL dieser Tab per Skript (target="_blank")
+    geöffnet wurde. Würde index.html das auf denselben Tab umstellen,
+    wäre window.close() dort falsch -- es würde die Steuerseite
+    mitschließen."""
+    quelle = (_STATIC / "index.html").read_text()
+    assert '<a href="/view" target="_blank"' in quelle
+
+
+def test_view_html_zurueck_button_schliesst_den_tab():
+    """view.html wird von index.html immer per target="_blank" in einem
+    NEUEN Tab geöffnet (siehe test_index_oeffnet_view_in_neuem_tab) -- der
+    ursprüngliche Steuerungs-Tab bleibt dabei mit allen Einstellungen im
+    Hintergrund offen. Ein reiner href="/"-Link würde stattdessen DIESEN
+    Tab auf "/" umlenken und damit eine frische Steuerseite mit
+    Standardeinstellungen laden -- für den Nutzer sieht das wie ein
+    zweiter Tab mit verlorenen Einstellungen aus. window.close() muss den
+    Klick also abfangen, statt die reine Navigation laufen zu lassen."""
+    quelle = (_STATIC / "view.html").read_text()
+    assert 'id="back-link"' in quelle
+    assert '$("back-link").addEventListener("click"' in quelle
+    # Auf die AUFRUFSTELLE geprüft (window.close() gefolgt vom Fallback im
+    # selben Block), nicht bloß auf die Wörter irgendwo in der Datei --
+    # der erklärende Kommentar direkt darüber erwähnt "window.close()"
+    # selbst mehrfach in Prosa, ein reiner Wort-Test wäre also selbst dann
+    # noch grün, wenn der eigentliche Aufruf entfernt würde.
+    assert ('window.close();\n  setTimeout(() => { location.href = "/"; },'
+           in quelle), "window.close() + Fallback fehlen an der Aufrufstelle"
+
+
 # ============================================== Standardwerte Dosis/Spray
 def test_ui_standardwerte_fuer_dosis_und_spray():
     """Vom Anlagenbesitzer festgelegt: Dosis 2, Spray aus. Die Felder der
