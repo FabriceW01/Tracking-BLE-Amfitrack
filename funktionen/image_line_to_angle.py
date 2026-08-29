@@ -3,7 +3,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 
 class ImageMeasurementApp:
@@ -73,7 +73,7 @@ class ImageMeasurementApp:
 
         toolbar = ttk.Frame(self.root, padding=(10, 8))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(8, weight=1)
+        toolbar.columnconfigure(11, weight=1)
 
         ttk.Button(
             toolbar,
@@ -126,6 +126,17 @@ class ImageMeasurementApp:
             text="Kalibrierung",
             command=self.open_calibration_dialog
         ).grid(row=0, column=8, sticky="w", padx=6)
+
+        ttk.Separator(
+            toolbar,
+            orient="vertical"
+        ).grid(row=0, column=9, sticky="ns", padx=10)
+
+        ttk.Button(
+            toolbar,
+            text="Export",
+            command=self.export_measurement_image
+        ).grid(row=0, column=10, sticky="w", padx=6)
 
         main_frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
         main_frame.grid(row=1, column=0, sticky="nsew")
@@ -757,6 +768,170 @@ class ImageMeasurementApp:
         millimeter_length = pixel_length * self.mm_per_pixel
 
         return f"{pixel_length:.2f} px  |  {millimeter_length:.3f} mm"
+
+    def export_measurement_image(self):
+        """
+        Speichert eine Kopie des Originalbildes (volle Auflösung, unabhängig
+        vom aktuellen Zoom) mit den vollständig gezeichneten Linien und --
+        sobald beide Linien vorliegen -- dem Winkel zwischen ihnen.
+
+        Die Linienlängen werden hier BEWUSST nicht mit ausgegeben (anders
+        als in der Live-Ansicht über draw_measurement_lines): der Export
+        soll nur Linien und Winkel zeigen.
+        """
+        if self.original_image is None:
+            messagebox.showinfo(
+                "Kein Bild geladen",
+                "Laden Sie zuerst ein Bild."
+            )
+            return
+
+        lines_to_draw = [
+            (line_index, points)
+            for line_index, points in enumerate(self.lines)
+            if len(points) == 2
+        ]
+
+        if not lines_to_draw:
+            messagebox.showinfo(
+                "Keine Linie definiert",
+                "Zeichnen Sie mindestens eine vollständige Linie, "
+                "bevor Sie exportieren."
+            )
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Export speichern",
+            defaultextension=".png",
+            initialfile=self.suggest_export_filename(),
+            filetypes=[
+                ("PNG-Bild", "*.png"),
+                ("JPEG-Bild", "*.jpg *.jpeg"),
+                ("Alle Dateien", "*.*")
+            ]
+        )
+
+        if not file_path:
+            return
+
+        try:
+            export_image = self.render_export_image(lines_to_draw)
+            export_image.save(file_path)
+
+            self.status_var.set(
+                f"Export gespeichert: {Path(file_path).name}"
+            )
+
+        except Exception as error:
+            messagebox.showerror(
+                "Fehler beim Export",
+                f"Der Export konnte nicht gespeichert werden.\n\n{error}"
+            )
+
+    def suggest_export_filename(self):
+        if self.image_path is None:
+            return "messung_export.png"
+
+        return f"{self.image_path.stem}_winkel.png"
+
+    def render_export_image(self, lines_to_draw):
+        """
+        Zeichnet die übergebenen Linien (Liste aus (line_index, points))
+        auf eine RGB-Kopie des Originalbildes. Ist für BEIDE Linien ein
+        vollständiges Punktepaar vorhanden, wird zusätzlich der Winkel
+        zwischen ihnen als Textlabel eingeblendet -- keine Längenangaben.
+        """
+        export_image = self.original_image.convert("RGB").copy()
+        draw = ImageDraw.Draw(export_image)
+
+        reference_size = min(export_image.width, export_image.height)
+        line_width = max(2, round(reference_size * 0.004))
+        point_radius = max(4, round(reference_size * 0.006))
+
+        for line_index, points in lines_to_draw:
+            color = self.LINE_COLORS[line_index]
+            start, end = points
+
+            draw.line([start, end], fill=color, width=line_width)
+
+            for point in (start, end):
+                point_x, point_y = point
+                draw.ellipse(
+                    [
+                        point_x - point_radius,
+                        point_y - point_radius,
+                        point_x + point_radius,
+                        point_y + point_radius
+                    ],
+                    fill=color,
+                    outline="white",
+                    width=max(1, line_width // 2)
+                )
+
+        if len(self.lines[0]) == 2 and len(self.lines[1]) == 2:
+            angle = self.calculate_angle_between_lines(
+                self.lines[0],
+                self.lines[1]
+            )
+            angle_text = f"Winkel: {angle:.2f}°"
+
+            font = self.load_export_font(reference_size)
+            margin = round(reference_size * 0.02)
+
+            self.draw_export_text_with_background(
+                draw,
+                (margin, margin),
+                angle_text,
+                font
+            )
+
+        return export_image
+
+    @staticmethod
+    def load_export_font(reference_size):
+        font_size = max(16, round(reference_size * 0.03))
+
+        # Versucht zuerst gebräuchliche, auf dem System vorhandene
+        # Schriftarten -- funktioniert unter Windows (arialbd.ttf/Arial
+        # Bold.ttf) genauso wie unter Linux (DejaVuSans-Bold.ttf) ohne
+        # zusätzliche Abhängigkeiten.
+        for font_name in (
+            "DejaVuSans-Bold.ttf",
+            "arialbd.ttf",
+            "Arial Bold.ttf",
+            "Arial.ttf"
+        ):
+            try:
+                return ImageFont.truetype(font_name, font_size)
+            except OSError:
+                continue
+
+        # Fallback: Pillows eigene Standardschrift. Das size-Argument gibt
+        # es erst ab Pillow 10.1 -- ohne es bleibt die Schrift klein, aber
+        # lesbar, statt den Export scheitern zu lassen.
+        try:
+            return ImageFont.load_default(size=font_size)
+        except TypeError:
+            return ImageFont.load_default()
+
+    @staticmethod
+    def draw_export_text_with_background(draw, position, text, font):
+        x, y = position
+        bounding_box = draw.textbbox((x, y), text, font=font)
+
+        padding = 8
+        draw.rectangle(
+            [
+                bounding_box[0] - padding,
+                bounding_box[1] - padding,
+                bounding_box[2] + padding,
+                bounding_box[3] + padding
+            ],
+            fill="#202020",
+            outline="#f2c94c",
+            width=2
+        )
+        draw.text(position, text, fill="white", font=font)
 
     def open_calibration_dialog(self):
         if self.original_image is None:
