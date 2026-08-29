@@ -21,8 +21,13 @@ Datenquelle
 
     python main.py --pos --pos-json > fahrt1.jsonl
 
-Die **Profil-CSV** (``--profile-csv``) geht auch, ist aber für diese Messung
-die schlechtere Quelle und wird nur mit Warnung akzeptiert:
+Die **Profil-CSV** (``--profile-csv``) geht auch. Enthält sie die rohen
+Sensorkoordinaten ``x``/``y`` (seit deren x/y/z-Erweiterung, Seiten- UND
+Line-Modus), werden GENAU DIESE benutzt -- dieselbe Quelle wie oben, nur
+schon während des Druckdurchgangs mitgeschrieben, kein separater Lauf
+nötig. Fehlen sie (ältere Aufzeichnung), wird für eine Seiten-Modus-Datei
+ersatzweise auf ``u_mm``/``v_mm`` zurückgegriffen -- dann mit Warnung,
+denn das ist die schlechtere Quelle:
 
   * ``u_mm``/``v_mm`` sind **Seitenebenen**-Koordinaten. Kalibrierung,
     Sensor-zu-Düsenleisten-Versatz und die Drehung um den Gierwinkel stecken
@@ -31,6 +36,20 @@ die schlechtere Quelle und wird nur mit Warnung akzeptiert:
   * Es wird nur geschrieben, wenn sich das Düsenmuster **ändert**, also
     unregelmäßig und mit Lücken.
   * Es braucht einen echten Druckdurchgang.
+
+Unabhängig von der Quelle gilt weiterhin: geschrieben wird in einer
+Profil-CSV nur, wenn tatsächlich Spalten rausgehen -- keine gleichmäßige
+Zeitreihe, und deshalb für Rauschmessung kein Ersatz für ``--pos --pos-json``.
+
+Y-Bereich
+---------
+Nur Punkte mit einem y-Wert in ``[--y-min, --y-max]`` (Default -90..90 mm)
+gehen in die Auswertung ein -- Punkte außerhalb werden VOR der
+Geradenanpassung verworfen, mit Zähler im Bericht. Gedacht, um Messwerte
+außerhalb des vertrauenswürdigen Trackingbereichs auszuschließen, statt sie
+unbemerkt die Ausgleichsgerade verzerren zu lassen. Fällt eine ganze Fahrt
+komplett heraus, wird sie im Bericht als übersprungen genannt, nicht
+stillschweigend weggelassen.
 
 Verfahren
 ---------
@@ -77,6 +96,11 @@ import sys
 # printhead.geometry.NOZZLE_PITCH_MM, damit er nicht auseinanderläuft.
 DUESENTEILUNG_MM = 13.2 / 152
 
+# Default-Grenzen des y-Bereichs, der in die Auswertung eingeht (mm) --
+# über --y-min/--y-max änderbar. Siehe Modul-Docstring "Y-Bereich".
+Y_BEREICH_MIN_MM = -90.0
+Y_BEREICH_MAX_MM = 90.0
+
 
 # ===========================================================================
 # Einlesen
@@ -113,46 +137,94 @@ def lies_pos_json(pfad):
 
 def lies_profile_csv(pfad):
     """
-    Liest eine Seiten-Modus-``--profile-csv`` und nimmt ``u_mm``/``v_mm``.
+    Liest eine ``--profile-csv`` (Seiten- ODER Line-Modus).
 
-    Siehe Modul-Docstring: das sind Seitenebenen-Koordinaten, keine rohen
-    Sensorwerte. Der Aufrufer warnt davor; hier wird nur gelesen.
+    Bevorzugt die ROHEN Sensorkoordinaten ``x``/``y``, falls die Datei sie
+    enthält (seit deren x/y/z-Erweiterung, in beiden Modi -- siehe
+    README) -- dieselbe Quelle wie ``--pos --pos-json``, nur schon während
+    des Druckdurchgangs mitgeschrieben. Zeilen ohne Position (leere
+    x/y-Felder; siehe README: "leer statt 0,0,0", wenn kein Tracking-Fix
+    vorlag) werden übersprungen, nicht als (0, 0) gezählt.
+
+    Fehlen x/y (ältere Aufzeichnung von vor dieser Erweiterung) ODER sind
+    sie zwar als Spalte vorhanden, aber in JEDER Zeile leer (z.B. eine
+    Datei ohne Tracking während der Aufzeichnung), wird für eine
+    Seiten-Modus-Datei ersatzweise ``u_mm``/``v_mm`` gelesen --
+    SEITENEBENEN-Koordinaten, siehe Modul-Docstring für die Einschränkung.
+    Eine Line-Modus-Datei ohne brauchbare x/y hat keine zweite Achse
+    (``advance_mm`` ist 1-D) und ist dann nicht auswertbar.
+
+    Rückgabe: ``(xs, ys, quelle)`` mit ``quelle`` = ``"profile-csv-xy"``
+    (rohe Koordinaten) oder ``"profile-csv-uv"`` (Seitenebene, Fallback).
     """
-    xs, ys = [], []
     with open(pfad, newline="", encoding="utf-8") as datei:
         leser = csv.DictReader(datei)
         felder = leser.fieldnames or []
-        if "u_mm" not in felder or "v_mm" not in felder:
-            raise ValueError(
-                f"{pfad!r} hat keine Spalten u_mm/v_mm (gefunden: "
-                f"{','.join(felder) or '<keine>'}). Eine Line-Modus-CSV "
-                f"enthält keine zweite Achse und ist hier nicht auswertbar.")
-        for zeile in leser:
+        zeilen = list(leser)
+
+    hat_xy = "x" in felder and "y" in felder
+    hat_uv = "u_mm" in felder and "v_mm" in felder
+    if not hat_xy and not hat_uv:
+        raise ValueError(
+            f"{pfad!r} hat weder x/y (rohe Sensorkoordinaten) noch "
+            f"u_mm/v_mm (Seitenebenen-Koordinaten) -- keine "
+            f"Positionsspalten zum Auswerten (gefunden: "
+            f"{','.join(felder) or '<keine>'}).")
+
+    if hat_xy:
+        xs, ys = [], []
+        for zeile in zeilen:
             try:
-                xs.append(float(zeile["u_mm"]))
-                ys.append(float(zeile["v_mm"]))
+                # Leeres Feld (kein Tracking-Fix, siehe README: "leer statt
+                # 0,0,0") ist hier ein leerer String -> float("") wirft
+                # ValueError; eine fehlende Spalte ergibt None -> TypeError.
+                # Beides faellt hier durch, kein eigener Leer-Check noetig.
+                # Beide Werte werden erst in lokale Variablen geparst und
+                # nur GEMEINSAM angehängt -- sonst könnte ein gültiges x
+                # neben einem ungültigen y landen und xs/ys liefen
+                # auseinander.
+                x_wert = float(zeile.get("x"))
+                y_wert = float(zeile.get("y"))
             except (TypeError, ValueError):
                 continue
-    return xs, ys
+            xs.append(x_wert)
+            ys.append(y_wert)
+        if xs:
+            return xs, ys, "profile-csv-xy"
+        # x/y-Spalten vorhanden, aber in jeder Zeile leer -- nicht als
+        # "leer = 0 Punkte" liegen lassen, wenn u_mm/v_mm als Fallback
+        # noch etwas hergeben.
+        if not hat_uv:
+            return xs, ys, "profile-csv-xy"
+
+    xs, ys = [], []
+    for zeile in zeilen:
+        try:
+            x_wert = float(zeile["u_mm"])
+            y_wert = float(zeile["v_mm"])
+        except (TypeError, ValueError):
+            continue
+        xs.append(x_wert)
+        ys.append(y_wert)
+    return xs, ys, "profile-csv-uv"
 
 
 def lies_messreihe(pfad):
     """
     Liest eine Datei und rät das Format an der Endung bzw. am Inhalt.
 
-    Rückgabe: ``(xs, ys, quelle)`` mit ``quelle`` = ``"pos-json"`` oder
-    ``"profile-csv"``.
+    Rückgabe: ``(xs, ys, quelle)`` mit ``quelle`` = ``"pos-json"``,
+    ``"profile-csv-xy"`` oder ``"profile-csv-uv"`` (siehe
+    lies_profile_csv).
     """
     endung = os.path.splitext(pfad)[1].lower()
     if endung == ".csv":
-        xs, ys = lies_profile_csv(pfad)
-        return xs, ys, "profile-csv"
+        return lies_profile_csv(pfad)
     xs, ys = lies_pos_json(pfad)
     if not xs:
         # Endung sagt nichts -- vielleicht doch eine CSV ohne .csv-Endung.
         try:
-            xs, ys = lies_profile_csv(pfad)
-            return xs, ys, "profile-csv"
+            return lies_profile_csv(pfad)
         except (ValueError, UnicodeDecodeError):
             pass
     return xs, ys, "pos-json"
@@ -291,34 +363,70 @@ def _bin_index(wert, kanten):
     return lo
 
 
-def auswerten(messreihen, anzahl_bins=30):
+def filtere_y_bereich(xs, ys, y_min, y_max):
+    """
+    Behält nur Punkte, deren y-Wert in ``[y_min, y_max]`` liegt.
+
+    Rückgabe: ``(xs_gefiltert, ys_gefiltert, entfernt)`` -- ``entfernt``
+    ist die Anzahl der herausgefallenen Punkte, für eine ehrliche Meldung,
+    wie viel vom Rohsignal tatsächlich benutzt wurde (siehe Modul-Docstring
+    "Y-Bereich").
+    """
+    xs_neu, ys_neu = [], []
+    for x, y in zip(xs, ys):
+        if y_min <= y <= y_max:
+            xs_neu.append(x)
+            ys_neu.append(y)
+    return xs_neu, ys_neu, len(xs) - len(xs_neu)
+
+
+def auswerten(messreihen, anzahl_bins=30, y_min=Y_BEREICH_MIN_MM,
+             y_max=Y_BEREICH_MAX_MM):
     """
     Gesamtauswertung über eine oder mehrere Messreihen.
 
-    ``messreihen`` ist eine Liste von ``(name, xs, ys)``.
+    ``messreihen`` ist eine Liste von ``(name, xs, ys)``. ``y_min``/
+    ``y_max`` grenzen den benutzten y-Bereich ein (mm, Default -90..90,
+    siehe Modul-Docstring "Y-Bereich") -- Punkte außerhalb werden VOR der
+    Geradenanpassung verworfen. Das betrifft die rohen y-Werte aus
+    ``messreihen``, nicht die spätere, geraden-bezogene ``abweichung``.
 
-    Eine **gemeinsame** Ausgleichsgerade über alle Punkte (siehe
-    Modul-Docstring) sorgt dafür, dass die Fahrten im selben Bezugssystem
-    liegen und ein Versatz zwischen ihnen sichtbar bleibt.
+    Eine **gemeinsame** Ausgleichsgerade über alle (gefilterten) Punkte
+    (siehe Modul-Docstring) sorgt dafür, dass die Fahrten im selben
+    Bezugssystem liegen und ein Versatz zwischen ihnen sichtbar bleibt.
 
     Rückgabe: dict mit ``fehler``, oder mit den Ergebnissen je Fahrt
-    (``fahrten``), dem gemeinsamen Raster (``bin_mitten``), der
+    (``fahrten``), den komplett aus dem Y-Bereich herausgefallenen Fahrten
+    (``uebersprungen``), dem gemeinsamen Raster (``bin_mitten``), der
     Mittelwertkurve (``mittel``), der Streuung zwischen den Fahrten
     (``streuung``) und den zusammenfassenden Kennzahlen.
     """
-    brauchbar = [(name, xs, ys) for name, xs, ys in messreihen if len(xs) >= 2]
-    if not brauchbar:
+    vorbereitet = []
+    uebersprungen = []
+    for name, xs, ys in messreihen:
+        xs_f, ys_f, entfernt = filtere_y_bereich(xs, ys, y_min, y_max)
+        if len(xs_f) < 2:
+            uebersprungen.append({"name": name, "punkte_roh": len(xs),
+                                  "im_bereich": len(xs_f)})
+            continue
+        vorbereitet.append((name, xs_f, ys_f, len(xs), entfernt))
+
+    if not vorbereitet:
+        if uebersprungen:
+            return {"fehler": f"Keine Messreihe mit mindestens zwei Punkten "
+                              f"im Y-Bereich [{y_min:g}, {y_max:g}] mm "
+                              f"(--y-min/--y-max)."}
         return {"fehler": "Keine Messreihe mit mindestens zwei Punkten."}
 
-    alle_x = [x for _, xs, _ in brauchbar for x in xs]
-    alle_y = [y for _, _, ys in brauchbar for y in ys]
+    alle_x = [x for _, xs, _, _, _ in vorbereitet for x in xs]
+    alle_y = [y for _, _, ys, _, _ in vorbereitet for y in ys]
     fit = passe_gerade_an(alle_x, alle_y)
     if fit is None:
         return {"fehler": "Punkte liegen alle an derselben Stelle -- "
                           "keine Gerade bestimmbar."}
 
     fahrten = []
-    for name, xs, ys in brauchbar:
+    for name, xs, ys, punkte_roh, entfernt in vorbereitet:
         entlang, abweichung = projiziere(xs, ys, fit)
         if len(entlang) < 2:
             continue
@@ -326,6 +434,8 @@ def auswerten(messreihen, anzahl_bins=30):
         fahrten.append({
             "name": name,
             "punkte": len(entlang),
+            "punkte_roh": punkte_roh,
+            "y_bereich_entfernt": entfernt,
             "entlang": entlang,
             "abweichung": abweichung,
             "strecke_mm": max(entlang) - min(entlang),
@@ -401,6 +511,9 @@ def auswerten(messreihen, anzahl_bins=30):
     return {
         "fahrten": fahrten,
         "anzahl_fahrten": len(fahrten),
+        "uebersprungen": uebersprungen,
+        "y_min": y_min,
+        "y_max": y_max,
         "ueberlappung": ueberlappung,
         "bin_mitten": mitten,
         "bin_kanten": kanten,
@@ -431,6 +544,12 @@ def bericht(ergebnis):
 
     zeilen = ["---- Geradheit über die Messreihe ----"]
     zeilen.append(f"  Fahrten              : {ergebnis['anzahl_fahrten']}")
+    zeilen.append(f"  Y-Bereich (benutzt)  : {ergebnis['y_min']:.1f} .. "
+                  f"{ergebnis['y_max']:.1f} mm  (--y-min/--y-max)")
+    for u in ergebnis["uebersprungen"]:
+        zeilen.append(f"    ACHTUNG: {u['name']} übersprungen -- nur "
+                      f"{u['im_bereich']} von {u['punkte_roh']} Punkten "
+                      f"im Y-Bereich.")
     zeilen.append(f"  Winkel der Ausgleichsgeraden gegen +x: "
                   f"{ergebnis['winkel_grad']:+.3f} deg")
     zeilen.append("   (Schiefstellung des Balkens -- herausgerechnet, "
@@ -445,6 +564,10 @@ def bericht(ergebnis):
         zeilen.append(f"    {name:<28} {fahrt['punkte']:>6} "
                       f"{fahrt['strecke_mm']:>8.1f} {fahrt['rms_mm']:>7.4f} "
                       f"{fahrt['max_abs_mm']:>8.4f} {fahrt['versatz_mm']:>+9.4f}")
+        if fahrt["y_bereich_entfernt"]:
+            zeilen.append(f"      ({fahrt['y_bereich_entfernt']} von "
+                          f"{fahrt['punkte_roh']} Punkten außerhalb des "
+                          f"Y-Bereichs entfernt)")
     zeilen.append("    (alle Werte in mm)")
 
     if ergebnis["anzahl_fahrten"] >= 2:
@@ -736,8 +859,9 @@ def main(argv=None):
     ap.add_argument("dateien", nargs="+",
                     help="Eine oder mehrere Messreihen. Empfohlen: "
                          "--pos --pos-json (rohe Sensorwerte). Eine "
-                         "--profile-csv wird auch gelesen, misst aber die "
-                         "Seitenebene statt des rohen Sensors.")
+                         "--profile-csv wird auch gelesen -- bevorzugt "
+                         "deren rohe x/y-Spalten, falls vorhanden, sonst "
+                         "ersatzweise die Seitenebene (u_mm/v_mm).")
     ap.add_argument("--png", default="geradheit.png",
                     help="Dateiname der Grafik (Default geradheit.png)")
     ap.add_argument("--bins", type=int, default=30,
@@ -745,6 +869,12 @@ def main(argv=None):
                          "(Default 30)")
     ap.add_argument("--breite", type=int, default=1200)
     ap.add_argument("--hoehe", type=int, default=700)
+    ap.add_argument("--y-min", type=float, default=Y_BEREICH_MIN_MM,
+                    help=f"Untere Grenze des benutzten y-Bereichs in mm "
+                        f"(Default {Y_BEREICH_MIN_MM:g})")
+    ap.add_argument("--y-max", type=float, default=Y_BEREICH_MAX_MM,
+                    help=f"Obere Grenze des benutzten y-Bereichs in mm "
+                        f"(Default {Y_BEREICH_MAX_MM:g})")
     ap.add_argument("--kein-plot", action="store_true",
                     help="Nur den Textbericht ausgeben, keine PNG schreiben")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
@@ -766,23 +896,30 @@ def main(argv=None):
         if len(xs) < 2:
             print(f"[geradheit] {pfad}: keine verwertbaren Punkte gefunden.")
             continue
-        if quelle == "profile-csv":
-            print(f"[geradheit] {pfad}: Profil-CSV erkannt -- ausgewertet "
-                  f"werden u_mm/v_mm, und das sind SEITENEBENEN-Koordinaten "
+        if quelle == "profile-csv-uv":
+            print(f"[geradheit] {pfad}: Profil-CSV erkannt -- keine rohen "
+                  f"x/y-Spalten gefunden, ausgewertet werden ersatzweise "
+                  f"u_mm/v_mm, und das sind SEITENEBENEN-Koordinaten "
                   f"(Kalibrierung, Düsenversatz und Gierwinkel sind "
-                  f"eingerechnet). Die rohen Sensorwerte stehen inzwischen "
-                  f"als x/y/z in derselben Datei, dieses Werkzeug liest sie "
-                  f"aber nicht. Und: geschrieben wird nur, wenn tatsächlich "
-                  f"Spalten rausgehen -- die Datei ist also KEINE "
-                  f"gleichmäßige Zeitreihe und für Rauschmessung weiterhin "
-                  f"kein Ersatz für --pos --pos-json.")
+                  f"eingerechnet). Und: geschrieben wird nur, wenn "
+                  f"tatsächlich Spalten rausgehen -- die Datei ist also "
+                  f"KEINE gleichmäßige Zeitreihe und für Rauschmessung "
+                  f"weiterhin kein Ersatz für --pos --pos-json.")
+        elif quelle == "profile-csv-xy":
+            print(f"[geradheit] {pfad}: Profil-CSV erkannt -- rohe "
+                  f"Sensorkoordinaten x/y verwendet. Trotzdem: geschrieben "
+                  f"wird nur, wenn tatsächlich Spalten rausgehen -- die "
+                  f"Datei ist also KEINE gleichmäßige Zeitreihe und für "
+                  f"Rauschmessung weiterhin kein Ersatz für "
+                  f"--pos --pos-json.")
         messreihen.append((pfad, xs, ys))
 
     if not messreihen:
         print("[geradheit] Keine auswertbare Datei.")
         return 2
 
-    ergebnis = auswerten(messreihen, anzahl_bins=args.bins)
+    ergebnis = auswerten(messreihen, anzahl_bins=args.bins,
+                         y_min=args.y_min, y_max=args.y_max)
     print(bericht(ergebnis))
 
     if not args.kein_plot and "fehler" not in ergebnis:

@@ -203,6 +203,96 @@ def test_gemeinsame_gerade_macht_einen_versatz_sichtbar():
     assert abs((max(versatz) - min(versatz)) - 0.5) < 0.01, versatz
 
 
+# ===================================================================== Y-Bereich
+def test_filtere_y_bereich_behaelt_nur_werte_im_intervall():
+    xs = [1.0, 2.0, 3.0, 4.0]
+    ys = [-100.0, -5.0, 5.0, 100.0]
+    xs_f, ys_f, entfernt = G.filtere_y_bereich(xs, ys, -90.0, 90.0)
+    assert xs_f == [2.0, 3.0] and ys_f == [-5.0, 5.0]
+    assert entfernt == 2
+
+
+def test_filtere_y_bereich_grenzen_sind_inklusiv():
+    xs_f, ys_f, entfernt = G.filtere_y_bereich([1.0, 2.0], [-90.0, 90.0],
+                                               -90.0, 90.0)
+    assert xs_f == [1.0, 2.0] and entfernt == 0
+
+
+def test_auswerten_filtert_default_y_bereich():
+    # Ohne --y-min/--y-max muessen Punkte weit ausserhalb [-90, 90]
+    # verworfen werden.
+    xs = list(range(20))
+    ys = [0.0] * 10 + [500.0] * 10
+    e = G.auswerten([("f1", xs, ys)])
+    assert e["fahrten"][0]["punkte"] == 10
+    assert e["fahrten"][0]["punkte_roh"] == 20
+    assert e["fahrten"][0]["y_bereich_entfernt"] == 10
+    assert e["y_min"] == -90.0 and e["y_max"] == 90.0
+
+
+def test_auswerten_y_bereich_ist_einstellbar():
+    xs = list(range(20))
+    ys = [0.0] * 10 + [500.0] * 10
+    e = G.auswerten([("f1", xs, ys)], y_min=-1000.0, y_max=1000.0)
+    assert e["fahrten"][0]["punkte"] == 20
+    assert e["fahrten"][0]["y_bereich_entfernt"] == 0
+
+
+def test_auswerten_meldet_fehler_wenn_y_bereich_alles_entfernt():
+    xs = [0.0, 1.0, 2.0]
+    ys = [500.0, 500.0, 500.0]
+    e = G.auswerten([("f1", xs, ys)])
+    assert "fehler" in e
+    assert "Y-Bereich" in e["fehler"]
+
+
+def test_auswerten_meldet_teilweise_ausserhalb_liegende_fahrt_als_uebersprungen():
+    gut = _fahrt(rausch_mm=0.01)
+    schlecht = ([0.0, 1.0, 2.0], [500.0, 500.0, 500.0])
+    e = G.auswerten([("gut", *gut), ("schlecht", *schlecht)])
+    assert e["anzahl_fahrten"] == 1
+    assert len(e["uebersprungen"]) == 1
+    assert e["uebersprungen"][0]["name"] == "schlecht"
+    assert e["uebersprungen"][0]["im_bereich"] == 0
+    assert e["uebersprungen"][0]["punkte_roh"] == 3
+
+
+def test_bericht_zeigt_y_bereich_und_entfernte_punkte_je_fahrt():
+    xs = list(range(20))
+    ys = [0.0] * 15 + [500.0] * 5     # 5 von 20 draussen, Rest bleibt gueltig
+    text = G.bericht(G.auswerten([("f1", xs, ys)]))
+    assert "-90.0" in text and "90.0" in text
+    assert "5 von 20" in text
+
+
+def test_bericht_meldet_uebersprungene_fahrt():
+    gut = _fahrt(rausch_mm=0.01)
+    schlecht = ([0.0, 1.0, 2.0], [500.0, 500.0, 500.0])
+    text = G.bericht(G.auswerten([("gut", *gut), ("schlecht", *schlecht)]))
+    assert "schlecht" in text
+    assert "übersprungen" in text
+
+
+def test_cli_y_min_max_flags_aendern_das_ergebnis():
+    pfad = _schreib("\n".join(
+        json.dumps({"event": "position", "x": float(i), "y": 500.0})
+        for i in range(5)) + "\n")
+    try:
+        # Default-Bereich [-90, 90] -- alle Punkte liegen bei y=500,
+        # also ausserhalb -> keine auswertbare Fahrt.
+        p_default = _cli(pfad, "--kein-plot")
+        assert p_default.returncode == 0, p_default.stderr
+        assert "Keine Messreihe" in p_default.stdout
+
+        # Mit weiterem Bereich funktioniert dieselbe Datei.
+        p_weiter = _cli(pfad, "--kein-plot", "--y-min", "0", "--y-max", "1000")
+        assert p_weiter.returncode == 0, p_weiter.stderr
+        assert "Geradheit über die Messreihe" in p_weiter.stdout
+        assert "Fahrten              : 1" in p_weiter.stdout
+    finally:
+        os.unlink(pfad)
+
+
 def test_auswerten_meldet_fehler_statt_zu_raten():
     assert "fehler" in G.auswerten([])
     assert "fehler" in G.auswerten([("leer", [], [])])
@@ -263,41 +353,138 @@ def test_pos_json_ueberspringt_kaputte_und_fremde_zeilen():
         os.unlink(pfad)
 
 
-def test_profile_csv_liest_u_und_v():
-    pfad = _schreib(
-        "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
-        "0.1,0,0,1.000,2.000,10.00,50.0,0,0,0,1\n"
-        "0.2,0,1,3.000,4.000,10.00,50.0,0,0,0,1\n", endung=".csv")
+def _csv_zeile(werte):
+    """Baut eine CSV-Zeile aus einer Werteliste -- fehlende Felder als
+    ECHT LEERE Strings (nicht als fehlende Spalten am Zeilenende), damit
+    Testdaten dasselbe Format haben wie eine echte --profile-csv (siehe
+    README: "leer statt 0,0,0", wenn kein Tracking-Fix vorlag)."""
+    return ",".join("" if w is None else str(w) for w in werte)
+
+
+def test_profile_csv_bevorzugt_rohe_x_y_wenn_vorhanden():
+    # u_mm/v_mm absichtlich auf einen unmöglichen Wert (999) gesetzt --
+    # kommen die im Ergebnis zurück, würde fälschlich die Seitenebene
+    # statt der rohen Koordinaten gelesen.
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
+    zeilen = [kopf,
+             _csv_zeile([0.1, 0, 0, 999.0, 999.0, 10.0, 50.0,
+                        10.0, 20.0, 0.0, 0, 0, 0, 1]),
+             _csv_zeile([0.2, 0, 1, 999.0, 999.0, 10.0, 50.0,
+                        30.0, 40.0, 0.0, 0, 0, 0, 1])]
+    pfad = _schreib("\n".join(zeilen) + "\n", endung=".csv")
     try:
-        xs, ys = G.lies_profile_csv(pfad)
-        assert xs == [1.0, 3.0] and ys == [2.0, 4.0]
+        xs, ys, quelle = G.lies_profile_csv(pfad)
+        assert xs == [10.0, 30.0] and ys == [20.0, 40.0]
+        assert quelle == "profile-csv-xy"
     finally:
         os.unlink(pfad)
 
 
-def test_profile_csv_weist_line_modus_mit_begruendung_ab():
-    pfad = _schreib("t_s,column,advance_mm,write_latency_ms,speed_mm_s,x,y,z\n"
-                    "0.1,0,0.0,3.1,10.0\n", endung=".csv")
+def test_profile_csv_faellt_auf_u_v_zurueck_wenn_x_y_leer_sind():
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
+    zeilen = [kopf,
+             _csv_zeile([0.1, 0, 0, 1.000, 2.000, 10.0, 50.0,
+                        None, None, None, None, None, None, None]),
+             _csv_zeile([0.2, 0, 1, 3.000, 4.000, 10.0, 50.0,
+                        None, None, None, None, None, None, None])]
+    pfad = _schreib("\n".join(zeilen) + "\n", endung=".csv")
+    try:
+        xs, ys, quelle = G.lies_profile_csv(pfad)
+        assert xs == [1.0, 3.0] and ys == [2.0, 4.0]
+        assert quelle == "profile-csv-uv"
+    finally:
+        os.unlink(pfad)
+
+
+def test_profile_csv_ueberspringt_zeilen_ohne_position():
+    # Roh-x/y vorhanden, aber in einer Zeile leer (kein Tracking-Fix in
+    # diesem Moment) -- muss übersprungen werden, nicht als (0, 0)
+    # gezählt (siehe README: "leer statt 0,0,0").
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
+    zeilen = [kopf,
+             _csv_zeile([0.1, 0, 0, 0.0, 0.0, 10.0, 50.0,
+                        10.0, 20.0, 0.0, 0, 0, 0, 1]),
+             _csv_zeile([0.2, 0, 1, 0.0, 0.0, 10.0, 50.0,
+                        None, None, None, None, None, None, None]),
+             _csv_zeile([0.3, 0, 2, 0.0, 0.0, 10.0, 50.0,
+                        30.0, 40.0, 0.0, 0, 0, 0, 1])]
+    pfad = _schreib("\n".join(zeilen) + "\n", endung=".csv")
+    try:
+        xs, ys, quelle = G.lies_profile_csv(pfad)
+        assert xs == [10.0, 30.0] and ys == [20.0, 40.0]
+    finally:
+        os.unlink(pfad)
+
+
+def test_profile_csv_haelt_xs_und_ys_ausgerichtet_bei_teilkaputter_zeile():
+    # x gueltig, y kaputt (oder umgekehrt) darf NICHT dazu fuehren, dass
+    # xs einen Eintrag mehr hat als ys (oder umgekehrt) -- sonst
+    # verschieben sich alle folgenden Punkte gegeneinander.
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
+    zeilen = [kopf,
+             _csv_zeile([0.1, 0, 0, 0.0, 0.0, 10.0, 50.0,
+                        10.0, 20.0, 0.0, 0, 0, 0, 1]),
+             _csv_zeile([0.2, 0, 1, 0.0, 0.0, 10.0, 50.0,
+                        "abc", 40.0, 0.0, 0, 0, 0, 1]),   # x kaputt
+             _csv_zeile([0.3, 0, 2, 0.0, 0.0, 10.0, 50.0,
+                        50.0, "abc", 0.0, 0, 0, 0, 1]),   # y kaputt
+             _csv_zeile([0.4, 0, 3, 0.0, 0.0, 10.0, 50.0,
+                        70.0, 80.0, 0.0, 0, 0, 0, 1])]
+    pfad = _schreib("\n".join(zeilen) + "\n", endung=".csv")
+    try:
+        xs, ys, quelle = G.lies_profile_csv(pfad)
+        assert len(xs) == len(ys)
+        assert xs == [10.0, 70.0] and ys == [20.0, 80.0]
+    finally:
+        os.unlink(pfad)
+
+
+def test_profile_csv_liest_auch_line_modus_ueber_x_y():
+    # Line-Modus hat kein u_mm/v_mm (advance_mm ist nur 1-D) -- war vor
+    # der x/y/z-Erweiterung von --profile-csv nicht auswertbar. Jetzt
+    # reicht x/y, dieselben Spalten wie im Seiten-Modus.
+    kopf = "t_s,column,advance_mm,write_latency_ms,speed_mm_s,x,y,z"
+    zeilen = [kopf,
+             _csv_zeile([0.1, 0, 0.0, 3.1, 10.0, 10.0, 20.0, 0.0]),
+             _csv_zeile([0.2, 1, 0.087, 3.0, 10.0, 30.0, 40.0, 0.0])]
+    pfad = _schreib("\n".join(zeilen) + "\n", endung=".csv")
+    try:
+        xs, ys, quelle = G.lies_profile_csv(pfad)
+        assert xs == [10.0, 30.0] and ys == [20.0, 40.0]
+        assert quelle == "profile-csv-xy"
+    finally:
+        os.unlink(pfad)
+
+
+def test_profile_csv_ohne_positionsspalten_ist_ein_fehler():
+    pfad = _schreib("t_s,irgendwas\n0.1,42\n", endung=".csv")
     try:
         G.lies_profile_csv(pfad)
     except ValueError as fehler:
-        assert "u_mm/v_mm" in str(fehler)
+        assert "x/y" in str(fehler) and "u_mm/v_mm" in str(fehler)
         return
     finally:
         os.unlink(pfad)
-    raise AssertionError("erwartet: ValueError für eine Line-Modus-CSV")
+    raise AssertionError("erwartet: ValueError ohne jede Positionsspalte")
 
 
 def test_lies_messreihe_erkennt_die_quelle():
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
     j = _schreib('{"event":"position","x":1.0,"y":2.0}\n')
-    c = _schreib("t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
-                 "0.1,0,0,1.0,2.0,10.0,50.0,0,0,0,1\n", endung=".csv")
+    c_xy = _schreib(kopf + "\n" + _csv_zeile(
+        [0.1, 0, 0, 1.0, 2.0, 10.0, 50.0, 1.0, 2.0, 0, 0, 0, 0, 1]) + "\n",
+        endung=".csv")
+    c_uv = _schreib(kopf + "\n" + _csv_zeile(
+        [0.1, 0, 0, 1.0, 2.0, 10.0, 50.0, None, None, None, None, None,
+         None, None]) + "\n", endung=".csv")
     try:
         assert G.lies_messreihe(j)[2] == "pos-json"
-        assert G.lies_messreihe(c)[2] == "profile-csv"
+        assert G.lies_messreihe(c_xy)[2] == "profile-csv-xy"
+        assert G.lies_messreihe(c_uv)[2] == "profile-csv-uv"
     finally:
         os.unlink(j)
-        os.unlink(c)
+        os.unlink(c_xy)
+        os.unlink(c_uv)
 
 
 # ==================================================================== Grafik
@@ -359,14 +546,33 @@ def test_cli_laeuft_eigenstaendig_und_schreibt_das_png():
     assert os.path.exists(ziel) and os.path.getsize(ziel) > 1000
 
 
-def test_cli_warnt_bei_einer_profile_csv():
-    pfad = _schreib("t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw\n"
-                    + "".join(f"0.{i},0,0,{i}.0,0.5,10.0,50.0,0,0,0,1\n"
-                              for i in range(1, 20)), endung=".csv")
+def test_cli_warnt_bei_einer_profile_csv_ohne_x_y():
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
+    zeilen = [kopf] + [
+        _csv_zeile([f"0.{i}", 0, 0, f"{i}.0", 0.5, 10.0, 50.0,
+                   None, None, None, None, None, None, None])
+        for i in range(1, 20)]
+    pfad = _schreib("\n".join(zeilen) + "\n", endung=".csv")
     try:
         p = _cli(pfad, "--kein-plot")
         assert p.returncode == 0, p.stderr
         assert "SEITENEBENEN-Koordinaten" in p.stdout
+    finally:
+        os.unlink(pfad)
+
+
+def test_cli_verwendet_x_y_ohne_seitenebenen_warnung():
+    kopf = "t_s,row,col,u_mm,v_mm,speed_mm_s,cols_per_s,x,y,z,qx,qy,qz,qw"
+    zeilen = [kopf] + [
+        _csv_zeile([f"0.{i}", 0, 0, 999.0, 999.0, 10.0, 50.0,
+                   float(i), 0.5, 0, 0, 0, 0, 1])
+        for i in range(1, 20)]
+    pfad = _schreib("\n".join(zeilen) + "\n", endung=".csv")
+    try:
+        p = _cli(pfad, "--kein-plot")
+        assert p.returncode == 0, p.stderr
+        assert "SEITENEBENEN-Koordinaten" not in p.stdout
+        assert "rohe Sensorkoordinaten x/y verwendet" in p.stdout
     finally:
         os.unlink(pfad)
 
