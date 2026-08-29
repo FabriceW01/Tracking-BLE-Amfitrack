@@ -67,6 +67,14 @@ nicht je Fahrt eine eigene. Sonst bekäme jede Fahrt ihr eigenes Bezugssystem
 und die Fahrten wären untereinander nicht mehr vergleichbar — ein Versatz
 zwischen zwei Fahrten würde wegdefiniert statt sichtbar zu werden.
 
+Die **Position entlang der Geraden** (0 mm = Fahrtbeginn im Bericht/Plot) wird
+NICHT auf den gewichteten Mittelwert der Punkte gelegt (der wandert bei
+ungleichmäßiger Abtastung), sondern -- sofern die Fahrt überwiegend entlang
+der y-Achse verläuft -- auf die Stelle, an der die absolute y-Koordinate 0
+ist. Bei symmetrischem ``--y-min``/``--y-max`` (Default -90/90) liegt der
+benutzte Bereich damit automatisch symmetrisch um 0 im Plot, siehe
+``_verankere_bei_y_null``.
+
 Der Balken darf zwischen den Fahrten **nicht bewegt** werden: die absoluten
 Sensorkoordinaten sind der gemeinsame Bezug, über den die Fahrten überhaupt
 erst übereinandergelegt werden können.
@@ -380,6 +388,50 @@ def filtere_y_bereich(xs, ys, y_min, y_max):
     return xs_neu, ys_neu, len(xs) - len(xs_neu)
 
 
+# Unterhalb dieser Steigung (Betrag von ry, der y-Komponente der
+# Fahrtrichtung) gilt eine Fahrt als praktisch waagerecht -- dort gibt es
+# keine stabile Kreuzung mit absolutem y=0 (bei ry=0 exakt sogar gar
+# keine), und _verankere_bei_y_null lässt den ursprünglichen, datenbasierten
+# Bezugspunkt unangetastet.
+_MINDEST_RY_FUER_VERANKERUNG = 1e-6
+
+
+def _verankere_bei_y_null(fit):
+    """
+    Verschiebt ``fit["mittelpunkt"]`` entlang der (unveränderten) Geraden
+    zu der Stelle, an der die ABSOLUTE y-Koordinate 0 ist.
+
+    ``entlang`` (siehe projiziere()) ist als Abstand vom Mittelpunkt der
+    Geraden definiert -- vor dieser Verankerung war das der GEWICHTETE
+    MITTELWERT aller einbezogenen Punkte. Bei ungleichmäßiger Abtastung
+    entlang der Strecke (z.B. wechselnde Handgeschwindigkeit) liegt dieser
+    Mittelwert nicht zwangsläufig in der geometrischen Mitte des
+    Y-Bereichs -- genau das beobachtete Symptom (Plot-Mittelpunkt bei -3
+    mm statt 0, obwohl --y-min/--y-max symmetrisch bei -90/90 lagen).
+    Mit dieser Verankerung bedeutet ``entlang == 0`` stattdessen immer
+    "absolutes y == 0", unabhängig von der Punktedichte -- bei einer
+    überwiegend y-achsigen Fahrt liegt der --y-min/--y-max-Bereich damit
+    automatisch symmetrisch um 0 im Plot, ohne die Achsengrenzen separat
+    festzunageln.
+
+    Geometrisch unbedenklich: der neue Mittelpunkt liegt per Konstruktion
+    auf derselben Geraden (nur um ein Vielfaches von ``richtung``
+    verschoben), richtung/normale bleiben unverändert. ``abweichung``
+    (der Normalenanteil) ist davon nachweislich unberührt, weil richtung
+    und normale zueinander orthogonal sind -- nur ``entlang`` verschiebt
+    sich um eine Konstante. RMS, Spanne, Überlappung zwischen Fahrten
+    usw. bleiben also exakt gleich; nur der Nullpunkt der Positionsangabe
+    ändert sich.
+    """
+    (mx, my) = fit["mittelpunkt"]
+    (rx, ry) = fit["richtung"]
+    if abs(ry) < _MINDEST_RY_FUER_VERANKERUNG:
+        return fit
+    t0 = -my / ry
+    neuer_mittelpunkt = (mx + t0 * rx, my + t0 * ry)
+    return {**fit, "mittelpunkt": neuer_mittelpunkt}
+
+
 def auswerten(messreihen, anzahl_bins=30, y_min=Y_BEREICH_MIN_MM,
              y_max=Y_BEREICH_MAX_MM):
     """
@@ -424,6 +476,7 @@ def auswerten(messreihen, anzahl_bins=30, y_min=Y_BEREICH_MIN_MM,
     if fit is None:
         return {"fehler": "Punkte liegen alle an derselben Stelle -- "
                           "keine Gerade bestimmbar."}
+    fit = _verankere_bei_y_null(fit)
 
     fahrten = []
     for name, xs, ys, punkte_roh, entfernt in vorbereitet:

@@ -99,6 +99,88 @@ def test_abweichung_behaelt_das_vorzeichen():
     assert min(abweichung) < 0 < max(abweichung)
 
 
+# ====================================================== Verankerung bei y=0
+def test_verankere_bei_y_null_schiebt_mittelpunkt_auf_die_gerade():
+    # Rein vertikale Richtung: der neue Mittelpunkt muss exakt bei y=0
+    # landen, x bleibt unveraendert (die Gerade ist ja x=5 konstant).
+    fit = {"mittelpunkt": (5.0, 10.0), "richtung": (0.0, 1.0),
+          "normale": (-1.0, 0.0)}
+    neu = G._verankere_bei_y_null(fit)
+    assert abs(neu["mittelpunkt"][0] - 5.0) < 1e-9
+    assert abs(neu["mittelpunkt"][1] - 0.0) < 1e-9
+    assert neu["richtung"] == fit["richtung"]
+    assert neu["normale"] == fit["normale"]
+
+
+def test_verankere_bei_y_null_mit_schraeger_richtung():
+    # Von Hand nachgerechnet: richtung=(0.6,0.8) (Einheitsvektor,
+    # 0.36+0.64=1), mittelpunkt=(2,4). t0 = -4/0.8 = -5.
+    # neuer Punkt = (2 + (-5)*0.6, 4 + (-5)*0.8) = (-1, 0).
+    fit = {"mittelpunkt": (2.0, 4.0), "richtung": (0.6, 0.8),
+          "normale": (-0.8, 0.6)}
+    neu = G._verankere_bei_y_null(fit)
+    assert abs(neu["mittelpunkt"][0] - (-1.0)) < 1e-9
+    assert abs(neu["mittelpunkt"][1] - 0.0) < 1e-9
+
+
+def test_verankere_bei_y_null_laesst_waagerechte_fahrt_unveraendert():
+    # ry praktisch 0 -- keine stabile y=0-Kreuzung, der urspruengliche
+    # (datenbasierte) Bezugspunkt bleibt stehen.
+    fit = {"mittelpunkt": (5.0, 10.0), "richtung": (1.0, 0.0),
+          "normale": (0.0, 1.0)}
+    neu = G._verankere_bei_y_null(fit)
+    assert neu["mittelpunkt"] == fit["mittelpunkt"]
+
+
+def test_auswerten_verankert_entlang_bei_absolutem_y_null_fuer_vertikale_fahrt():
+    # Rein vertikale Fahrt (xs konstant): richtung ist exakt (0, 1), also
+    # muss NACH der Verankerung entlang == y sein, Punkt fuer Punkt --
+    # nicht nur im Mittel. Weiter Y-Bereich, damit hier nichts gefiltert
+    # wird.
+    xs = [3.0] * 50
+    ys = [10.0 + s * 0.5 for s in range(50)]
+    e = G.auswerten([("f1", xs, ys)], y_min=-1000.0, y_max=1000.0)
+    entlang = e["fahrten"][0]["entlang"]
+    for entlang_wert, y_wert in zip(entlang, ys):
+        assert abs(entlang_wert - y_wert) < 1e-9
+
+
+def test_dichte_verzerrt_den_gewichteten_mittelwert_aber_nicht_die_verankerung():
+    # Zeigt das gemeldete Symptom ursaechlich: bei ungleichmaessiger
+    # Punktedichte entlang der Fahrt (hier: duenn von -90 bis -45, dicht
+    # von -40 bis 80) liegt der schlicht gemittelte y-Wert -- die vor
+    # dieser Änderung als Bezugspunkt diente -- spuerbar abseits von 0.
+    # Die Verankerung ignoriert diese Dichte und haengt trotzdem exakt
+    # bei y=0.
+    xs = [3.0] * 200
+    ys = [-90.0 + i * (45.0 / 40) for i in range(40)]          # duenn
+    ys += [-40.0 + i * (120.0 / 160) for i in range(160)]      # dicht
+    mittelwert_roh = sum(ys) / len(ys)
+    assert abs(mittelwert_roh) > 1.0, mittelwert_roh   # die alte Bezugsgroesse waere spuerbar daneben
+
+    e = G.auswerten([("f1", xs, ys)], y_min=-1000.0, y_max=1000.0)
+    entlang = e["fahrten"][0]["entlang"]
+    for entlang_wert, y_wert in zip(entlang, ys):
+        assert abs(entlang_wert - y_wert) < 1e-9
+
+
+def test_verankerung_aendert_abweichung_und_spannen_nicht():
+    # Dieselbe Form, einmal um y verschoben -- Winkel/Bogen/Rauschen
+    # muessen komplett unveraendert bleiben (siehe Docstring von
+    # _verankere_bei_y_null: richtung/normale sind orthogonal, die
+    # Verschiebung wirkt nur auf "entlang").
+    a = _fahrt(bogen_mm=0.10, rausch_mm=0.02, seed=1)
+    b_xs, b_ys = _fahrt(bogen_mm=0.10, rausch_mm=0.02, seed=1)
+    b = (b_xs, [y + 500.0 for y in b_ys])
+    ea = G.auswerten([("a", *a)], y_min=-1e6, y_max=1e6)
+    eb = G.auswerten([("b", *b)], y_min=-1e6, y_max=1e6)
+    fa, fb = ea["fahrten"][0], eb["fahrten"][0]
+    assert abs(fa["rms_mm"] - fb["rms_mm"]) < 1e-9
+    assert abs(fa["spanne_mm"] - fb["spanne_mm"]) < 1e-9
+    assert abs(fa["strecke_mm"] - fb["strecke_mm"]) < 1e-9
+    assert abs(fa["max_abs_mm"] - fb["max_abs_mm"]) < 1e-9
+
+
 # ================================================================= Binning
 def test_binne_mittelt_je_abschnitt():
     kanten = [0.0, 10.0, 20.0]
