@@ -81,7 +81,7 @@
   <span class="pill"><span id="d-sensor" class="dot off"></span>Sensor</span>
   <span class="pill"><span id="d-action" class="dot off"></span>Aktion</span>
   <span class="spacer"></span>
-  <a href="/">← Steuerung</a>
+  <a href="/" id="back-link">← Steuerung</a>
 </header>
 
 <main>
@@ -223,6 +223,32 @@ function connect(){
   };
 }
 connect();
+
+/* -------------------------------------------------------- Zurück-Button
+   Diese Seite wird von der Steuerseite immer per target="_blank" in einem
+   NEUEN Tab geöffnet (siehe index.html) -- der ursprüngliche Tab mit der
+   Steuerseite bleibt dabei unverändert im Hintergrund offen, samt allem,
+   was dort eingestellt war. Ein normaler href="/"-Link würde stattdessen
+   DIESEN Tab auf "/" umlenken: das lädt eine FRISCHE Steuerseite mit
+   Standardeinstellungen -- sieht für den Nutzer wie ein zweiter, neuer
+   Tab mit verlorenen Einstellungen aus, obwohl der echte Original-Tab die
+   ganze Zeit unangetastet daneben lag. Schließt man den Druckansicht-Tab
+   stattdessen einfach, landet man automatisch wieder auf dem
+   Original-Tab.
+
+   window.close() darf ein Tab schließen, den ein Skript geöffnet hat --
+   das gilt für einen per target="_blank" angeklickten Link genauso wie
+   für einen echten window.open()-Aufruf, unabhängig von rel="noopener"
+   (das nullt nur window.opener, nicht die "von einem Skript geöffnet"-
+   Markierung). Verweigert ein Browser das trotzdem (z.B. weil der Tab
+   zwischenzeitlich woanders hin navigiert wurde), bleibt window.close()
+   wirkungslos, statt einen Fehler zu werfen -- deshalb der Fallback auf
+   die alte Navigation, damit der Button nie komplett tot wirkt. */
+$("back-link").addEventListener("click", ev => {
+  ev.preventDefault();
+  window.close();
+  setTimeout(() => { location.href = "/"; }, 300);
+});
 </script>
 </body>
 </html>
