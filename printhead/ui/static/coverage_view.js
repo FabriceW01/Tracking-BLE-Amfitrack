@@ -20,6 +20,12 @@
  *   #cov-wrap   -- .imgwrap-Container, der das Canvas-Paar aufnimmt
  *   #cov-note   -- Textzeile für Warnungen ("unvollständig", ...)
  * covStart() baut #cov/#cov-ov/#cov-stack selbst hinein.
+ *
+ * covSpeedClass() liefert nur die Ampel-FARBE ("off"/"good"/"warn"/"bad")
+ * für die Geschwindigkeit -- das Anwenden auf #p-spd (Klasse setzen,
+ * zurücksetzen bei Stillstand/Verbindungsabbruch) macht jede Seite selbst
+ * in ihrem eigenen setPos(), weil dort ohnehin schon jedes Positionsfeld
+ * einzeln gesetzt wird.
  */
 
 /* Eine Canvas-Zelle = ein Pixel des Zielbilds, dieselbe Konvention wie
@@ -37,6 +43,32 @@ let covQueue = [], covPending = false;
    controller._coverage_event. */
 let covOvCtx = null, covBar = null;
 
+/* Ampel-Schwellen fuer die Geschwindigkeitsanzeige ("v mm/s" im
+   Positionspanel beider Seiten): kommen mit jedem coverage_start vom
+   Server statt hier fest verdrahtet zu sein. Nur der laufende Server
+   kennt --mm-per-column/--dpi/--poll-hz/--speed-warning-mm-s DIESES
+   Laufs -- siehe controller.py's DEFAULT_SPEED_WARNING_MM_S und die
+   spalten_grenze-Rechnung in _print_freehand_pass. Eine hier fest
+   codierte Kopie dieser Zahlen wuerde beim naechsten abweichenden Lauf
+   still falsch, genau das Problem, das schon bei den Duesenleisten-
+   Endpunkten (siehe controller._coverage_event) vermieden wurde. null vor
+   dem ersten Durchgang: covSpeedClass() zeigt dann bewusst keine Farbe. */
+let covWarnMmS = null, covStopMmS = null;
+
+/* "off": kein Durchgang aktiv oder Schwellen noch unbekannt -- neutral,
+   keine Warnung ohne Grundlage. "good"/"warn"/"bad" folgen den beiden
+   Schwellen im Ampel-Prinzip: unterhalb der Warnschwelle gruen, ab dort
+   bis zur Abriss-Kante gelb (Warnung, aber noch keine bekannte
+   Spaltenluecke), ab der Abriss-Kante rot (Spalten werden nachweislich
+   uebersprungen, siehe controller.py). */
+function covSpeedClass(speedMmS){
+  if (speedMmS === null || speedMmS === undefined
+      || covWarnMmS === null || covStopMmS === null) return "off";
+  if (speedMmS >= covStopMmS) return "bad";
+  if (speedMmS >= covWarnMmS) return "warn";
+  return "good";
+}
+
 function covNote(text, warn){
   const el = document.getElementById("cov-note");
   if (!el) return;
@@ -44,7 +76,9 @@ function covNote(text, warn){
   el.className = warn ? "warn" : "";
 }
 
-function covStart(width, height){
+function covStart(width, height, warnMmS, stopMmS){
+  covWarnMmS = (warnMmS === undefined) ? null : warnMmS;
+  covStopMmS = (stopMmS === undefined) ? null : stopMmS;
   const wrap = document.getElementById("cov-wrap");
   covScale = Math.min(1, COV_MAX_PX / width, COV_MAX_PX / height);
   let cv = document.getElementById("cov");

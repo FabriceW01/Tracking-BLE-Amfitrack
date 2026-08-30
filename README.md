@@ -990,6 +990,19 @@ Warning Characteristic", im Firmware-Repo `Printhead_Original_V2`, Branch
 fehl — das wird abgefangen und geloggt, bricht den Druckvorgang aber nicht
 ab (siehe oben).
 
+**Dieselbe Warnung auch als Ampel im Browser:** Sowohl die Steuerseite als
+auch `/view` färben „v mm/s" im Positionspanel nach dem Ampel-Prinzip ein
+— grün unterhalb von `--speed-warning-mm-s`, gelb ab dort (derselbe
+Sicherheitsabstand, der auch die Firmware-LED ansteuert), rot ab der
+realen Abriss-Kante `--mm-per-column × --poll-hz`, ab der Spalten
+nachweislich übersprungen werden. Beide Zahlen kommen mit jedem
+`coverage_start` vom Server (`speed_warn_mm_s`/`speed_stop_mm_s`) statt im
+Browser fest codiert zu sein — ein anderes `--dpi`/`--mm-per-column`,
+`--poll-hz` oder `--speed-warning-mm-s` verschiebt die Ampel also
+automatisch mit, ohne eine zweite, driftende Kopie dieser Einstellungen im
+JavaScript. Ohne Firmware-Kopplung nutzbar: die Browser-Ampel hängt nicht
+an der BLE-Charakteristik oben, nur an denselben Zahlen.
+
 ### Düsengruppierung: `--nozzle-group`
 
 Standardmäßig wird jede der 152 Düsen einzeln angesteuert (`--nozzle-group 1`,
