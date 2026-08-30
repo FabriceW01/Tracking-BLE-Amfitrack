@@ -893,9 +893,13 @@ class PrintController:
 
         ``self.progress_json``, if set, switches stdout from the plain-text
         status lines below to NDJSON progress events -- one ``coverage_start``
-        up front, then ``coverage`` events at ``self.progress_hz`` (current
-        ``u``/``v``/``row``/``col`` plus every cell inked since the previous
-        event -- throttled, NOT one per sample, see
+        up front (also carrying ``speed_warn_mm_s``/``speed_stop_mm_s``, this
+        run's own copies of ``self.speed_warning_mm_s`` and the
+        ``mm_per_column * poll_hz`` column-skipping cliff, so the browser can
+        drive a live speed traffic light without a second, driftable copy of
+        those settings), then ``coverage`` events at ``self.progress_hz``
+        (current ``u``/``v``/``row``/``col`` plus every cell inked since the
+        previous event -- throttled, NOT one per sample, see
         ``_COVERAGE_EVENT_INTERVAL_S``; a final flush in the ``finally`` block
         carries the tail so no cell is ever dropped), and it suppresses
         the plain-text lines this would otherwise interleave with (mirrors
@@ -971,17 +975,6 @@ class PrintController:
                                     batch_cols=getattr(ble, "batch_cols", 1))
             profiler.start()
 
-        if pj:
-            print(json.dumps({"event": "coverage_start", "width": self.width,
-                              "height": self.height}), flush=True)
-        else:
-            dichte = (self.drops_per_pixel / t.mm_per_column
-                      if t.mm_per_column else 0.0)
-            print(f"Printing freehand: {self.width} columns x {self.height} rows, "
-                  f"{self.drops_per_pixel:g} drops/pixel "
-                  f"({dichte:.1f} drops/mm at {t.mm_per_column:.3f} mm/column). "
-                  f"Move the cart over the calibrated page.")
-
         # The old dwell model needed a quantization-cliff guard here:
         # dose_hold_s had to stay below the poll interval or coverage
         # collapsed off a cliff. Counting drops removes that failure mode --
@@ -991,11 +984,35 @@ class PrintController:
         # mm_per_column * poll_hz whole columns start being skipped (see
         # DEFAULT_SPEED_WARNING_MM_S for the measured shape of that edge).
         #
-        # The check is therefore the same idea against a different pair of
+        # Computed once, up front, because it now feeds TWO consumers: the
+        # plain-text startup warning below (unchanged), and -- moved ahead
+        # of it for this -- the browser's live speed traffic light, sent
+        # once as part of coverage_start. The web UI cannot compute this
+        # cliff itself without a second copy of mm_per_column/poll_hz (which
+        # vary with --dpi/--poll-hz and would silently drift from the real
+        # value the next time either is overridden); sending the number
+        # this run actually used keeps ONE source of truth, same reasoning
+        # as the server-side `bar` endpoints in _coverage_event above.
+        spalten_grenze = t.mm_per_column * t.poll_hz
+
+        if pj:
+            print(json.dumps({"event": "coverage_start", "width": self.width,
+                              "height": self.height,
+                              "speed_warn_mm_s": round(self.speed_warning_mm_s, 2),
+                              "speed_stop_mm_s": round(spalten_grenze, 2)}),
+                  flush=True)
+        else:
+            dichte = (self.drops_per_pixel / t.mm_per_column
+                      if t.mm_per_column else 0.0)
+            print(f"Printing freehand: {self.width} columns x {self.height} rows, "
+                  f"{self.drops_per_pixel:g} drops/pixel "
+                  f"({dichte:.1f} drops/mm at {t.mm_per_column:.3f} mm/column). "
+                  f"Move the cart over the calibrated page.")
+
+        # The check below is the same idea against a different pair of
         # settings: warn when the configured speed warning sits at or above
         # the speed at which columns actually start dropping out, because
         # then the warning can no longer arrive before the damage does.
-        spalten_grenze = t.mm_per_column * t.poll_hz
         if not pj and self.speed_warning_mm_s >= spalten_grenze:
             print(f"[warn] --poll-hz {t.poll_hz:.0f} samples only "
                   f"{spalten_grenze:.1f} mm/s worth of columns "

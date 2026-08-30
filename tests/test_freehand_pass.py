@@ -509,7 +509,8 @@ def _ndjson_events(output: str):
 
 def test_progress_json_emits_start_sample_and_done_events():
     ink = np.ones((30, 5), dtype=bool)
-    ctrl = _controller(ink, timeout_s=5.0, progress_json=True)
+    poll_hz = 500.0
+    ctrl = _controller(ink, timeout_s=5.0, progress_json=True, poll_hz=poll_hz)
     tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=12))
 
     out = io.StringIO()
@@ -517,7 +518,14 @@ def test_progress_json_emits_start_sample_and_done_events():
         asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
     events = _ndjson_events(out.getvalue())
 
-    assert events[0] == {"event": "coverage_start", "width": 5, "height": 30}
+    # speed_warn_mm_s/speed_stop_mm_s: the same two numbers the plain-text
+    # startup warning below is built from (self.speed_warning_mm_s and
+    # mm_per_column * poll_hz) -- see test_freehand_pass_warns_when_the_
+    # poll_rate_cannot_reach_the_speed_warning for that check on the other
+    # branch of the same `if pj` split. _controller's mm_per_column is 1.0.
+    assert events[0] == {"event": "coverage_start", "width": 5, "height": 30,
+                         "speed_warn_mm_s": DEFAULT_SPEED_WARNING_MM_S,
+                         "speed_stop_mm_s": 1.0 * poll_hz}
     samples = [e for e in events if e.get("event") == "coverage"]
     assert samples, "expected at least one coverage sample event"
     assert {"u", "v", "row", "col", "new_cells"} <= samples[0].keys()
@@ -526,6 +534,39 @@ def test_progress_json_emits_start_sample_and_done_events():
     assert done["event"] == "coverage_done"
     assert done["reason"] == "complete"
     assert done["covered"] == done["total"] == 150
+
+
+def test_progress_json_speed_thresholds_track_this_runs_own_settings():
+    """Guards against the one failure mode a hardcoded browser-side copy of
+    these two numbers would have: they must come out DIFFERENT when the run
+    itself is configured differently, not just present. speed_warn_mm_s
+    follows --speed-warning-mm-s directly; speed_stop_mm_s is mm_per_column
+    * poll_hz (_controller fixes mm_per_column at 1.0), so varying poll_hz
+    alone must move it by the same factor."""
+    ink = np.ones((10, 5), dtype=bool)
+
+    def coverage_start_of(poll_hz, speed_warning_mm_s):
+        ctrl = _controller(ink, timeout_s=2.0, progress_json=True,
+                           poll_hz=poll_hz, speed_warning_mm_s=speed_warning_mm_s)
+        tracker = ScriptedTracker(_sweep_positions(n_cols=5, samples_per_col=4))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            asyncio.run(ctrl._print_freehand_pass(_NullPrinthead(), tracker))
+        return _ndjson_events(out.getvalue())[0]
+
+    default_run = coverage_start_of(poll_hz=500.0, speed_warning_mm_s=DEFAULT_SPEED_WARNING_MM_S)
+    custom_run = coverage_start_of(poll_hz=200.0, speed_warning_mm_s=30.0)
+
+    assert default_run["speed_warn_mm_s"] == DEFAULT_SPEED_WARNING_MM_S
+    assert default_run["speed_stop_mm_s"] == 500.0            # 1.0 mm_per_column * 500 poll_hz
+
+    assert custom_run["speed_warn_mm_s"] == 30.0
+    assert custom_run["speed_stop_mm_s"] == 200.0              # 1.0 mm_per_column * 200 poll_hz
+
+    # The point of the whole feature: a run with different settings must
+    # not silently report the OTHER run's thresholds.
+    assert custom_run["speed_warn_mm_s"] != default_run["speed_warn_mm_s"]
+    assert custom_run["speed_stop_mm_s"] != default_run["speed_stop_mm_s"]
 
 
 def test_progress_json_reports_newly_covered_cells():

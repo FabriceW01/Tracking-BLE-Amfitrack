@@ -71,6 +71,13 @@
   .pos .k{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
   .pos .v{font:600 15px/1.3 var(--mono);margin-top:2px}
   .pos .v.stale{color:#5c6672}
+  /* Ampel fuer "v mm/s" -- nach .stale, damit ein veraltetes Feld immer
+     grau gewinnt, nicht die zuletzt bekannte Farbe. Ausserdem wird
+     speed-* beim Veralten explizit entfernt (siehe setPos/staleTimer
+     unten), das hier ist nur die zweite Absicherung. */
+  .pos .v.speed-good{color:var(--ok)}
+  .pos .v.speed-warn{color:var(--warn)}
+  .pos .v.speed-bad{color:var(--bad)}
 </style>
 </head>
 <body>
@@ -153,6 +160,12 @@ function setPos(o, quelle){
   set("p-row", row !== undefined ? row : "–");
   set("p-yaw", F(o.yaw_deg, 2));
   set("p-spd", o.speed_mm_s === undefined ? "–" : F(o.speed_mm_s, 1));
+  /* Ampel: covSpeedClass() kennt die Schwellen dieses Durchgangs (kommen
+     mit coverage_start, siehe coverage_view.js) und liefert "off" ohne
+     Durchgang/Schwellen -- dann traegt p-spd keine speed-*-Klasse. */
+  const spdKlasse = covSpeedClass(o.speed_mm_s);
+  $("p-spd").classList.remove("speed-good", "speed-warn", "speed-bad");
+  if (spdKlasse !== "off") $("p-spd").classList.add("speed-" + spdKlasse);
   set("p-src", quelle);
 
   if (o.covered !== undefined && o.total){
@@ -166,6 +179,11 @@ function setPos(o, quelle){
   clearTimeout(staleTimer);
   staleTimer = setTimeout(() => {
     document.querySelectorAll(".pos .v").forEach(e => e.classList.add("stale"));
+    /* Ampel-Farbe darf ein veraltetes Feld nicht ueberleben -- sonst
+       zeigte "v mm/s" nach Verbindungsabbruch oder Durchgangsende
+       weiterhin "zu schnell" (rot), obwohl gar keine aktuelle Messung
+       mehr dahintersteht. */
+    $("p-spd").classList.remove("speed-good", "speed-warn", "speed-bad");
     $("vw-pct").classList.add("stale");
     $("p-src").textContent = "veraltet";
   }, 2000);
@@ -199,7 +217,7 @@ function connect(){
     if (m.type === "position") setPos(m, "Sensor");
     else if (m.type === "coverage_event"){
       if (m.event === "coverage_start"){
-        covStart(m.width, m.height);
+        covStart(m.width, m.height, m.speed_warn_mm_s, m.speed_stop_mm_s);
         if (m.replay){
           covNote("Ansicht während eines laufenden Durchgangs geöffnet — "
                   + "vorher gedruckte Zellen fehlen auf diesem Bild; die "

@@ -220,7 +220,7 @@ def test_ui_zeichnet_die_zellen_auch_wirklich():
     # Wörter: ein Kommentar, der "new_cells" erwähnt, erfüllt eine
     # Vorkommensprüfung auch dann noch, wenn die Verdrahtung entfernt wurde
     # (genau so ist diese Prüfung beim Mutationstest zuerst durchgerutscht).
-    for aufruf in ("covStart(m.width, m.height)",
+    for aufruf in ("covStart(m.width, m.height, m.speed_warn_mm_s, m.speed_stop_mm_s)",
                    "covCells(m.new_cells)",
                    "/api/preview.png"):
         assert aufruf in quelle, f"index.html ruft {aufruf!r} nicht auf"
@@ -263,12 +263,92 @@ def test_coverage_view_js_zeichnet_die_zellen_und_die_marke():
     assert "clearRect" in quelle, "Overlay wird nie geleert"
 
 
+# ========================================== Geschwindigkeits-Ampel (v mm/s)
+def test_coverage_view_js_ampel_schwellen_und_reihenfolge():
+    """covSpeedClass() ist eine reine Funktion, aber ohne Browser/Node hier
+    nicht ausfuehrbar (siehe Datei-Docstring: "kein Browser, keine
+    Hardware") -- deshalb auf die genaue Formulierung der Vergleiche
+    geprueft statt nur auf ihr Vorkommen. Wichtig ist dabei die
+    REIHENFOLGE: die bad-Pruefung MUSS vor der warn-Pruefung stehen, sonst
+    wuerde covStopMmS nie erreicht (eine Geschwindigkeit >= covStopMmS ist
+    auch >= covWarnMmS, siehe DEFAULT_SPEED_WARNING_MM_S < spalten_grenze
+    in controller.py)."""
+    quelle = (_STATIC / "coverage_view.js").read_text()
+    bad_pos = quelle.index('if (speedMmS >= covStopMmS) return "bad";')
+    warn_pos = quelle.index('if (speedMmS >= covWarnMmS) return "warn";')
+    assert bad_pos < warn_pos, "bad-Pruefung muss vor warn-Pruefung stehen"
+    # Beide Schwellenvergleiche schliessen die Schwelle selbst ein (>=),
+    # nicht nur das Ueberschreiten (>) -- am Schwellenwert selbst gilt
+    # schon die haertere Einstufung.
+    assert ">= covStopMmS" in quelle and ">= covWarnMmS" in quelle
+    # Ohne Durchgang (Schwellen == null) oder ohne Geschwindigkeitswert
+    # (undefined/null, z.B. im Leerlauf-Positionsstrom) MUSS "off"
+    # herauskommen -- keine Warnung ohne Grundlage.
+    assert 'covWarnMmS === null || covStopMmS === null) return "off";' in quelle
+
+
+def test_coverage_view_js_covstart_ordnet_die_parameter_richtig_zu():
+    """covStart(width, height, warnMmS, stopMmS) -- die Reihenfolge der
+    beiden neuen Parameter muss auf die GLEICHNAMIGEN Modulvariablen
+    treffen. Ein vertauschter Zuweisungsblock (covWarnMmS bekommt
+    stopMmS statt warnMmS) faellt bei keinem Vorkommens-Test auf, weil
+    beide Variablen weiterhin irgendeinen Wert bekommen -- nur eben den
+    falschen."""
+    quelle = (_STATIC / "coverage_view.js").read_text()
+    assert ("function covStart(width, height, warnMmS, stopMmS){\n"
+            "  covWarnMmS = (warnMmS === undefined) ? null : warnMmS;\n"
+            "  covStopMmS = (stopMmS === undefined) ? null : stopMmS;") in quelle
+
+
+def test_index_und_view_wenden_die_ampel_farbe_auf_p_spd_an():
+    """Beide Seiten muessen covSpeedClass() tatsaechlich AUFRUFEN und das
+    Ergebnis als Klasse an #p-spd haengen -- sonst waeren die Schwellen
+    und covStart()'s neue Parameter (siehe unten) wirkungslos, weil nie
+    etwas Sichtbares daraus wird."""
+    for name in ("index.html", "view.html"):
+        quelle = (_STATIC / name).read_text()
+        assert "covSpeedClass(o.speed_mm_s)" in quelle, name
+        assert ('$("p-spd").classList.remove("speed-good", "speed-warn", '
+                '"speed-bad");') in quelle, name
+        assert '$("p-spd").classList.add("speed-" + spdKlasse);' in quelle, name
+
+
+def test_index_und_view_setzen_ampel_bei_veralten_zurueck():
+    """Ohne diesen Reset im staleTimer bliebe "v mm/s" nach Durchgangsende
+    oder Verbindungsabbruch in seiner letzten Farbe stehen -- ein rotes
+    "zu schnell" ohne jede aktuelle Messung dahinter waere irrefuehrender
+    als gar keine Farbe."""
+    for name in ("index.html", "view.html"):
+        quelle = (_STATIC / name).read_text()
+        # Auf die AUFRUFSTELLE im staleTimer-Callback geprueft: die Zeile
+        # muss zwischen dem .stale-Setzen und dem Ende des Callbacks
+        # stehen, nicht irgendwo sonst in der Datei.
+        idx_stale = quelle.index('document.querySelectorAll(".pos .v").forEach'
+                                 '(e => e.classList.add("stale"));')
+        idx_reset = quelle.index('$("p-spd").classList.remove("speed-good", '
+                                 '"speed-warn", "speed-bad");', idx_stale)
+        idx_ende = quelle.index("}, 2000);", idx_stale)
+        assert idx_stale < idx_reset < idx_ende, name
+
+
+def test_index_und_view_haben_die_drei_ampel_farben_als_css():
+    """Grün/Gelb/Rot muessen tatsaechlich auf die projekteigenen Ampel-
+    Variablen zeigen, nicht auf frei erfundene Hex-Werte -- sonst
+    driften die Statusfarben (--ok/--warn/--bad, auch von den Server-/
+    Sensor-Punkten benutzt) beim naechsten Themawechsel auseinander."""
+    for name in ("index.html", "view.html"):
+        quelle = (_STATIC / name).read_text()
+        assert ".pos .v.speed-good{color:var(--ok)}" in quelle, name
+        assert ".pos .v.speed-warn{color:var(--warn)}" in quelle, name
+        assert ".pos .v.speed-bad{color:var(--bad)}" in quelle, name
+
+
 def test_view_html_ruft_dieselben_funktionen_auf():
     """Die Druckansicht-Seite muss dieselben drei Einstiegspunkte in
     coverage_view.js benutzen wie index.html -- sonst bekäme sie zwar die
     Ereignisse über denselben /ws, würde aber nichts zeichnen."""
     quelle = (_STATIC / "view.html").read_text()
-    for aufruf in ("covStart(m.width, m.height)",
+    for aufruf in ("covStart(m.width, m.height, m.speed_warn_mm_s, m.speed_stop_mm_s)",
                    "covCells(m.new_cells)",
                    "covHead(m.bar)",
                    "covHead(null)"):
