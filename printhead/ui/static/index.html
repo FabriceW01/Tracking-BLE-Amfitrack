@@ -68,7 +68,6 @@
            display:flex;align-items:center;justify-content:center}
   .imgwrap img{max-width:100%;display:block;image-rendering:pixelated}
   .imgwrap.empty{background:#0e1116;color:var(--dim);font-size:12px;min-height:90px}
-  #rec-wrap{max-height:340px;overflow:auto;align-items:flex-start}
   #cov{max-width:100%;display:block;image-rendering:pixelated;background:#fff;
        cursor:zoom-in}
   /* Overlay fuer Druckkopf-Linie/Randmarke: eigenes Canvas exakt ueber dem
@@ -197,7 +196,6 @@
 
       <div class="btns">
         <button id="b-print" class="primary">Drucken</button>
-        <button id="b-preview">Vorschau neu</button>
       </div>
       <div class="cmdline" id="cmdline">–</div>
       <p class="hint">Der Druck läuft immer mit <code>--progress-json</code> und
@@ -316,24 +314,10 @@
   </div>
 
   <div class="panel">
-    <h2>Druckvorschau</h2>
-    <div class="body">
-      <div class="imgwrap empty" id="pv-wrap">noch keine Vorschau</div>
-    </div>
-  </div>
-
-  <div class="panel">
     <h2>Deckung (live)</h2>
     <div class="body">
       <div class="imgwrap empty" id="cov-wrap">noch kein Durchgang</div>
       <div id="cov-note"></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>Deckung (letzter Durchgang)</h2>
-    <div class="body">
-      <div class="imgwrap empty" id="rec-wrap">noch kein Durchgang</div>
     </div>
   </div>
 </div>
@@ -455,37 +439,34 @@ function syncSource(){
   refreshCmd();
 }
 
-/* ------------------------------------------------------------ Vorschau */
+/* ------------------------------------------------------------ Vorschau
+   Kein sichtbares Vorschaubild mehr auf dieser Seite (die Panels
+   "Druckvorschau" und "Deckung (letzter Durchgang)" sind auf Wunsch
+   entfernt). Der Aufruf selbst bleibt aber -- bewusst -- im Hintergrund
+   bestehen: covStart() in
+   coverage_view.js (geteilt mit view.html) lädt /api/preview.png als blasse
+   Geisterebene hinter dem Deckungscanvas, SOBALD ein Durchgang beginnt.
+   Diese Datei auf dem Server schreibt ausschließlich dieser Aufruf hier --
+   /api/print selbst tut das nicht (siehe server.py's run_print()). Ohne
+   diesen Hintergrund-Refresh bekäme die Geisterebene beim Druckstart ein
+   veraltetes oder gar kein Zielbild aus einer früheren Sitzung/anderen
+   Einstellung zu sehen, sowohl hier als auch in der separaten
+   Druckansicht (/view). */
 let pvTimer = null, pvBusy = false;
-async function renderPreview(){
-  /* Bildquelle ohne Pfad kann nicht rendern -- drill_pattern bricht dann mit
-     einer Fehlermeldung ab. Statt beim Laden einen aussichtslosen
-     Unterprozess zu starten, sagen wir direkt, was fehlt. */
-  if ($("src").value === "image" && !$("image").value.trim()){
-    const w = $("pv-wrap");
-    w.classList.add("empty");
-    w.textContent = "Bildpfad eingeben, dann erscheint hier die Vorschau";
-    return;
-  }
+async function refreshPreview(){
+  /* Bildquelle ohne Pfad kann nicht rendern -- drill_pattern bricht dann
+     mit einer Fehlermeldung ab. Kein aussichtsloser Unterprozess dafür. */
+  if ($("src").value === "image" && !$("image").value.trim()) return;
   if (pvBusy){ schedulePreview(); return; }
   pvBusy = true;
-  try{
-    const r = await post("/api/preview", {args: previewArgs()});
-    const w = $("pv-wrap");
-    if (r.ok){
-      w.classList.remove("empty");
-      w.innerHTML = '<img src="/api/preview.png?t=' + Date.now() + '">';
-    } else {
-      w.classList.add("empty");
-      w.textContent = r.error || "Vorschau fehlgeschlagen";
-    }
-  } catch(e){ /* Server weg -- der ws-Handler meldet das bereits */ }
+  try{ await post("/api/preview", {args: previewArgs()}); }
+  catch(e){ /* Server weg -- der ws-Handler meldet das bereits */ }
   finally { pvBusy = false; }
 }
 /* Entprellt: jede Feldänderung würde sonst einen Unterprozess starten. */
 function schedulePreview(){
   clearTimeout(pvTimer);
-  pvTimer = setTimeout(renderPreview, 450);
+  pvTimer = setTimeout(refreshPreview, 450);
 }
 
 document.querySelectorAll("input,select").forEach(el => {
@@ -610,7 +591,6 @@ function connect(){
            eine stehengebliebene rote Linie laese sich als "hier wird noch
            gedruckt" lesen. Das Deckungsbild selbst bleibt. */
         covHead(null);
-        loadRecord();
       }
     }
     else if (m.type === "status"){
@@ -632,20 +612,11 @@ function connect(){
    leben jetzt in coverage_view.js (per <script src> oben eingebunden),
    geteilt mit view.html -- siehe die Datei-Doku dort für das Warum. */
 
-function loadRecord(){
-  const w = $("rec-wrap");
-  const img = new Image();
-  img.onload = () => { w.classList.remove("empty"); w.innerHTML = ""; w.appendChild(img); };
-  img.onerror = () => { w.classList.add("empty"); w.textContent = "noch kein Durchgang"; };
-  img.src = "/api/record.png?t=" + Date.now();
-}
-
 /* ------------------------------------------------------------ Aktionen */
 $("b-print").onclick = async () => {
   const r = await post("/api/print", {args: fullArgs()});
   if (!r.ok) log("Fehler: " + r.error, "err");
 };
-$("b-preview").onclick = renderPreview;
 $("b-stop").onclick = () => post("/api/stop");
 $("b-shutdown").onclick = async () => {
   if (!confirm("Server herunterfahren? Laufende Aktion und Sensorstrom werden "
@@ -760,8 +731,7 @@ $("cal_save").onclick = async () => {
 syncSource();
 calStateText();
 connect();
-loadRecord();
-renderPreview();
+refreshPreview();
 </script>
 </body>
 </html>
