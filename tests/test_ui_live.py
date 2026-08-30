@@ -306,6 +306,58 @@ def test_view_html_zurueck_button_schliesst_den_tab():
            in quelle), "window.close() + Fallback fehlen an der Aufrufstelle"
 
 
+# ==================================== Startseite: Vorschau-Panels entfernt
+def test_index_druckvorschau_panel_ist_entfernt():
+    """Auf Wunsch entfernt: das sichtbare Vorschaubild-Panel samt seinem
+    "Vorschau neu"-Knopf. NICHT gemeint war der "Druckansicht ↗"-Knopf, der
+    öffnet eine ganz andere Seite (/view) -- siehe
+    test_index_deckung_live_und_druckansicht_bleiben unten."""
+    quelle = (_STATIC / "index.html").read_text()
+    assert "<h2>Druckvorschau</h2>" not in quelle
+    assert 'id="pv-wrap"' not in quelle
+    assert 'id="b-preview"' not in quelle
+    assert "Vorschau neu" not in quelle
+
+
+def test_index_letzter_durchgang_panel_ist_entfernt():
+    """Auf Wunsch entfernt: die Anzeige des letzten Druckergebnisses
+    (record.png, ein Vier-Panel-Diagnosebild). Die dafuer zustaendige
+    loadRecord()-Funktion muss mitentfernt sein, sonst bliebe totes,
+    nirgends mehr aufgerufenes Fetch-Fragment zurueck."""
+    quelle = (_STATIC / "index.html").read_text()
+    assert "<h2>Deckung (letzter Durchgang)</h2>" not in quelle
+    assert 'id="rec-wrap"' not in quelle
+    assert "loadRecord" not in quelle
+
+
+def test_index_deckung_live_und_druckansicht_bleiben():
+    """Ausdruecklich NICHT Teil der Anfrage: das Live-Deckungspanel und der
+    Knopf zur separaten Druckansicht (/view) bleiben bestehen."""
+    quelle = (_STATIC / "index.html").read_text()
+    assert '<h2>Deckung (live)</h2>' in quelle
+    assert 'id="cov-wrap"' in quelle
+    assert '<a href="/view" target="_blank"' in quelle
+    assert "Druckansicht ↗" in quelle
+
+
+def test_index_hintergrund_vorschau_bleibt_verdrahtet():
+    """Ohne sichtbares Panel gibt es keinen Knopf mehr, der /api/preview
+    manuell antriggert -- der automatische Hintergrund-Refresh (bei jeder
+    Feldaenderung und beim Laden) MUSS aber weiterlaufen, sonst bekaeme die
+    Geisterebene in covStart() (geteilt mit /view, siehe coverage_view.js)
+    beim naechsten Durchgang ein veraltetes Zielbild. Siehe die ausfuehrliche
+    Begruendung direkt im Quelltext ueber refreshPreview()."""
+    quelle = (_STATIC / "index.html").read_text()
+    assert "async function refreshPreview(){" in quelle
+    assert 'await post("/api/preview", {args: previewArgs()});' in quelle
+    # An den tatsaechlichen Aufrufstellen geprueft, nicht nur am Vorhandensein
+    # der Funktion: jede Feldaenderung (input/change) und der initiale Aufruf
+    # beim Laden muessen sie weiterhin auslösen.
+    assert ('el.addEventListener("input", () => { refreshCmd(); schedulePreview(); });'
+            in quelle)
+    assert "connect();\nrefreshPreview();" in quelle
+
+
 # ============================================== Standardwerte Dosis/Spray
 def test_ui_standardwerte_fuer_dosis_und_spray():
     """Vom Anlagenbesitzer festgelegt: Dosis 2, Spray aus. Die Felder der
