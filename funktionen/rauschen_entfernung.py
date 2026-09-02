@@ -498,8 +498,21 @@ _GITTER = (216, 216, 216)
 _FARBEN_KENNZAHL = [(70, 130, 200), (220, 140, 40), (90, 170, 90)]
 _REIHE_FARBE = (150, 150, 150)
 
+# --slide-show: Schriftgrad für die Projektion. Auf einer Folie wird die PNG
+# auf eine feste Breite skaliert, also zählt allein das VERHÄLTNIS von
+# Schrifthöhe zu Bildbreite -- ein größeres Bild mit proportional größerer
+# Schrift sähe an der Wand exakt gleich aus. Deshalb wächst hier die Schrift
+# gegenüber der Datenfläche, nicht mit ihr. Derselbe Faktor wie in
+# geradheit_messreihe.py, damit zwei Grafiken auf derselben Folie
+# zusammenpassen.
+SLIDE_SHOW_SKALA = 2.2
 
-def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
+# Grundmaße der Ränder bei SKALA 1. Alle vier halten ausschließlich Text
+# (rand_r die Legende neben der Plotfläche) und wachsen mit der Schrift.
+_RAND_L, _RAND_R, _RAND_O, _RAND_U = 85, 175, 50, 66
+
+
+def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, skala=1.0):
     """
     Rauschen gegen Entfernung als PNG, für die in ``ergebnis["achse"]``
     gewählte Achse (siehe ``auswerten``).
@@ -511,6 +524,15 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
     beiden Achsen fließen nirgends mehr ein, auch nicht als Referenz (siehe
     ``werte_einer_datei``s Docstring). Der Grenzabstand-Marker gehört zur
     p95-Linie -- das ist die Kennzahl, die ``auswerten()`` dafür benutzt.
+
+    ``skala`` vergrößert die Schrift und alle Maße, die an ihr hängen (Ränder,
+    Beschriftungsabstände, Legendenraster) -- ``SLIDE_SHOW_SKALA`` für die
+    Projektion, ``1.0`` (Default) für das bisherige Aussehen. Die
+    **Datenfläche behält dabei ihre Größe**: die Leinwand wächst um genau die
+    Pixel, die die größeren Ränder zusätzlich brauchen. Hier zählt das
+    besonders, weil ``rand_r`` die Legende trägt und bei doppelter Schrift
+    sonst gut ein Drittel der Bildbreite aus der Plotfläche herausschneiden
+    würde.
     """
     from PIL import Image, ImageDraw
 
@@ -518,8 +540,15 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
         return False
     achse = ergebnis["achse"]
 
+    def skal(mass):
+        """Ein an der Schrift hängendes Maß auf die gewählte Skalierung."""
+        return mass * skala
+
     punkte = ergebnis["punkte"]
-    rand_l, rand_r, rand_o, rand_u = 85, 175, 50, 66
+    rand_l, rand_r = skal(_RAND_L), skal(_RAND_R)
+    rand_o, rand_u = skal(_RAND_O), skal(_RAND_U)
+    breite = int(round(breite + (_RAND_L + _RAND_R) * (skala - 1.0)))
+    hoehe = int(round(hoehe + (_RAND_O + _RAND_U) * (skala - 1.0)))
     pl_b, pl_h = breite - rand_l - rand_r, hoehe - rand_o - rand_u
 
     x_min = min(p["abstand"] for p in punkte)
@@ -540,17 +569,17 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
 
     bild = Image.new("RGB", (breite, hoehe), (255, 255, 255))
     z = ImageDraw.Draw(bild)
-    schrift = _schrift(13)
-    klein = _schrift(11)
+    schrift = _schrift(max(1, int(round(skal(13)))))
+    klein = _schrift(max(1, int(round(skal(11)))))
 
     for anteil in [i / 6.0 for i in range(7)]:
         x = rand_l + anteil * pl_b
         z.line([(x, rand_o), (x, rand_o + pl_h)], fill=_GITTER)
-        z.text((x - 12, rand_o + pl_h + 8),
+        z.text((x - skal(12), rand_o + pl_h + skal(8)),
                f"{x_min + anteil * (x_max - x_min):.0f}", fill=_ACHSEN, font=klein)
         y = rand_o + anteil * pl_h
         z.line([(rand_l, y), (rand_l + pl_b, y)], fill=_GITTER)
-        z.text((8, y - 6), f"{y_max * (1.0 - anteil):.4f}", fill=_ACHSEN,
+        z.text((skal(8), y - skal(6)), f"{y_max * (1.0 - anteil):.4f}", fill=_ACHSEN,
                font=klein)
 
     # Düsenreihen-Marke
@@ -574,28 +603,28 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620):
         gx = px(ergebnis["grenzabstand"])
         if rand_l <= gx <= rand_l + pl_b:
             _gestrichelt_v(z, gx, rand_o, rand_o + pl_h, (120, 120, 190))
-            z.text((gx + 4, rand_o + 4),
+            z.text((gx + skal(4), rand_o + skal(4)),
                    f"{ergebnis['grenzabstand']:.0f} cm", fill=(80, 80, 160),
                    font=klein)
 
     z.rectangle([rand_l, rand_o, rand_l + pl_b, rand_o + pl_h], outline=_ACHSEN)
-    z.text((rand_l, 16),
+    z.text((rand_l, skal(16)),
            f"Sensorrauschen über die Entfernung zum Sender (Achse {achse})",
            fill=(20, 20, 20), font=schrift)
-    z.text((rand_l + pl_b / 2 - 55, hoehe - 24), "Abstand zum Sender (cm)",
-           fill=_ACHSEN, font=klein)
-    z.text((8, rand_o - 22), "Streuung (mm)", fill=_ACHSEN, font=klein)
+    z.text((rand_l + pl_b / 2 - skal(55), hoehe - skal(24)),
+           "Abstand zum Sender (cm)", fill=_ACHSEN, font=klein)
+    z.text((skal(8), rand_o - skal(22)), "Streuung (mm)", fill=_ACHSEN, font=klein)
 
-    lx, ly = rand_l + pl_b + 14, rand_o + 4
+    lx, ly = rand_l + pl_b + skal(14), rand_o + skal(4)
     namen = (f"{achse}-avg", f"{achse}-p95 (Grenzwert)", f"{achse}-p99")
     for index, name in enumerate(namen):
-        z.line([(lx, ly + 6), (lx + 20, ly + 6)], fill=_FARBEN_KENNZAHL[index],
-               width=index + 1)
-        z.text((lx + 26, ly), name, fill=(40, 40, 40), font=klein)
-        ly += 18
-    ly += 4
-    _gestrichelt(z, lx, ly + 6, lx + 20, _REIHE_FARBE)
-    z.text((lx + 26, ly), "1 Düsenreihe", fill=(40, 40, 40), font=klein)
+        z.line([(lx, ly + skal(6)), (lx + skal(20), ly + skal(6))],
+               fill=_FARBEN_KENNZAHL[index], width=index + 1)
+        z.text((lx + skal(26), ly), name, fill=(40, 40, 40), font=klein)
+        ly += skal(18)
+    ly += skal(4)
+    _gestrichelt(z, lx, ly + skal(6), lx + skal(20), _REIHE_FARBE)
+    z.text((lx + skal(26), ly), "1 Düsenreihe", fill=(40, 40, 40), font=klein)
 
     bild.save(pfad_png)
     return True
@@ -682,6 +711,13 @@ def main(argv=None):
     ap.add_argument("--referenz", type=float, default=100.0,
                     help="Wahre Referenzstrecke in mm für --massstab "
                          "(Default 100)")
+    ap.add_argument("--slide-show", action="store_true",
+                    help=f"Schrift für die Projektion deutlich vergrößern "
+                         f"(Faktor {SLIDE_SHOW_SKALA:g}) -- Titel, Achsen- "
+                         f"und Legendentext, samt der Ränder und Abstände, "
+                         f"die daran hängen. Die Datenfläche behält ihre "
+                         f"Größe; die Leinwand wächst um den Zuwachs der "
+                         f"Ränder.")
     ap.add_argument("--kein-plot", action="store_true")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
 
@@ -737,7 +773,8 @@ def main(argv=None):
 
     if not args.kein_plot and "fehler" not in ergebnis:
         try:
-            if zeichne_plot(ergebnis, args.png):
+            skala = SLIDE_SHOW_SKALA if args.slide_show else 1.0
+            if zeichne_plot(ergebnis, args.png, skala=skala):
                 print(f"\n  Grafik geschrieben: {args.png}")
         except ImportError:
             print("\n[rauschen] Pillow (PIL) fehlt — der Textbericht oben ist "

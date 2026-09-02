@@ -743,8 +743,19 @@ _ACHSEN = (60, 60, 60)
 _GITTER = (216, 216, 216)
 _REIHE_FARBE = (150, 150, 150)
 
+# --slide-show: Schriftgrad für die Projektion. Auf einer Folie wird die PNG
+# auf eine feste Breite skaliert, also zählt allein das VERHÄLTNIS von
+# Schrifthöhe zu Bildbreite -- ein größeres Bild mit proportional größerer
+# Schrift sähe an der Wand exakt gleich aus. Deshalb wächst hier die Schrift
+# gegenüber der Datenfläche, nicht mit ihr.
+SLIDE_SHOW_SKALA = 2.2
 
-def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
+# Grundmaße der Ränder bei SKALA 1. Sie halten ausschließlich Text
+# (Achsenbeschriftung und Achsentitel) und wachsen deshalb mit der Schrift.
+_RAND_L, _RAND_R, _RAND_O, _RAND_U = 90, 20, 50, 70
+
+
+def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700, skala=1.0):
     """
     Zeichnet Abweichung gegen Strecke und schreibt eine PNG-Datei.
 
@@ -761,16 +772,34 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
 
     PIL statt matplotlib, weil PIL im Projekt ohnehin gebraucht wird und diese
     Datei allein lauffähig bleiben soll.
+
+    ``skala`` vergrößert die Schrift und alle Maße, die an ihr hängen (Ränder,
+    Beschriftungsabstände, Legendenraster) -- ``SLIDE_SHOW_SKALA`` für die
+    Projektion, ``1.0`` (Default) für das bisherige Aussehen. Die
+    **Datenfläche behält dabei ihre Größe**: die Leinwand wächst um genau die
+    Pixel, die die größeren Ränder zusätzlich brauchen. Sonst würde die
+    Zeichenfläche mit jeder Schriftvergrößerung schrumpfen, statt dass nur die
+    Beschriftung wächst.
     """
     from PIL import Image, ImageDraw
 
     if "fehler" in ergebnis:
         return False
 
+    def skal(mass):
+        """Ein an der Schrift hängendes Maß auf die gewählte Skalierung."""
+        return mass * skala
+
     # rand_r braucht keinen Platz mehr für eine Legende daneben -- die
     # Legende sitzt jetzt als eigener Kasten INNERHALB der Plotfläche
     # (siehe unten).
-    rand_l, rand_r, rand_o, rand_u = 90, 20, 50, 70
+    rand_l, rand_r = skal(_RAND_L), skal(_RAND_R)
+    rand_o, rand_u = skal(_RAND_O), skal(_RAND_U)
+    # Leinwand um den Zuwachs der Ränder verbreitern, damit pl_b/pl_h
+    # unabhängig von `skala` exakt das bleiben, was der Aufrufer über
+    # breite/hoehe angefordert hat.
+    breite = int(round(breite + (_RAND_L + _RAND_R) * (skala - 1.0)))
+    hoehe = int(round(hoehe + (_RAND_O + _RAND_U) * (skala - 1.0)))
     pl_b = breite - rand_l - rand_r
     pl_h = hoehe - rand_o - rand_u
 
@@ -822,20 +851,20 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
 
     bild = Image.new("RGB", (breite, hoehe), (255, 255, 255))
     zeichnung = ImageDraw.Draw(bild)
-    schrift_klein = _schrift(11)
+    schrift_klein = _schrift(max(1, int(round(skal(11)))))
 
     # --- Gitter und Achsenbeschriftung ---
     for anteil in [i / 8.0 for i in range(9)]:
         x = rand_l + anteil * pl_b
         zeichnung.line([(x, rand_o), (x, rand_o + pl_h)], fill=_GITTER)
         wert = pos_min + anteil * (pos_max - pos_min)
-        zeichnung.text((x - 18, rand_o + pl_h + 8), f"{wert:.0f}",
+        zeichnung.text((x - skal(18), rand_o + pl_h + skal(8)), f"{wert:.0f}",
                        fill=_ACHSEN, font=schrift_klein)
     for anteil in [i / 6.0 for i in range(7)]:
         y = rand_o + anteil * pl_h
         zeichnung.line([(rand_l, y), (rand_l + pl_b, y)], fill=_GITTER)
         wert = abw_max - anteil * (abw_max - abw_min)
-        zeichnung.text((8, y - 6), f"{wert:+.3f}", fill=_ACHSEN,
+        zeichnung.text((skal(8), y - skal(6)), f"{wert:+.3f}", fill=_ACHSEN,
                        font=schrift_klein)
 
     # --- Streuungsband (nur wo mindestens zwei Fahrten beitragen) ---
@@ -882,10 +911,10 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
 
     # --- Achsentitel (kein Bildtitel mehr -- siehe Moduldocstring/Anfrage:
     #     der Kopf "Abweichung quer zur Fahrt ..." ist bewusst weg) ---
-    zeichnung.text((rand_l + pl_b / 2 - 60, hoehe - 26),
+    zeichnung.text((rand_l + pl_b / 2 - skal(60), hoehe - skal(26)),
                    "entlang der y-Achse (mm)", fill=_ACHSEN,
                    font=schrift_klein)
-    zeichnung.text((8, rand_o - 22), "Abweichung (mm)", fill=_ACHSEN,
+    zeichnung.text((skal(8), rand_o - skal(22)), "Abweichung (mm)", fill=_ACHSEN,
                    font=schrift_klein)
 
     # --- Legende -- als eigener Kasten INNERHALB der Plotfläche, nicht
@@ -904,17 +933,17 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
         eintraege.append(("kasten", (255, 225, 225), "Streuung"))
     eintraege.append(("gestrichelt", _REIHE_FARBE, "1 Düsenreihe"))
 
-    zeilenhoehe = 18
-    swatch_breite = 22
-    innen_abstand = 8
+    zeilenhoehe = skal(18)
+    swatch_breite = skal(22)
+    innen_abstand = skal(8)
     text_breite = max(
         zeichnung.textbbox((0, 0), text, font=schrift_klein)[2]
         for _, _, text in eintraege)
-    legende_b = innen_abstand * 2 + swatch_breite + 6 + text_breite
-    legende_h = innen_abstand * 2 + len(eintraege) * zeilenhoehe - 4
+    legende_b = innen_abstand * 2 + swatch_breite + skal(6) + text_breite
+    legende_h = innen_abstand * 2 + len(eintraege) * zeilenhoehe - skal(4)
 
-    lx0 = rand_l + pl_b - legende_b - 10
-    ly0 = rand_o + 10
+    lx0 = rand_l + pl_b - legende_b - skal(10)
+    ly0 = rand_o + skal(10)
     zeichnung.rectangle([lx0, ly0, lx0 + legende_b, ly0 + legende_h],
                         fill=(255, 255, 255), outline=_ACHSEN)
 
@@ -922,19 +951,19 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700):
     ly = ly0 + innen_abstand
     for art, farbe, text in eintraege:
         if art == "linie":
-            zeichnung.line([(lx, ly + 6), (lx + swatch_breite, ly + 6)],
+            zeichnung.line([(lx, ly + skal(6)), (lx + swatch_breite, ly + skal(6))],
                            fill=farbe, width=2)
         elif art == "linie_dick":
-            zeichnung.line([(lx, ly + 6), (lx + swatch_breite, ly + 6)],
+            zeichnung.line([(lx, ly + skal(6)), (lx + swatch_breite, ly + skal(6))],
                            fill=farbe, width=3)
         elif art == "kasten":
             zeichnung.rectangle(
-                [lx, ly + 2, lx + swatch_breite, ly + 10],
+                [lx, ly + skal(2), lx + swatch_breite, ly + skal(10)],
                 fill=farbe, outline=(230, 190, 190))
         elif art == "gestrichelt":
-            _gestrichelt(zeichnung, lx, ly + 6, lx + swatch_breite, farbe)
-        zeichnung.text((lx + swatch_breite + 6, ly), text, fill=(40, 40, 40),
-                       font=schrift_klein)
+            _gestrichelt(zeichnung, lx, ly + skal(6), lx + swatch_breite, farbe)
+        zeichnung.text((lx + swatch_breite + skal(6), ly), text,
+                       fill=(40, 40, 40), font=schrift_klein)
         ly += zeilenhoehe
 
     bild.save(pfad_png)
@@ -993,6 +1022,13 @@ def main(argv=None):
     ap.add_argument("--y-max", type=float, default=Y_BEREICH_MAX_MM,
                     help=f"Obere Grenze des benutzten y-Bereichs in mm "
                         f"(Default {Y_BEREICH_MAX_MM:g})")
+    ap.add_argument("--slide-show", action="store_true",
+                    help=f"Schrift für die Projektion deutlich vergrößern "
+                         f"(Faktor {SLIDE_SHOW_SKALA:g}) -- Achsen- und "
+                         f"Legendentext, samt der Ränder und Abstände, die "
+                         f"daran hängen. Die Datenfläche behält die über "
+                         f"--breite/--hoehe angeforderte Größe; die Leinwand "
+                         f"wächst um den Zuwachs der Ränder.")
     ap.add_argument("--kein-plot", action="store_true",
                     help="Nur den Textbericht ausgeben, keine PNG schreiben")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
@@ -1042,7 +1078,9 @@ def main(argv=None):
 
     if not args.kein_plot and "fehler" not in ergebnis:
         try:
-            if zeichne_plot(ergebnis, args.png, args.breite, args.hoehe):
+            skala = SLIDE_SHOW_SKALA if args.slide_show else 1.0
+            if zeichne_plot(ergebnis, args.png, args.breite, args.hoehe,
+                            skala):
                 print(f"\n  Grafik geschrieben: {args.png}")
         except ImportError:
             print("\n[geradheit] Pillow (PIL) fehlt -- ohne es kann keine "

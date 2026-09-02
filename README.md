@@ -1819,6 +1819,21 @@ Die zugehörigen Auswerteskripte liegen in `funktionen/`:
 | `rauschen_entfernung.py` | Tracker-Rauschen über die Entfernung |
 | `ruler_auswertung.py` | `ruler`-Muster nachmessen |
 
+**Grafiken für eine Präsentation:** `rauschen_entfernung.py` (Genauigkeit über
+die Entfernung) und `geradheit_messreihe.py` (Geradheit der Fahrt) kennen beide
+`--slide-show`. Das vergrößert die Schrift — Titel, Achsen- und Legendentext —
+deutlich, samt der Ränder und Abstände, die daran hängen. Die **Datenfläche
+behält dabei ihre Größe**; die Leinwand wächst um genau den Zuwachs der Ränder.
+Auf einer Folie wird die PNG ohnehin auf eine feste Breite skaliert, also zählt
+allein das Verhältnis von Schrift zu Zeichenfläche — ein größeres Bild mit
+proportional größerer Schrift sähe an der Wand exakt gleich aus. Beide Skripte
+benutzen denselben Faktor, damit zwei Grafiken nebeneinander zusammenpassen.
+
+```bash
+python funktionen/rauschen_entfernung.py rausch_d*.jsonl --png rauschen.png --slide-show
+python funktionen/geradheit_messreihe.py fahrt*.jsonl --png geradheit.png --slide-show
+```
+
 ---
 
 ## 10. Anhang: behobene Fehler und Verifikationen
