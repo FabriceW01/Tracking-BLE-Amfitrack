@@ -163,7 +163,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "around a completed pixel that also receives a "
                         "partial dose, since a real drop wets more than its "
                         "own grid cell. In MILLIMETRES, not pixels -- a cell "
-                        "is ~0.087mm tall but --mm-per-column (0.2 default) "
+                        "is ~0.087mm tall but --mm-per-column (0.087 default) "
                         "wide, so the same pixel count would mean two "
                         "different physical distances per axis. Default 0 "
                         "(off, exactly the pre-spray behaviour); pair with "
@@ -265,7 +265,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     scale = g.add_mutually_exclusive_group()
     scale.add_argument("--mm-per-column", type=float, default=0.087,
                        help="Physical width of one printed column in mm "
-                            "(default 0.2)")
+                            "(default 0.087)")
     scale.add_argument("--dpi", type=float,
                        help="Horizontal resolution; sets mm/column = 25.4/DPI")
     g.add_argument("--origin", choices=("button", "startpoint"), default="button",
@@ -274,7 +274,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--smooth-ms", type=float, default=0.0,
                    help="Low-pass time constant (ms) for the noisy Amfitrack "
                         "position; 0 = off, larger = smoother but more lag "
-                        "(default 12)")
+                        "(default 0 = off). NOTE: TrackingSettings' own "
+                        "dataclass default is 12.0, but the CLI always passes "
+                        "this value through, so smoothing is OFF unless asked "
+                        "for explicitly here.")
     g.add_argument("--min-move", type=float, default=0.05,
                    help="Deadband in mm; below this the head counts as stopped "
                         "(default 0.05)")
@@ -284,7 +287,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "column is placed: at 500 Hz and 20 mm/s that is 0.04 mm "
                         "= a fifth of a column (default 500)")
     g.add_argument("--timeout", type=float, default=180.0,
-                   help="Abort a position pass after this many seconds (default 30)")
+                   help="Abort a position pass after this many seconds (default 180)")
     g.add_argument("--vendor-id", type=_auto_int, default=0x0C17,
                    help="Amfitrack USB vendor id (default 0x0C17)")
     g.add_argument("--product-id", type=_auto_int, default=0x0D12,
@@ -581,7 +584,8 @@ def build_tracking(args: argparse.Namespace) -> TrackingSettings:
         sensor_id=args.sensor_id,
         # CORRECTION: this constructor call used to omit mm_per_column
         # entirely, so TrackingSettings fell back to its own dataclass
-        # default (0.2) regardless of --mm-per-column -- only --dpi ever
+        # default (0.2 at the time; 0.087 today) regardless of
+        # --mm-per-column -- only --dpi ever
         # had any effect, via resolve_mm_per_column below. --mm-per-column
         # is a real, documented CLI flag (and the default value in its own
         # --help text), so silently ignoring it is a bug, not a feature:
