@@ -1187,6 +1187,257 @@ def test_rechnung_braucht_kein_pil():
     assert "from PIL" not in kopf and "import PIL" not in kopf
 
 
+# ============================================================ --slide-show
+def _beispielfahrten(anzahl=2):
+    """Zwei kurze, leicht verrauschte Fahrten entlang y -- genug für einen
+    vollständigen Plot samt Mittelwertkurve, Streuungsband und Legende."""
+    rng = random.Random(11)
+    fahrten = []
+    for nummer in range(anzahl):
+        xs, ys = [], []
+        for i in range(120):
+            y = -90.0 + i * 180.0 / 119.0
+            xs.append(3.0 + rng.gauss(0, 0.02))
+            ys.append(y)
+        fahrten.append((f"f{nummer}", xs, ys))
+    return fahrten
+
+
+def _text_tinte(bild, kasten):
+    """Nicht-weiße Pixel in einem Ausschnitt -- ein Maß für die Textmenge.
+
+    Über das Graustufen-Histogramm gezählt statt Pixel für Pixel: das ist
+    schnell und kommt ohne das inzwischen veraltete ``getdata()`` aus."""
+    x0, y0, x1, y1 = kasten
+    grau = bild.crop((int(x0), int(y0), int(x1), int(y1))).convert("L")
+    return sum(grau.histogram()[:250])
+
+
+def _gemessener_plotrahmen(bild):
+    """Der TATSÄCHLICH gezeichnete Achsenrahmen, aus den Pixeln gelesen.
+
+    Bewusst gemessen statt aus _RAND_* nachgerechnet: eine Nachrechnung
+    würde die Layoutformel des Werkzeugs im Test wiederholen und wäre damit
+    blind dafür, dass ein einzelner Rand nicht mitskaliert -- die Leinwand
+    stimmte, der Rahmen säße trotzdem falsch."""
+    px = bild.load()
+    w, h = bild.size
+    zeilen = [y for y in range(h)
+              if _laengster_lauf([px[x, y] for x in range(w)]) >= w // 2]
+    spalten = [x for x in range(w)
+               if _laengster_lauf([px[x, y] for y in range(h)]) >= h // 2]
+    assert len(zeilen) >= 2 and len(spalten) >= 2, (zeilen, spalten)
+    return (min(spalten), min(zeilen), max(spalten), max(zeilen))
+
+
+def _laengster_lauf(pixel):
+    lauf = best = 0
+    for p in pixel:
+        if p == (60, 60, 60):                   # G._ACHSEN
+            lauf += 1
+            best = max(best, lauf)
+        else:
+            lauf = 0
+    return best
+
+
+def test_slide_show_skala_laesst_die_datenflaeche_unveraendert():
+    # Der Sinn der Option ist ein anderes VERHÄLTNIS von Schrift zu
+    # Zeichenfläche, nicht ein insgesamt größeres Bild. Deshalb wächst die
+    # Leinwand um genau den Zuwachs der Ränder: die Plotfläche muss danach
+    # exakt dieselbe Pixelgröße haben wie ohne die Option. Ohne diese
+    # Kompensation würde die Datenfläche mit jeder Schriftvergrößerung
+    # schrumpfen -- bei Faktor 2.2 um rund ein Achtel der Breite.
+    from PIL import Image
+    e = G.auswerten(_beispielfahrten())
+    breite, hoehe = 1200, 700
+    ziele = []
+    try:
+        for skala in (1.0, G.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert G.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe,
+                                  skala=skala) is True
+        with Image.open(ziele[0]) as klein, Image.open(ziele[1]) as gross:
+            assert klein.size == (breite, hoehe)
+            # Leinwand größer ...
+            assert gross.size[0] > klein.size[0]
+            assert gross.size[1] > klein.size[1]
+            # ... aber der gezeichnete Rahmen exakt gleich groß.
+            x0k, y0k, x1k, y1k = _gemessener_plotrahmen(klein)
+            x0g, y0g, x1g, y1g = _gemessener_plotrahmen(gross)
+            # 1 Pixel Toleranz: die skalierten Ränder sind Fließkomma,
+            # ihre Rasterung kann den Rahmen um einen Pixel verschieben.
+            assert abs((x1g - x0g) - (x1k - x0k)) <= 1
+            assert abs((y1g - y0g) - (y1k - y0k)) <= 1
+            # und liegt an der Stelle, die dem skalierten Rand entspricht
+            assert abs(x0g - G._RAND_L * G.SLIDE_SHOW_SKALA) <= 2, x0g
+            assert abs(y0g - G._RAND_O * G.SLIDE_SHOW_SKALA) <= 2, y0g
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_slide_show_vergroessert_wirklich_die_schrift():
+    # Die eigentliche Zusage der Option. Gemessen an der Tintenmenge im
+    # LINKEN Rand -- dort steht ausschließlich Text (y-Achsenbeschriftung
+    # und Achsentitel), keine Kurve, kein Gitter. Eine Mutation, die nur die
+    # Ränder skaliert und die Schriftgröße bei 11 stehen lässt, macht das
+    # Bild zwar größer, füllt diesen Streifen aber mit derselben Tintenmenge
+    # wie zuvor und faellt hier durch.
+    from PIL import Image
+    e = G.auswerten(_beispielfahrten())
+    ziele = []
+    try:
+        for skala in (1.0, G.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert G.zeichne_plot(e, ziel, breite=1200, hoehe=700,
+                                  skala=skala) is True
+        with Image.open(ziele[0]) as klein, Image.open(ziele[1]) as gross:
+            tinte_klein = _text_tinte(
+                klein, (0, 0, G._RAND_L, klein.size[1]))
+            tinte_gross = _text_tinte(
+                gross, (0, 0, G._RAND_L * G.SLIDE_SHOW_SKALA, gross.size[1]))
+        # Textfläche wächst etwa quadratisch mit der Schrifthöhe; bei 2.2
+        # wären das rund 4.8x. Die Schranke liegt bewusst deutlich darunter,
+        # damit sie nicht an der Rasterung einzelner Glyphen hängt.
+        assert tinte_klein > 0
+        assert tinte_gross > tinte_klein * 2.5, (tinte_gross, tinte_klein)
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_ohne_slide_show_aendert_sich_das_bild_nicht():
+    # Regressionsschutz: skala=1.0 (der Default) muss Pixel für Pixel das
+    # liefern, was die Funktion vor der Option geliefert hat. Die Option
+    # darf nichts kosten, solange sie nicht benutzt wird.
+    import hashlib
+    e = G.auswerten(_beispielfahrten())
+    ziele = []
+    try:
+        for kwargs in ({}, {"skala": 1.0}):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert G.zeichne_plot(e, ziel, breite=900, hoehe=520,
+                                  **kwargs) is True
+        pruef = [hashlib.sha256(open(z, "rb").read()).hexdigest()
+                 for z in ziele]
+        assert pruef[0] == pruef[1]
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def _lange_achsenlinien(bild, mindestlaenge):
+    """Zeilen, die einen waagerechten Lauf der Achsenfarbe dieser Mindest-
+    länge enthalten -- damit lassen sich Plotrahmen (sehr lang) und
+    Legendenkasten (kürzer) im fertigen Bild wiederfinden, ohne die
+    Layoutformeln aus dem Werkzeug im Test zu wiederholen."""
+    px = bild.load()
+    w, h = bild.size
+    treffer = []
+    for y in range(h):
+        lauf = best = 0
+        for x in range(w):
+            if px[x, y] == (60, 60, 60):        # G._ACHSEN
+                lauf += 1
+                best = max(best, lauf)
+            else:
+                lauf = 0
+        if best >= mindestlaenge:
+            treffer.append(y)
+    return treffer
+
+
+def test_slide_show_skaliert_auch_das_legendenraster():
+    # Die Schrift allein zu vergrößern reicht nicht: bleibt die Zeilenhöhe
+    # der Legende bei ihren 18 Pixeln, überlappen sich die Einträge, sobald
+    # die Schrift größer ist als der Zeilenabstand. Gemessen an der HÖHE des
+    # Legendenkastens, den das Werkzeug selbst zeichnet -- der folgt direkt
+    # aus Zeilenhöhe mal Anzahl Einträge.
+    from PIL import Image
+    e = G.auswerten(_beispielfahrten())
+    hoehen = {}
+    ziele = []
+    try:
+        for skala in (1.0, G.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert G.zeichne_plot(e, ziel, breite=1200, hoehe=700,
+                                  skala=skala) is True
+            with Image.open(ziel) as bild:
+                rahmen = _lange_achsenlinien(bild, 600)
+                kasten = [y for y in _lange_achsenlinien(bild, 60)
+                          if y not in rahmen]
+                assert len(kasten) >= 2, kasten
+                hoehen[skala] = max(kasten) - min(kasten)
+        verhaeltnis = hoehen[G.SLIDE_SHOW_SKALA] / hoehen[1.0]
+        assert abs(verhaeltnis - G.SLIDE_SHOW_SKALA) < 0.25, (hoehen,
+                                                              verhaeltnis)
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_slide_show_haelt_den_achsentitel_von_der_beschriftung_frei():
+    # Der y-Achsentitel steht bei rand_o - 22 über dem Plotrahmen, die
+    # oberste Achsenbeschriftung bei rand_o - 6. Skaliert der Titelabstand
+    # nicht mit, rutscht der Titel bei größerer Schrift in die Beschriftung
+    # hinein. Geprüft wird deshalb nicht seine Position, sondern die Folge:
+    # zwischen beiden muss im linken Rand mindestens eine komplett leere
+    # Bildzeile bleiben.
+    from PIL import Image
+    e = G.auswerten(_beispielfahrten())
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        assert G.zeichne_plot(e, ziel, breite=1200, hoehe=700,
+                              skala=G.SLIDE_SHOW_SKALA) is True
+        with Image.open(ziel) as bild:
+            px = bild.load()
+            rand_l = int(G._RAND_L * G.SLIDE_SHOW_SKALA)
+            rahmen_oben = _lange_achsenlinien(bild, 600)[0]
+            spalten = range(0, rand_l)
+            tinte = [y for y in range(rahmen_oben + 1)
+                     if any(px[x, y] != (255, 255, 255) for x in spalten)]
+            assert tinte, "kein Achsentitel im linken Rand gefunden"
+            leer = [y for y in range(min(tinte), rahmen_oben)
+                    if all(px[x, y] == (255, 255, 255) for x in spalten)]
+            assert leer, ("Achsentitel und Achsenbeschriftung berühren sich "
+                          "-- der Titelabstand skaliert nicht mit")
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_cli_slide_show_schreibt_ein_groesseres_bild():
+    from PIL import Image
+    verzeichnis = tempfile.mkdtemp()
+    rng = random.Random(5)
+    pfad = os.path.join(verzeichnis, "fahrt.jsonl")
+    with open(pfad, "w", encoding="utf-8") as datei:
+        for i in range(150):
+            datei.write(json.dumps({
+                "event": "position",
+                "x": 3.0 + rng.gauss(0, 0.02),
+                "y": -90.0 + i * 180.0 / 149.0}) + "\n")
+
+    groessen = {}
+    for marke, zusatz in (("normal", []), ("slide", ["--slide-show"])):
+        ziel = os.path.join(verzeichnis, f"{marke}.png")
+        p = _cli(pfad, "--png", ziel, *zusatz)
+        assert p.returncode == 0, p.stderr
+        with Image.open(ziel) as bild:
+            groessen[marke] = bild.size
+    assert groessen["slide"][0] > groessen["normal"][0]
+    assert groessen["slide"][1] > groessen["normal"][1]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:

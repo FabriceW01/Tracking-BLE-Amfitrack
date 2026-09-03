@@ -691,6 +691,235 @@ def test_rechnung_braucht_kein_pil():
         assert "from PIL" not in kopf and "import PIL" not in kopf, werkzeug
 
 
+# ============================================================ --slide-show
+def _rausch_ergebnis():
+    return R.auswerten([_messung(10, 0.01, seed=1), _messung(20, 0.05, seed=2),
+                        _messung(30, 0.12, seed=3)], achse="x")
+
+
+def _text_tinte(bild, kasten):
+    """Nicht-weiße Pixel in einem Ausschnitt -- ein Maß für die Textmenge.
+
+    Über das Graustufen-Histogramm gezählt statt Pixel für Pixel: das ist
+    schnell und kommt ohne das inzwischen veraltete ``getdata()`` aus."""
+    x0, y0, x1, y1 = kasten
+    grau = bild.crop((int(x0), int(y0), int(x1), int(y1))).convert("L")
+    return sum(grau.histogram()[:250])
+
+
+def _laengster_lauf(pixel):
+    lauf = best = 0
+    for p in pixel:
+        if p == (60, 60, 60):                   # R._ACHSEN
+            lauf += 1
+            best = max(best, lauf)
+        else:
+            lauf = 0
+    return best
+
+
+def _gemessener_plotrahmen(bild):
+    """Der TATSÄCHLICH gezeichnete Achsenrahmen, aus den Pixeln gelesen.
+
+    Bewusst gemessen statt aus _RAND_* nachgerechnet: eine Nachrechnung
+    würde die Layoutformel des Werkzeugs im Test wiederholen und wäre damit
+    blind dafür, dass ein einzelner Rand nicht mitskaliert -- die Leinwand
+    stimmte, der Rahmen säße trotzdem falsch."""
+    px = bild.load()
+    w, h = bild.size
+    zeilen = [y for y in range(h)
+              if _laengster_lauf([px[x, y] for x in range(w)]) >= w // 3]
+    spalten = [x for x in range(w)
+               if _laengster_lauf([px[x, y] for y in range(h)]) >= h // 2]
+    assert len(zeilen) >= 2 and len(spalten) >= 2, (zeilen, spalten)
+    return (min(spalten), min(zeilen), max(spalten), max(zeilen))
+
+
+def test_slide_show_skala_laesst_die_datenflaeche_unveraendert():
+    # Hier zählt die Kompensation besonders: rand_r traegt die Legende und
+    # ist mit 175 von 1000 Pixeln schon bei Skala 1 breit. Ohne mitwachsende
+    # Leinwand wuerde die Plotflaeche bei Faktor 2.2 auf gut die Haelfte
+    # zusammenschrumpfen, statt dass nur die Beschriftung waechst.
+    from PIL import Image
+    e = _rausch_ergebnis()
+    breite, hoehe = 1000, 620
+    ziele = []
+    try:
+        for skala in (1.0, R.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert R.zeichne_plot(e, ziel, breite=breite, hoehe=hoehe,
+                                  skala=skala) is True
+        with Image.open(ziele[0]) as klein, Image.open(ziele[1]) as gross:
+            assert klein.size == (breite, hoehe)
+            assert gross.size[0] > klein.size[0]
+            assert gross.size[1] > klein.size[1]
+            x0k, y0k, x1k, y1k = _gemessener_plotrahmen(klein)
+            x0g, y0g, x1g, y1g = _gemessener_plotrahmen(gross)
+            # 1 Pixel Toleranz: die skalierten Ränder sind Fließkomma,
+            # ihre Rasterung kann den Rahmen um einen Pixel verschieben.
+            assert abs((x1g - x0g) - (x1k - x0k)) <= 1
+            assert abs((y1g - y0g) - (y1k - y0k)) <= 1
+            assert abs(x0g - R._RAND_L * R.SLIDE_SHOW_SKALA) <= 2, x0g
+            assert abs(y0g - R._RAND_O * R.SLIDE_SHOW_SKALA) <= 2, y0g
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_slide_show_haelt_den_achsentitel_von_der_beschriftung_frei():
+    # Der y-Achsentitel steht bei rand_o - 22 über dem Plotrahmen, die
+    # oberste Achsenbeschriftung bei rand_o - 6. Skaliert der Titelabstand
+    # nicht mit, rutscht der Titel bei größerer Schrift in Beschriftung und
+    # Rahmen hinein. Geprüft wird die Folge, nicht die Position: zwischen
+    # beiden muss im linken Rand mindestens eine leere Bildzeile bleiben.
+    from PIL import Image
+    e = _rausch_ergebnis()
+    ziel = tempfile.mktemp(suffix=".png")
+    try:
+        assert R.zeichne_plot(e, ziel, breite=1000, hoehe=620,
+                              skala=R.SLIDE_SHOW_SKALA) is True
+        with Image.open(ziel) as bild:
+            px = bild.load()
+            rand_l = int(R._RAND_L * R.SLIDE_SHOW_SKALA)
+            rahmen_oben = _gemessener_plotrahmen(bild)[1]
+            spalten = range(0, rand_l)
+            tinte = [y for y in range(rahmen_oben + 1)
+                     if any(px[x, y] != (255, 255, 255) for x in spalten)]
+            assert tinte, "kein Achsentitel im linken Rand gefunden"
+            leer = [y for y in range(min(tinte), rahmen_oben)
+                    if all(px[x, y] == (255, 255, 255) for x in spalten)]
+            assert leer, ("Achsentitel und Achsenbeschriftung berühren sich "
+                          "-- der Titelabstand skaliert nicht mit")
+    finally:
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+
+
+def test_slide_show_vergroessert_wirklich_die_schrift():
+    # Gemessen im RECHTEN Rand -- dort steht ausschliesslich die Legende,
+    # keine Kurve. Eine Mutation, die nur die Raender skaliert und die
+    # Schriftgroessen bei 13/11 stehen laesst, macht das Bild groesser,
+    # fuellt diesen Streifen aber mit derselben Tintenmenge und faellt hier
+    # durch.
+    from PIL import Image
+    e = _rausch_ergebnis()
+    ziele = []
+    try:
+        for skala in (1.0, R.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert R.zeichne_plot(e, ziel, breite=1000, hoehe=620,
+                                  skala=skala) is True
+        with Image.open(ziele[0]) as klein, Image.open(ziele[1]) as gross:
+            tinte_klein = _text_tinte(
+                klein, (klein.size[0] - R._RAND_R, 0,
+                        klein.size[0], klein.size[1]))
+            tinte_gross = _text_tinte(
+                gross, (gross.size[0] - R._RAND_R * R.SLIDE_SHOW_SKALA, 0,
+                        gross.size[0], gross.size[1]))
+        assert tinte_klein > 0
+        assert tinte_gross > tinte_klein * 2.5, (tinte_gross, tinte_klein)
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_ohne_slide_show_aendert_sich_das_bild_nicht():
+    # skala=1.0 (Default) muss Pixel fuer Pixel liefern, was die Funktion
+    # vor der Option geliefert hat -- die Option darf nichts kosten, solange
+    # sie nicht benutzt wird.
+    import hashlib
+    e = _rausch_ergebnis()
+    ziele = []
+    try:
+        for kwargs in ({}, {"skala": 1.0}):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert R.zeichne_plot(e, ziel, breite=800, hoehe=500,
+                                  **kwargs) is True
+        pruef = [hashlib.sha256(open(z, "rb").read()).hexdigest()
+                 for z in ziele]
+        assert pruef[0] == pruef[1]
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_slide_show_skaliert_auch_das_legendenraster():
+    # Die Schrift allein zu vergrößern reicht nicht: bleibt der
+    # Zeilenvorschub der Legende bei seinen 18 Pixeln, überlappen sich die
+    # Einträge, sobald die Schrift größer ist. Die Legende steht hier frei
+    # im rechten Rand (kein Kasten), also wird ihre Tinten-Ausdehnung
+    # gemessen -- ab dem Plotrahmen abwärts, damit der lange Bildtitel
+    # darüber nicht mitzählt.
+    from PIL import Image
+    e = _rausch_ergebnis()
+    hoehen = {}
+    ziele = []
+    try:
+        for skala in (1.0, R.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert R.zeichne_plot(e, ziel, breite=1000, hoehe=620,
+                                  skala=skala) is True
+            with Image.open(ziel) as bild:
+                px = bild.load()
+                breite, hoehe = bild.size
+                # +8 Pixel Abstand, damit die rechte Rahmenlinie des Plots
+                # (die über die volle Plothöhe läuft) nicht mitgezählt wird.
+                spalten = range(breite - int(R._RAND_R * skala) + 8, breite)
+                zeilen = [y for y in range(int(R._RAND_O * skala), hoehe)
+                          if any(px[x, y] != (255, 255, 255) for x in spalten)]
+                assert len(zeilen) >= 2, zeilen
+                hoehen[skala] = max(zeilen) - min(zeilen)
+        verhaeltnis = hoehen[R.SLIDE_SHOW_SKALA] / hoehen[1.0]
+        assert abs(verhaeltnis - R.SLIDE_SHOW_SKALA) < 0.25, (hoehen,
+                                                              verhaeltnis)
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_cli_slide_show_schreibt_ein_groesseres_bild():
+    from PIL import Image
+    verzeichnis = tempfile.mkdtemp()
+    rng = random.Random(4)
+    dateien = []
+    for abstand in (10, 20, 30):
+        pfad = os.path.join(verzeichnis, f"rausch_d{abstand}.jsonl")
+        with open(pfad, "w", encoding="utf-8") as datei:
+            for _ in range(200):
+                datei.write(json.dumps({
+                    "event": "position", "x": rng.gauss(0, abstand * 0.005),
+                    "y": 0.0, "z": 0.0}) + "\n")
+        dateien.append(pfad)
+
+    groessen = {}
+    for marke, zusatz in (("normal", []), ("slide", ["--slide-show"])):
+        ziel = os.path.join(verzeichnis, f"{marke}.png")
+        p = _lauf(W_RAUSCH, *dateien, "--png", ziel, *zusatz)
+        assert p.returncode == 0, p.stderr
+        with Image.open(ziel) as bild:
+            groessen[marke] = bild.size
+    assert groessen["slide"][0] > groessen["normal"][0]
+    assert groessen["slide"][1] > groessen["normal"][1]
+
+
+def test_beide_werkzeuge_teilen_denselben_slide_show_faktor():
+    # Die zwei Grafiken landen nebeneinander auf derselben Folie. Laufen die
+    # Faktoren auseinander, haben sie dort unterschiedlich grosse Schrift --
+    # genau das, was die Option verhindern soll.
+    sys.path.insert(0, FUNK)
+    import geradheit_messreihe as G
+    assert R.SLIDE_SHOW_SKALA == G.SLIDE_SHOW_SKALA
+    assert R.SLIDE_SHOW_SKALA > 1.0
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:
