@@ -505,7 +505,28 @@ _REIHE_FARBE = (150, 150, 150)
 # gegenüber der Datenfläche, nicht mit ihr. Derselbe Faktor wie in
 # geradheit_messreihe.py, damit zwei Grafiken auf derselben Folie
 # zusammenpassen.
+#
+# Der Wert ist der DEFAULT von --slide-show; ein Faktor darf direkt dahinter
+# angegeben werden (--slide-show 3).
 SLIDE_SHOW_SKALA = 2.2
+
+
+def loese_skala(wert):
+    """``--slide-show`` in einen Skalierungsfaktor übersetzen.
+
+    ``None`` heißt "Flag nicht angegeben" -> 1.0, also unverändertes
+    Aussehen. Ohne Zahl dahinter setzt argparse ``SLIDE_SHOW_SKALA`` ein;
+    mit Zahl kommt genau die an. Ein Faktor <= 0 wird abgelehnt statt still
+    zu einem leeren oder gespiegelten Bild zu führen: 0 macht jede Schrift
+    und jede Linie unsichtbar, negativ dreht sämtliche Ränder nach innen.
+    """
+    if wert is None:
+        return 1.0
+    wert = float(wert)
+    if wert <= 0:
+        raise ValueError(
+            f"--slide-show braucht einen Faktor groesser 0, nicht {wert:g}")
+    return wert
 
 # Grundmaße der Ränder bei SKALA 1. Alle vier halten ausschließlich Text
 # (rand_r die Legende neben der Plotfläche) und wachsen mit der Schrift.
@@ -543,6 +564,15 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, skala=1.0):
     def skal(mass):
         """Ein an der Schrift hängendes Maß auf die gewählte Skalierung."""
         return mass * skala
+
+    def strich(breite_px):
+        """Eine Linienstärke auf die gewählte Skalierung, mindestens 1 Pixel.
+
+        Eine 1-Pixel-Kurve verschwindet auf einer Projektionsfläche neben
+        24-Punkt-Schrift; die Linien müssen mitwachsen, sonst wird der Plot
+        durch das größere Bild sogar schlechter lesbar als vorher. Gerundet
+        auf ganze Pixel, weil PIL nur ganzzahlige Stärken zeichnet."""
+        return max(1, int(round(breite_px * skala)))
 
     punkte = ergebnis["punkte"]
     rand_l, rand_r = skal(_RAND_L), skal(_RAND_R)
@@ -585,7 +615,8 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, skala=1.0):
     # Düsenreihen-Marke
     y_reihe = py(DUESENTEILUNG_MM)
     if rand_o <= y_reihe <= rand_o + pl_h:
-        _gestrichelt(z, rand_l, y_reihe, rand_l + pl_b, _REIHE_FARBE)
+        _gestrichelt(z, rand_l, y_reihe, rand_l + pl_b, _REIHE_FARBE,
+                     strich=skal(6), luecke=skal(5), breite=strich(1))
 
     # avg/p95/p99 der gewählten Achse -- steigende Linienstärke, weil p99
     # der Wert ist, der am meisten zählt (der seltene schlechte Moment).
@@ -594,15 +625,18 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, skala=1.0):
         farbe = _FARBEN_KENNZAHL[index]
         pts = [(px(p["abstand"]), py(p["rauschen"][achse][kennzahl])) for p in punkte]
         if len(pts) >= 2:
-            z.line(pts, fill=farbe, width=breite_linie)
+            z.line(pts, fill=farbe, width=strich(breite_linie))
+        radius = skal(2)
         for pt in pts:
-            z.ellipse([pt[0] - 2, pt[1] - 2, pt[0] + 2, pt[1] + 2], fill=farbe)
+            z.ellipse([pt[0] - radius, pt[1] - radius,
+                       pt[0] + radius, pt[1] + radius], fill=farbe)
 
     # Grenzabstand markieren -- gehört zur p95-Linie, siehe auswerten()
     if ergebnis["grenzart"] == "interpoliert" and ergebnis["grenzabstand"]:
         gx = px(ergebnis["grenzabstand"])
         if rand_l <= gx <= rand_l + pl_b:
-            _gestrichelt_v(z, gx, rand_o, rand_o + pl_h, (120, 120, 190))
+            _gestrichelt_v(z, gx, rand_o, rand_o + pl_h, (120, 120, 190),
+                           strich=skal(6), luecke=skal(5), breite=strich(1))
             z.text((gx + skal(4), rand_o + skal(4)),
                    f"{ergebnis['grenzabstand']:.0f} cm", fill=(80, 80, 160),
                    font=klein)
@@ -619,28 +653,36 @@ def zeichne_plot(ergebnis, pfad_png, breite=1000, hoehe=620, skala=1.0):
     namen = (f"{achse}-avg", f"{achse}-p95 (Grenzwert)", f"{achse}-p99")
     for index, name in enumerate(namen):
         z.line([(lx, ly + skal(6)), (lx + skal(20), ly + skal(6))],
-               fill=_FARBEN_KENNZAHL[index], width=index + 1)
+               fill=_FARBEN_KENNZAHL[index], width=strich(index + 1))
         z.text((lx + skal(26), ly), name, fill=(40, 40, 40), font=klein)
         ly += skal(18)
     ly += skal(4)
-    _gestrichelt(z, lx, ly + skal(6), lx + skal(20), _REIHE_FARBE)
+    _gestrichelt(z, lx, ly + skal(6), lx + skal(20), _REIHE_FARBE,
+                 strich=skal(6), luecke=skal(5), breite=strich(1))
     z.text((lx + skal(26), ly), "1 Düsenreihe", fill=(40, 40, 40), font=klein)
 
     bild.save(pfad_png)
     return True
 
 
-def _gestrichelt(z, x1, y, x2, farbe, strich=6, luecke=5):
+def _gestrichelt(z, x1, y, x2, farbe, strich=6, luecke=5, breite=1):
+    """Waagerechte gestrichelte Linie.
+
+    Strich-/Lückenlänge sind Parameter, damit ein vergrößerter Plot sie
+    mitskalieren kann: bliebe das 6/5-Raster fest, während die Linie dicker
+    wird, verschmölzen die Striche optisch zu einer durchgezogenen Linie und
+    die Marke wäre nicht mehr von den Datenkurven zu unterscheiden."""
     x = x1
     while x < x2:
-        z.line([(x, y), (min(x + strich, x2), y)], fill=farbe)
+        z.line([(x, y), (min(x + strich, x2), y)], fill=farbe, width=breite)
         x += strich + luecke
 
 
-def _gestrichelt_v(z, x, y1, y2, farbe, strich=6, luecke=5):
+def _gestrichelt_v(z, x, y1, y2, farbe, strich=6, luecke=5, breite=1):
+    """Senkrechte Entsprechung zu :func:`_gestrichelt`."""
     y = y1
     while y < y2:
-        z.line([(x, y), (x, min(y + strich, y2))], fill=farbe)
+        z.line([(x, y), (x, min(y + strich, y2))], fill=farbe, width=breite)
         y += strich + luecke
 
 
@@ -711,15 +753,23 @@ def main(argv=None):
     ap.add_argument("--referenz", type=float, default=100.0,
                     help="Wahre Referenzstrecke in mm für --massstab "
                          "(Default 100)")
-    ap.add_argument("--slide-show", action="store_true",
-                    help=f"Schrift für die Projektion deutlich vergrößern "
-                         f"(Faktor {SLIDE_SHOW_SKALA:g}) -- Titel, Achsen- "
-                         f"und Legendentext, samt der Ränder und Abstände, "
-                         f"die daran hängen. Die Datenfläche behält ihre "
+    ap.add_argument("--slide-show", nargs="?", type=float, metavar="FAKTOR",
+                    const=SLIDE_SHOW_SKALA, default=None,
+                    help=f"Schrift und Linien für die Projektion vergrößern. "
+                         f"Ohne Zahl Faktor {SLIDE_SHOW_SKALA:g}, mit Zahl "
+                         f"genau diese (z.B. --slide-show 3). Betrifft Titel, "
+                         f"Achsen- und Legendentext, die Ränder und Abstände, "
+                         f"die daran hängen, und die Strichstärke aller "
+                         f"gezeichneten Linien. Die Datenfläche behält ihre "
                          f"Größe; die Leinwand wächst um den Zuwachs der "
                          f"Ränder.")
     ap.add_argument("--kein-plot", action="store_true")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
+
+    try:
+        skala = loese_skala(args.slide_show)
+    except ValueError as fehler:
+        ap.error(str(fehler))
 
     pfade = []
     for muster in args.dateien:
@@ -773,7 +823,6 @@ def main(argv=None):
 
     if not args.kein_plot and "fehler" not in ergebnis:
         try:
-            skala = SLIDE_SHOW_SKALA if args.slide_show else 1.0
             if zeichne_plot(ergebnis, args.png, skala=skala):
                 print(f"\n  Grafik geschrieben: {args.png}")
         except ImportError:

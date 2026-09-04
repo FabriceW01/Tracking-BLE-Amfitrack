@@ -1821,17 +1821,35 @@ Die zugehörigen Auswerteskripte liegen in `funktionen/`:
 
 **Grafiken für eine Präsentation:** `rauschen_entfernung.py` (Genauigkeit über
 die Entfernung) und `geradheit_messreihe.py` (Geradheit der Fahrt) kennen beide
-`--slide-show`. Das vergrößert die Schrift — Titel, Achsen- und Legendentext —
-deutlich, samt der Ränder und Abstände, die daran hängen. Die **Datenfläche
-behält dabei ihre Größe**; die Leinwand wächst um genau den Zuwachs der Ränder.
-Auf einer Folie wird die PNG ohnehin auf eine feste Breite skaliert, also zählt
-allein das Verhältnis von Schrift zu Zeichenfläche — ein größeres Bild mit
-proportional größerer Schrift sähe an der Wand exakt gleich aus. Beide Skripte
-benutzen denselben Faktor, damit zwei Grafiken nebeneinander zusammenpassen.
+`--slide-show [FAKTOR]`. Das vergrößert **Schrift und Linien** für die
+Projektion:
+
+| | wird skaliert |
+|---|---|
+| Schrift | Titel, Achsenbeschriftung, Achsentitel, Legende |
+| Layout | Ränder, Beschriftungsabstände, Legendenraster |
+| Linien | Strichstärke jeder gezeichneten Kurve, Nulllinie, Punktmarker, Strich-/Lückenlänge gestrichelter Marken |
+
+Ohne Zahl gilt der Default **2,2**, mit Zahl genau diese
+(`--slide-show 3`). Ein Faktor ≤ 0 wird abgelehnt — 0 machte jede Schrift und
+jede Linie unsichtbar, negativ drehte sämtliche Ränder nach innen; beides
+erzeugte still ein unbrauchbares Bild, statt zu scheitern.
+
+Die **Datenfläche behält dabei ihre Größe**; die Leinwand wächst um genau den
+Zuwachs der Ränder. Auf einer Folie wird die PNG ohnehin auf eine feste Breite
+skaliert, also zählt allein das Verhältnis von Schrift zu Zeichenfläche — ein
+größeres Bild mit proportional größerer Schrift sähe an der Wand exakt gleich
+aus. Dass die Linien mitwachsen, gehört dazu: eine 1-Pixel-Kurve neben
+24-Punkt-Schrift verschwindet an der Wand, das größere Bild wäre sonst
+schlechter lesbar als das kleine.
+
+Beide Skripte benutzen denselben Default-Faktor, damit zwei Grafiken
+nebeneinander zusammenpassen; ein Test hält das fest. Ohne das Flag ändert sich
+nichts — der Default ist pixelgleich zum Bild ohne die Option.
 
 ```bash
 python funktionen/rauschen_entfernung.py rausch_d*.jsonl --png rauschen.png --slide-show
-python funktionen/geradheit_messreihe.py fahrt*.jsonl --png geradheit.png --slide-show
+python funktionen/geradheit_messreihe.py fahrt*.jsonl --png geradheit.png --slide-show 3
 ```
 
 ---

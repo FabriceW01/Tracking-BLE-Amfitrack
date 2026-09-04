@@ -1415,6 +1415,169 @@ def test_slide_show_haelt_den_achsentitel_von_der_beschriftung_frei():
             os.unlink(ziel)
 
 
+def _linien_dicke(bild, farbe, schrittweite=7):
+    """Groesster senkrechter Lauf dieser Farbe -- die Strichstaerke einer
+    WAAGERECHTEN Linie, direkt am fertigen Bild gemessen. Fuer die Nulllinie
+    (120,120,120) eindeutig: keine andere Farbe im Plot ist dieselbe."""
+    px = bild.load()
+    w, h = bild.size
+    best = 0
+    for x in range(0, w, schrittweite):
+        lauf = 0
+        for y in range(h):
+            if px[x, y] == farbe:
+                lauf += 1
+                best = max(best, lauf)
+            else:
+                lauf = 0
+    return best
+
+
+def test_loese_skala_uebersetzt_das_flag():
+    # None = Flag gar nicht angegeben -> aus. argparse setzt ohne Zahl den
+    # const-Wert ein, mit Zahl genau diese.
+    assert G.loese_skala(None) == 1.0
+    assert G.loese_skala(G.SLIDE_SHOW_SKALA) == G.SLIDE_SHOW_SKALA
+    assert G.loese_skala(3) == 3.0
+    assert G.loese_skala(0.5) == 0.5
+
+
+def test_loese_skala_lehnt_null_und_negativ_ab():
+    # Nicht kosmetisch: 0 macht jede Schrift und jede Linie unsichtbar,
+    # negativ dreht saemtliche Raender nach innen. Beides wuerde ein Bild
+    # erzeugen statt zu scheitern -- der schlechteste Ausgang.
+    for schlecht in (0, 0.0, -1, -2.5):
+        try:
+            G.loese_skala(schlecht)
+        except ValueError:
+            continue
+        raise AssertionError(f"{schlecht!r} haette abgelehnt werden muessen")
+
+
+def test_slide_show_verdickt_auch_die_linien():
+    # Eine 1-Pixel-Kurve neben 24-Punkt-Schrift verschwindet auf einer
+    # Projektionsflaeche -- das groessere Bild waere sonst schlechter lesbar
+    # als das kleine. Gemessen an der Nulllinie (width=2 bei Skala 1), deren
+    # Farbe im Plot sonst nirgends vorkommt.
+    from PIL import Image
+    e = G.auswerten(_beispielfahrten())
+    dicken = {}
+    ziele = []
+    try:
+        for skala in (1.0, G.SLIDE_SHOW_SKALA, 3.0):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert G.zeichne_plot(e, ziel, breite=1200, hoehe=700,
+                                  skala=skala) is True
+            with Image.open(ziel) as bild:
+                dicken[skala] = _linien_dicke(bild, (120, 120, 120))
+        assert dicken[1.0] == 2, dicken
+        assert dicken[G.SLIDE_SHOW_SKALA] == round(2 * G.SLIDE_SHOW_SKALA), dicken
+        assert dicken[3.0] == 6, dicken
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_slide_show_verdickt_auch_die_kurven_nicht_nur_die_nulllinie():
+    # Die Nulllinie allein zu messen reicht nicht: sie ist EINE von fuenf
+    # Stellen mit einer Strichstaerke, und eine vergessene davon faellt sonst
+    # nicht auf. Hier die Mittelwertkurve (width=3), gezaehlt in Pixeln ihrer
+    # eigenen Farbe -- die Datenflaeche bleibt gleich gross, der Kurvenweg
+    # also gleich lang, ein Zuwachs kann nur aus der Strichstaerke kommen.
+    from PIL import Image
+    e = G.auswerten(_beispielfahrten(anzahl=3))
+    pixel = {}
+    ziele = []
+    try:
+        for skala in (1.0, G.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert G.zeichne_plot(e, ziel, breite=1200, hoehe=700,
+                                  skala=skala) is True
+            with Image.open(ziel) as bild:
+                pixel[skala] = _text_tinte_farbe(bild, G._MITTEL_FARBE)
+        assert pixel[1.0] > 0
+        # width 3 -> round(3 * 2.2) = 7. Schranke 1.8 statt 7/3, damit sie
+        # nicht an der Rasterung einzelner Kurvenstuecke haengt; eine nicht
+        # mitskalierte Kurve laege bei ~1.0.
+        verhaeltnis = pixel[G.SLIDE_SHOW_SKALA] / pixel[1.0]
+        assert verhaeltnis > 1.8, (pixel, verhaeltnis)
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def _text_tinte_farbe(bild, farbe):
+    """Wie viele Pixel genau diese Farbe tragen."""
+    px = bild.load()
+    w, h = bild.size
+    return sum(1 for y in range(h) for x in range(w) if px[x, y] == farbe)
+
+
+def test_slide_show_faktor_ist_frei_waehlbar():
+    # Der Faktor muss wirklich durchschlagen und nicht auf den Default
+    # zurueckfallen: ein groesserer Faktor heisst groessere Leinwand UND
+    # dickere Linien.
+    from PIL import Image
+    e = G.auswerten(_beispielfahrten())
+    ziele = []
+    try:
+        werte = {}
+        for skala in (2.0, 4.0):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert G.zeichne_plot(e, ziel, breite=1200, hoehe=700,
+                                  skala=skala) is True
+            with Image.open(ziel) as bild:
+                werte[skala] = (bild.size[0],
+                                _linien_dicke(bild, (120, 120, 120)))
+        assert werte[4.0][0] > werte[2.0][0], werte      # Leinwand
+        assert werte[4.0][1] > werte[2.0][1], werte      # Strichstaerke
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_cli_slide_show_nimmt_einen_faktor_entgegen():
+    from PIL import Image
+    verzeichnis = tempfile.mkdtemp()
+    rng = random.Random(5)
+    pfad = os.path.join(verzeichnis, "fahrt.jsonl")
+    with open(pfad, "w", encoding="utf-8") as datei:
+        for i in range(150):
+            datei.write(json.dumps({
+                "event": "position",
+                "x": 3.0 + rng.gauss(0, 0.02),
+                "y": -90.0 + i * 180.0 / 149.0}) + "\n")
+
+    groessen = {}
+    for marke, zusatz in (("default", ["--slide-show"]),
+                          ("faktor4", ["--slide-show", "4"])):
+        ziel = os.path.join(verzeichnis, f"{marke}.png")
+        p = _cli(pfad, "--png", ziel, *zusatz)
+        assert p.returncode == 0, p.stderr
+        with Image.open(ziel) as bild:
+            groessen[marke] = bild.size
+    assert groessen["faktor4"][0] > groessen["default"][0], groessen
+
+
+def test_cli_slide_show_lehnt_einen_faktor_von_null_ab():
+    verzeichnis = tempfile.mkdtemp()
+    pfad = os.path.join(verzeichnis, "fahrt.jsonl")
+    with open(pfad, "w", encoding="utf-8") as datei:
+        for i in range(50):
+            datei.write(json.dumps({"event": "position", "x": 3.0,
+                                    "y": float(i)}) + "\n")
+    for schlecht in ("0", "-2"):
+        p = _cli(pfad, "--slide-show", schlecht, "--kein-plot")
+        assert p.returncode != 0, f"--slide-show {schlecht} wurde angenommen"
+        assert "slide-show" in (p.stderr + p.stdout)
+
+
 def test_cli_slide_show_schreibt_ein_groesseres_bild():
     from PIL import Image
     verzeichnis = tempfile.mkdtemp()

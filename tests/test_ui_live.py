@@ -698,6 +698,53 @@ def test_view_route_liefert_view_html():
     assert html == (_STATIC / "view.html").read_text(encoding="utf-8")
 
 
+# ============================================== Herunterfahren schliesst den Tab
+def test_herunterfahren_versucht_den_tab_zu_schliessen():
+    """Der Knopf soll den Server beenden UND diesen Tab schliessen.
+
+    Geprueft an der Verdrahtung im HTML, nicht im Browser: dieses Projekt
+    faehrt keine Browser-Automatisierung, und die drei Dinge, die hier
+    schiefgehen koennen, sind alle im Quelltext sichtbar -- der
+    /api/shutdown-Aufruf, der window.close()-Versuch danach, und der
+    Endzustand als Rueckfall."""
+    quelle = (_STATIC / "index.html").read_text(encoding="utf-8")
+    knopf = quelle.split('$("b-shutdown").onclick')[1].split("};")[0]
+    assert '"/api/shutdown"' in knopf, "Server wird nicht mehr beendet"
+    assert "window.close()" in knopf, "Tab wird nicht geschlossen"
+    assert "endzustandAnzeigen" in knopf, "kein Rueckfall, wenn close() nichts tut"
+    # Reihenfolge: erst der Server-Aufruf, dann close(). Andersherum waere
+    # der Tab im Erfolgsfall weg, bevor der POST raus ist -- der Server
+    # liefe weiter.
+    assert knopf.index('"/api/shutdown"') < knopf.index("window.close()")
+
+
+def test_endzustand_ersetzt_die_seite_statt_sie_tot_stehen_zu_lassen():
+    """Wenn der Browser das Schliessen verweigert (der Normalfall bei einem
+    Tab, den webbrowser.open() geoeffnet hat), darf keine Seite stehen
+    bleiben, deren Anzeigen weiter auf einen Server zeigen, den es nicht
+    mehr gibt."""
+    quelle = (_STATIC / "index.html").read_text(encoding="utf-8")
+    fn = quelle.split("function endzustandAnzeigen()")[1].split("\n}")[0]
+    assert "document.body.innerHTML" in fn, "Seite wird nicht ersetzt"
+    assert "heruntergefahren" in fn.lower()
+    assert 'class="ende"' in fn
+    # Der Stil dazu muss auch wirklich existieren, sonst steht der Text
+    # unformatiert oben links in der Ecke.
+    assert ".ende{" in quelle
+
+
+def test_websocket_verbindet_nach_dem_herunterfahren_nicht_neu():
+    """Die Wiederverbindung alle 1,5 s ist richtig, solange der Server nur
+    neu startet. Nach einem bewussten Herunterfahren ist sie falsch: sie
+    klopft endlos vergeblich an und wuerde den Endzustand ueberschreiben."""
+    quelle = (_STATIC / "index.html").read_text(encoding="utf-8")
+    onclose = quelle.split("ws.onclose = () => {")[1].split("  };")[0]
+    assert "if (herunterfahren) return;" in onclose
+    assert onclose.index("if (herunterfahren) return;") \
+           < onclose.index("setTimeout(connect,"), \
+        "der Wiederverbindungs-Timer wird trotzdem noch gesetzt"
+
+
 def test_coverage_view_js_route_liefert_die_datei_mit_dem_richtigen_typ():
     from printhead.ui.server import coverage_view_js
 

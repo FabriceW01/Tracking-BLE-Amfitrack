@@ -885,6 +885,120 @@ def test_slide_show_skaliert_auch_das_legendenraster():
                 os.unlink(ziel)
 
 
+def _farb_pixel(bild, farbe):
+    """Wie viele Pixel diese Farbe tragen. Die Datenflaeche behaelt bei
+    --slide-show ihre Groesse, der Kurvenverlauf ist also gleich lang --
+    mehr Pixel derselben Farbe koennen dann nur aus groesserer Strichstaerke
+    kommen."""
+    px = bild.load()
+    w, h = bild.size
+    return sum(1 for y in range(h) for x in range(w) if px[x, y] == farbe)
+
+
+def test_loese_skala_uebersetzt_das_flag():
+    assert R.loese_skala(None) == 1.0
+    assert R.loese_skala(R.SLIDE_SHOW_SKALA) == R.SLIDE_SHOW_SKALA
+    assert R.loese_skala(3) == 3.0
+    assert R.loese_skala(0.5) == 0.5
+
+
+def test_loese_skala_lehnt_null_und_negativ_ab():
+    for schlecht in (0, 0.0, -1, -2.5):
+        try:
+            R.loese_skala(schlecht)
+        except ValueError:
+            continue
+        raise AssertionError(f"{schlecht!r} haette abgelehnt werden muessen")
+
+
+def test_slide_show_verdickt_auch_die_linien():
+    # Gemessen an der p99-Kurve (width=3 bei Skala 1), der dicksten der drei.
+    # Die Datenflaeche bleibt gleich gross, der Kurvenweg also gleich lang --
+    # der Zuwachs an gruenen Pixeln kommt allein aus der Strichstaerke.
+    from PIL import Image
+    e = _rausch_ergebnis()
+    pixel = {}
+    ziele = []
+    try:
+        for skala in (1.0, R.SLIDE_SHOW_SKALA):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert R.zeichne_plot(e, ziel, breite=1000, hoehe=620,
+                                  skala=skala) is True
+            with Image.open(ziel) as bild:
+                pixel[skala] = _farb_pixel(bild, R._FARBEN_KENNZAHL[2])
+        assert pixel[1.0] > 0
+        # width 3 -> round(3 * 2.2) = 7, also gut das Doppelte. Die Schranke
+        # liegt bei 1.8 statt bei 7/3, damit sie nicht an der Rasterung
+        # einzelner Kurvenstuecke haengt; eine nicht mitskalierte Linie
+        # laege bei ~1.0 und faellt klar durch.
+        verhaeltnis = pixel[R.SLIDE_SHOW_SKALA] / pixel[1.0]
+        assert verhaeltnis > 1.8, (pixel, verhaeltnis)
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_slide_show_faktor_ist_frei_waehlbar():
+    from PIL import Image
+    e = _rausch_ergebnis()
+    ziele = []
+    try:
+        werte = {}
+        for skala in (2.0, 4.0):
+            ziel = tempfile.mktemp(suffix=".png")
+            ziele.append(ziel)
+            assert R.zeichne_plot(e, ziel, breite=1000, hoehe=620,
+                                  skala=skala) is True
+            with Image.open(ziel) as bild:
+                werte[skala] = (bild.size[0],
+                                _farb_pixel(bild, R._FARBEN_KENNZAHL[2]))
+        assert werte[4.0][0] > werte[2.0][0], werte      # Leinwand
+        assert werte[4.0][1] > werte[2.0][1], werte      # Strichstaerke
+    finally:
+        for ziel in ziele:
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+
+
+def test_cli_slide_show_nimmt_einen_faktor_entgegen():
+    from PIL import Image
+    verzeichnis = tempfile.mkdtemp()
+    rng = random.Random(4)
+    dateien = []
+    for abstand in (10, 20, 30):
+        pfad = os.path.join(verzeichnis, f"rausch_d{abstand}.jsonl")
+        with open(pfad, "w", encoding="utf-8") as datei:
+            for _ in range(200):
+                datei.write(json.dumps({
+                    "event": "position", "x": rng.gauss(0, abstand * 0.005),
+                    "y": 0.0, "z": 0.0}) + "\n")
+        dateien.append(pfad)
+
+    groessen = {}
+    for marke, zusatz in (("default", ["--slide-show"]),
+                          ("faktor4", ["--slide-show", "4"])):
+        ziel = os.path.join(verzeichnis, f"{marke}.png")
+        p = _lauf(W_RAUSCH, *dateien, "--png", ziel, *zusatz)
+        assert p.returncode == 0, p.stderr
+        with Image.open(ziel) as bild:
+            groessen[marke] = bild.size
+    assert groessen["faktor4"][0] > groessen["default"][0], groessen
+
+
+def test_cli_slide_show_lehnt_einen_faktor_von_null_ab():
+    pfad = _schreib('{"event":"position","x":1,"y":2,"z":3}\n'
+                    '{"event":"position","x":1.1,"y":2.1,"z":3.1}\n')
+    try:
+        for schlecht in ("0", "-2"):
+            p = _lauf(W_RAUSCH, pfad, "--slide-show", schlecht, "--kein-plot")
+            assert p.returncode != 0, f"--slide-show {schlecht} angenommen"
+            assert "slide-show" in (p.stderr + p.stdout)
+    finally:
+        os.unlink(pfad)
+
+
 def test_cli_slide_show_schreibt_ein_groesseres_bild():
     from PIL import Image
     verzeichnis = tempfile.mkdtemp()

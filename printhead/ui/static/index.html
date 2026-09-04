@@ -109,6 +109,12 @@
   .cmdline{font:12px var(--mono);color:var(--dim);background:#0b0e12;padding:8px 10px;
            border-radius:6px;margin-top:10px;word-break:break-all}
   .hint{font-size:12px;color:var(--dim);margin:8px 0 0}
+  /* Endzustand nach dem Herunterfahren -- ersetzt die ganze Seite, damit
+     keine Anzeige mehr auf einen Server zeigt, den es nicht mehr gibt. */
+  .ende{max-width:520px;margin:18vh auto 0;padding:0 24px;text-align:center}
+  .ende h2{margin:0 0 10px;font-size:20px}
+  .ende p{margin:0 0 8px;font-size:13.5px}
+  .ende p.dim{color:var(--dim);font-size:12.5px}
   .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 </style>
 </head>
@@ -570,6 +576,10 @@ function connect(){
       covNote("unvollständig — Verbindung war unterbrochen; "
               + "maßgeblich ist das Bild unten nach dem Durchgang", true);
     }
+    /* Nach dem Herunterfahren gibt es nichts mehr, wozu man zurueckkoennte:
+       eine weiterlaufende Wiederverbindung wuerde nur alle 1,5 s vergeblich
+       anklopfen und dabei den Endzustand ueberschreiben. */
+    if (herunterfahren) return;
     setTimeout(connect, 1500);          // Server neu gestartet -> wieder rein
   };
   ws.onmessage = ev => {
@@ -636,11 +646,42 @@ $("b-print").onclick = async () => {
   if (!r.ok) log("Fehler: " + r.error, "err");
 };
 $("b-stop").onclick = () => post("/api/stop");
+/* Herunterfahren: Server beenden UND diesen Tab schliessen.
+
+   window.close() darf einen Tab nur schliessen, wenn ein Skript ihn geoeffnet
+   hat. Diese Seite kommt aber ueblicherweise aus `python -m printhead.ui`,
+   das den Browser per webbrowser.open() startet -- fuer den Browser ist das
+   eine ganz normale Benutzernavigation, und Chrome wie Firefox verweigern das
+   Schliessen dann (Firefox: dom.allow_scripts_to_close_windows, Default aus).
+   Der Aufruf wirft dabei keinen Fehler, er tut schlicht nichts.
+
+   Deshalb beides: erst window.close() versuchen -- das greift wirklich, wenn
+   die Seite per Skript oder aus einem anderen Tab heraus geoeffnet wurde --
+   und wenn der Tab kurz darauf noch lebt, ihn in einen sauberen Endzustand
+   versetzen. Vorher haette hier eine tote Seite gestanden, deren Anzeigen
+   endlos weiter auf einen Server zeigen, den es nicht mehr gibt. */
+let herunterfahren = false;
+
+function endzustandAnzeigen(){
+  document.title = "Printhead — beendet";
+  document.body.innerHTML =
+      '<div class="ende">'
+    + '<h2>Server heruntergefahren</h2>'
+    + '<p>Laufende Aktion und Sensorstrom wurden sauber beendet.</p>'
+    + '<p class="dim">Dieser Tab liess sich nicht automatisch schliessen — '
+    + 'Browser erlauben das nur fuer Tabs, die ein Skript geoeffnet hat. '
+    + 'Du kannst ihn jetzt schliessen.</p>'
+    + '</div>';
+}
+
 $("b-shutdown").onclick = async () => {
   if (!confirm("Server herunterfahren? Laufende Aktion und Sensorstrom werden "
                + "sauber beendet.")) return;
   log("· Herunterfahren …");
+  herunterfahren = true;               // haelt die WS-Wiederverbindung an
   try { await post("/api/shutdown"); } catch(e){}
+  window.close();
+  setTimeout(endzustandAnzeigen, 300);
 };
 $("b-sensor").onclick = async () => {
   const running = $("d-sensor").classList.contains("on");
