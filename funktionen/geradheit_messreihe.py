@@ -748,7 +748,28 @@ _REIHE_FARBE = (150, 150, 150)
 # Schrifthöhe zu Bildbreite -- ein größeres Bild mit proportional größerer
 # Schrift sähe an der Wand exakt gleich aus. Deshalb wächst hier die Schrift
 # gegenüber der Datenfläche, nicht mit ihr.
+#
+# Der Wert ist der DEFAULT von --slide-show; ein Faktor darf direkt dahinter
+# angegeben werden (--slide-show 3).
 SLIDE_SHOW_SKALA = 2.2
+
+
+def loese_skala(wert):
+    """``--slide-show`` in einen Skalierungsfaktor übersetzen.
+
+    ``None`` heißt "Flag nicht angegeben" -> 1.0, also unverändertes
+    Aussehen. Ohne Zahl dahinter setzt argparse ``SLIDE_SHOW_SKALA`` ein;
+    mit Zahl kommt genau die an. Ein Faktor <= 0 wird abgelehnt statt still
+    zu einem leeren oder gespiegelten Bild zu führen: 0 macht jede Schrift
+    und jede Linie unsichtbar, negativ dreht sämtliche Ränder nach innen.
+    """
+    if wert is None:
+        return 1.0
+    wert = float(wert)
+    if wert <= 0:
+        raise ValueError(
+            f"--slide-show braucht einen Faktor groesser 0, nicht {wert:g}")
+    return wert
 
 # Grundmaße der Ränder bei SKALA 1. Sie halten ausschließlich Text
 # (Achsenbeschriftung und Achsentitel) und wachsen deshalb mit der Schrift.
@@ -789,6 +810,15 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700, skala=1.0):
     def skal(mass):
         """Ein an der Schrift hängendes Maß auf die gewählte Skalierung."""
         return mass * skala
+
+    def strich(breite_px):
+        """Eine Linienstärke auf die gewählte Skalierung, mindestens 1 Pixel.
+
+        Eine 1-Pixel-Kurve verschwindet auf einer Projektionsfläche neben
+        24-Punkt-Schrift; die Linien müssen mitwachsen, sonst wird der Plot
+        durch das größere Bild sogar schlechter lesbar als vorher. Gerundet
+        auf ganze Pixel, weil PIL nur ganzzahlige Stärken zeichnet."""
+        return max(1, int(round(breite_px * skala)))
 
     # rand_r braucht keinen Platz mehr für eine Legende daneben -- die
     # Legende sitzt jetzt als eigener Kasten INNERHALB der Plotfläche
@@ -883,11 +913,12 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700, skala=1.0):
 
     # --- Nulllinie und Düsenreihen-Marken ---
     zeichnung.line([(rand_l, py(0.0)), (rand_l + pl_b, py(0.0))],
-                   fill=(120, 120, 120), width=2)
+                   fill=(120, 120, 120), width=strich(2))
     for vorzeichen in (1, -1):
         y = py(vorzeichen * DUESENTEILUNG_MM)
         if rand_o <= y <= rand_o + pl_h:
-            _gestrichelt(zeichnung, rand_l, y, rand_l + pl_b, _REIHE_FARBE)
+            _gestrichelt(zeichnung, rand_l, y, rand_l + pl_b, _REIHE_FARBE,
+                         strich=skal(6), luecke=skal(5), breite=strich(1))
 
     # --- eine Kurve je Fahrt ---
     for index, fahrt in enumerate(ergebnis["fahrten"]):
@@ -895,7 +926,7 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700, skala=1.0):
         punkte = [(px(e), py(a)) for e, a in zip(fahrt["entlang"],
                                                  fahrt["abweichung"])]
         if len(punkte) >= 2:
-            zeichnung.line(punkte, fill=farbe, width=1)
+            zeichnung.line(punkte, fill=farbe, width=strich(1))
 
     # --- Mittelwertkurve ---
     if ergebnis["anzahl_fahrten"] >= 2:
@@ -903,7 +934,7 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700, skala=1.0):
                         in zip(ergebnis["bin_mitten"], ergebnis["mittel"])
                         if m is not None]
         if len(mittelpunkte) >= 2:
-            zeichnung.line(mittelpunkte, fill=_MITTEL_FARBE, width=3)
+            zeichnung.line(mittelpunkte, fill=_MITTEL_FARBE, width=strich(3))
 
     # --- Achsenrahmen ---
     zeichnung.rectangle([rand_l, rand_o, rand_l + pl_b, rand_o + pl_h],
@@ -952,16 +983,17 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700, skala=1.0):
     for art, farbe, text in eintraege:
         if art == "linie":
             zeichnung.line([(lx, ly + skal(6)), (lx + swatch_breite, ly + skal(6))],
-                           fill=farbe, width=2)
+                           fill=farbe, width=strich(2))
         elif art == "linie_dick":
             zeichnung.line([(lx, ly + skal(6)), (lx + swatch_breite, ly + skal(6))],
-                           fill=farbe, width=3)
+                           fill=farbe, width=strich(3))
         elif art == "kasten":
             zeichnung.rectangle(
                 [lx, ly + skal(2), lx + swatch_breite, ly + skal(10)],
                 fill=farbe, outline=(230, 190, 190))
         elif art == "gestrichelt":
-            _gestrichelt(zeichnung, lx, ly + skal(6), lx + swatch_breite, farbe)
+            _gestrichelt(zeichnung, lx, ly + skal(6), lx + swatch_breite, farbe,
+                         strich=skal(6), luecke=skal(5), breite=strich(1))
         zeichnung.text((lx + swatch_breite + skal(6), ly), text,
                        fill=(40, 40, 40), font=schrift_klein)
         ly += zeilenhoehe
@@ -970,10 +1002,17 @@ def zeichne_plot(ergebnis, pfad_png, breite=1200, hoehe=700, skala=1.0):
     return True
 
 
-def _gestrichelt(zeichnung, x1, y, x2, farbe, strich=6, luecke=5):
+def _gestrichelt(zeichnung, x1, y, x2, farbe, strich=6, luecke=5, breite=1):
+    """Waagerechte gestrichelte Linie.
+
+    Strich-/Lückenlänge sind Parameter, damit ein vergrößerter Plot sie
+    mitskalieren kann: bliebe das 6/5-Raster fest, während die Linie dicker
+    wird, verschmölzen die Striche optisch zu einer durchgezogenen Linie und
+    die Marke wäre nicht mehr von den Datenkurven zu unterscheiden."""
     x = x1
     while x < x2:
-        zeichnung.line([(x, y), (min(x + strich, x2), y)], fill=farbe)
+        zeichnung.line([(x, y), (min(x + strich, x2), y)], fill=farbe,
+                       width=breite)
         x += strich + luecke
 
 
@@ -1022,16 +1061,24 @@ def main(argv=None):
     ap.add_argument("--y-max", type=float, default=Y_BEREICH_MAX_MM,
                     help=f"Obere Grenze des benutzten y-Bereichs in mm "
                         f"(Default {Y_BEREICH_MAX_MM:g})")
-    ap.add_argument("--slide-show", action="store_true",
-                    help=f"Schrift für die Projektion deutlich vergrößern "
-                         f"(Faktor {SLIDE_SHOW_SKALA:g}) -- Achsen- und "
-                         f"Legendentext, samt der Ränder und Abstände, die "
-                         f"daran hängen. Die Datenfläche behält die über "
-                         f"--breite/--hoehe angeforderte Größe; die Leinwand "
-                         f"wächst um den Zuwachs der Ränder.")
+    ap.add_argument("--slide-show", nargs="?", type=float, metavar="FAKTOR",
+                    const=SLIDE_SHOW_SKALA, default=None,
+                    help=f"Schrift und Linien für die Projektion vergrößern. "
+                         f"Ohne Zahl Faktor {SLIDE_SHOW_SKALA:g}, mit Zahl "
+                         f"genau diese (z.B. --slide-show 3). Betrifft Achsen- "
+                         f"und Legendentext, die Ränder und Abstände, die "
+                         f"daran hängen, und die Strichstärke aller "
+                         f"gezeichneten Linien. Die Datenfläche behält die "
+                         f"über --breite/--hoehe angeforderte Größe; die "
+                         f"Leinwand wächst um den Zuwachs der Ränder.")
     ap.add_argument("--kein-plot", action="store_true",
                     help="Nur den Textbericht ausgeben, keine PNG schreiben")
     args = ap.parse_args(sys.argv[1:] if argv is None else argv)
+
+    try:
+        skala = loese_skala(args.slide_show)
+    except ValueError as fehler:
+        ap.error(str(fehler))
 
     # Platzhalter selbst auflösen: die Windows-Eingabeaufforderung expandiert
     # *.jsonl nicht, anders als eine Unix-Shell.
@@ -1078,7 +1125,6 @@ def main(argv=None):
 
     if not args.kein_plot and "fehler" not in ergebnis:
         try:
-            skala = SLIDE_SHOW_SKALA if args.slide_show else 1.0
             if zeichne_plot(ergebnis, args.png, args.breite, args.hoehe,
                             skala):
                 print(f"\n  Grafik geschrieben: {args.png}")
